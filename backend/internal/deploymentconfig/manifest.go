@@ -1,0 +1,393 @@
+package deploymentconfig
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/util/validation"
+)
+
+const (
+	// MaxManifestBytes keeps the editor endpoint bounded even when it is backed
+	// by the in-memory store.
+	MaxManifestBytes = 512 << 10
+	maxResources     = 100
+)
+
+var ErrInvalidManifest = errors.New("invalid kubernetes deployment manifest")
+
+type Resource struct {
+	APIVersion string `json:"api_version"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
+}
+
+type Validation struct {
+	Format    string
+	Resources []Resource
+}
+
+func NormalizeFormat(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "yaml", "yml":
+		return "yaml", nil
+	case "json":
+		return "json", nil
+	default:
+		return "", fmt.Errorf("%w: format must be yaml or json", ErrInvalidManifest)
+	}
+}
+
+func DetectFormat(manifest string) string {
+	trimmed := strings.TrimSpace(manifest)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return "json"
+	}
+	return "yaml"
+}
+
+// Validate parses a Kubernetes YAML/JSON stream and checks the identity fields
+// needed by the publisher. It intentionally does not try to reproduce every
+// Kubernetes OpenAPI rule; the target cluster remains the final validator.
+func Validate(manifest, expectedNamespace string) (Validation, error) {
+	if len([]byte(manifest)) > MaxManifestBytes {
+		return Validation{}, fmt.Errorf("%w: manifest is larger than %d bytes", ErrInvalidManifest, MaxManifestBytes)
+	}
+	values, err := decodeDocuments(manifest)
+	if err != nil {
+		return Validation{}, err
+	}
+	objects, err := flattenObjects(values)
+	if err != nil {
+		return Validation{}, err
+	}
+	if len(objects) == 0 {
+		return Validation{}, fmt.Errorf("%w: at least one resource is required", ErrInvalidManifest)
+	}
+	if len(objects) > maxResources {
+		return Validation{}, fmt.Errorf("%w: no more than %d resources are allowed", ErrInvalidManifest, maxResources)
+	}
+
+	expectedNamespace = strings.TrimSpace(expectedNamespace)
+	if expectedNamespace != "" && len(validation.IsDNS1123Label(expectedNamespace)) > 0 {
+		return Validation{}, fmt.Errorf("%w: project namespace %q is invalid", ErrInvalidManifest, expectedNamespace)
+	}
+
+	result := Validation{Format: DetectFormat(manifest), Resources: make([]Resource, 0, len(objects))}
+	seen := make(map[string]struct{}, len(objects))
+	for index, object := range objects {
+		apiVersion, ok := stringField(object, "apiVersion")
+		if !ok || apiVersion == "" {
+			return Validation{}, resourceError(index, "apiVersion is required")
+		}
+		kind, ok := stringField(object, "kind")
+		if !ok || kind == "" {
+			return Validation{}, resourceError(index, "kind is required")
+		}
+		metadata, ok := mapField(object, "metadata")
+		if !ok {
+			return Validation{}, resourceError(index, "metadata is required")
+		}
+		name, ok := stringField(metadata, "name")
+		if !ok || name == "" {
+			return Validation{}, resourceError(index, "metadata.name is required")
+		}
+		if len(validation.IsDNS1123Subdomain(name)) > 0 {
+			return Validation{}, resourceError(index, fmt.Sprintf("metadata.name %q is not a valid Kubernetes name", name))
+		}
+		namespace, _ := stringField(metadata, "namespace")
+		if expectedNamespace != "" && namespace != "" && namespace != expectedNamespace {
+			return Validation{}, resourceError(index, fmt.Sprintf("namespace %q must match project namespace %q", namespace, expectedNamespace))
+		}
+		key := strings.Join([]string{apiVersion, kind, namespace, name}, "\x00")
+		if _, exists := seen[key]; exists {
+			return Validation{}, resourceError(index, fmt.Sprintf("duplicate resource %s/%s", kind, name))
+		}
+		seen[key] = struct{}{}
+		result.Resources = append(result.Resources, Resource{APIVersion: apiVersion, Kind: kind, Name: name, Namespace: namespace})
+	}
+	return result, nil
+}
+
+// Convert validates first and then renders the same resource documents in the
+// requested format. Multiple YAML documents become a JSON array so no resource
+// is silently lost when the user switches the editor mode.
+func Convert(manifest, targetFormat, expectedNamespace string) (string, Validation, error) {
+	format, err := NormalizeFormat(targetFormat)
+	if err != nil {
+		return "", Validation{}, err
+	}
+	validated, err := Validate(manifest, expectedNamespace)
+	if err != nil {
+		return "", Validation{}, err
+	}
+	values, err := decodeDocuments(manifest)
+	if err != nil {
+		return "", Validation{}, err
+	}
+	objects, err := flattenObjects(values)
+	if err != nil {
+		return "", Validation{}, err
+	}
+	if format == "json" {
+		var value any = objects[0]
+		if len(objects) > 1 {
+			value = objects
+		}
+		encoded, marshalErr := json.MarshalIndent(value, "", "  ")
+		if marshalErr != nil {
+			return "", Validation{}, fmt.Errorf("%w: cannot render JSON: %v", ErrInvalidManifest, marshalErr)
+		}
+		validated.Format = "json"
+		return string(encoded) + "\n", validated, nil
+	}
+
+	var builder strings.Builder
+	for index, object := range objects {
+		if index > 0 {
+			builder.WriteString("---\n")
+		}
+		encoded, marshalErr := yaml.Marshal(object)
+		if marshalErr != nil {
+			return "", Validation{}, fmt.Errorf("%w: cannot render YAML: %v", ErrInvalidManifest, marshalErr)
+		}
+		builder.Write(encoded)
+	}
+	validated.Format = "yaml"
+	return builder.String(), validated, nil
+}
+
+// RetargetNamespace rewrites namespaced Kubernetes resources for an
+// environment target. The project keeps one native manifest, while the
+// selected target supplies the namespace at release time.
+func RetargetNamespace(manifest, namespace string) (string, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" || len(validation.IsDNS1123Label(namespace)) != 0 {
+		return "", fmt.Errorf("%w: target namespace is invalid", ErrInvalidManifest)
+	}
+	values, err := decodeDocuments(manifest)
+	if err != nil {
+		return "", err
+	}
+	objects, err := flattenObjects(values)
+	if err != nil {
+		return "", err
+	}
+	for _, object := range objects {
+		kind, _ := stringField(object, "kind")
+		if clusterScopedKinds[strings.TrimSpace(kind)] {
+			continue
+		}
+		metadata, ok := mapField(object, "metadata")
+		if !ok {
+			continue
+		}
+		metadata["namespace"] = namespace
+	}
+	format := DetectFormat(manifest)
+	if format == "json" {
+		var value any = objects[0]
+		if len(objects) > 1 {
+			value = objects
+		}
+		encoded, marshalErr := json.MarshalIndent(value, "", "  ")
+		if marshalErr != nil {
+			return "", fmt.Errorf("%w: cannot render JSON: %v", ErrInvalidManifest, marshalErr)
+		}
+		return string(encoded) + "\n", nil
+	}
+	var builder strings.Builder
+	for index, object := range objects {
+		if index > 0 {
+			builder.WriteString("---\n")
+		}
+		encoded, marshalErr := yaml.Marshal(object)
+		if marshalErr != nil {
+			return "", fmt.Errorf("%w: cannot render YAML: %v", ErrInvalidManifest, marshalErr)
+		}
+		builder.Write(encoded)
+	}
+	return builder.String(), nil
+}
+
+var clusterScopedKinds = map[string]bool{
+	"APIService":                     true,
+	"ClusterRole":                    true,
+	"ClusterRoleBinding":             true,
+	"CustomResourceDefinition":       true,
+	"Namespace":                      true,
+	"Node":                           true,
+	"PersistentVolume":               true,
+	"PersistentVolumeClaim":          false,
+	"PodSecurityPolicy":              true,
+	"PriorityClass":                  true,
+	"StorageClass":                   true,
+	"MutatingWebhookConfiguration":   true,
+	"ValidatingWebhookConfiguration": true,
+}
+
+func DefaultManifest(projectName, namespace string, replicas, port int) string {
+	name := dnsName(projectName, "app")
+	namespace = dnsName(namespace, "default")
+	if replicas < 1 {
+		replicas = 1
+	}
+	if port < 1 || port > 65535 {
+		port = 8080
+	}
+	return fmt.Sprintf(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app.kubernetes.io/name: %s
+    cicd.yuebuy.com/managed: "true"
+spec:
+  replicas: %d
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: %s
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: %s
+    spec:
+      containers:
+        - name: app
+          image: example.invalid/%s:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: %d
+          env:
+            - name: CICD_MANAGED
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app.kubernetes.io/name: %s
+spec:
+  selector:
+    app.kubernetes.io/name: %s
+  ports:
+    - name: http
+      port: %d
+      targetPort: http
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s-config
+  namespace: %s
+data:
+  APP_ENV: dev
+`, name, namespace, name, replicas, name, name, name, port, name, namespace, name, name, port, name, namespace)
+}
+
+func decodeDocuments(manifest string) ([]any, error) {
+	if strings.TrimSpace(manifest) == "" {
+		return nil, fmt.Errorf("%w: manifest cannot be empty", ErrInvalidManifest)
+	}
+	decoder := yaml.NewDecoder(strings.NewReader(manifest))
+	values := make([]any, 0, 4)
+	for {
+		var node yaml.Node
+		err := decoder.Decode(&node)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: YAML syntax error: %v", ErrInvalidManifest, err)
+		}
+		if len(node.Content) == 0 {
+			continue
+		}
+		root := node.Content[0]
+		var value any
+		if err := root.Decode(&value); err != nil {
+			return nil, fmt.Errorf("%w: document cannot be decoded: %v", ErrInvalidManifest, err)
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func flattenObjects(values []any) ([]map[string]any, error) {
+	objects := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if list, ok := value.([]any); ok {
+			for _, item := range list {
+				object, ok := item.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("%w: every JSON array item must be an object", ErrInvalidManifest)
+				}
+				objects = append(objects, object)
+			}
+			continue
+		}
+		object, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%w: each document must be an object", ErrInvalidManifest)
+		}
+		objects = append(objects, object)
+	}
+	return objects, nil
+}
+
+func mapField(source map[string]any, key string) (map[string]any, bool) {
+	value, ok := source[key]
+	if !ok {
+		return nil, false
+	}
+	result, ok := value.(map[string]any)
+	return result, ok
+}
+
+func stringField(source map[string]any, key string) (string, bool) {
+	value, ok := source[key]
+	if !ok || value == nil {
+		return "", false
+	}
+	text, ok := value.(string)
+	return strings.TrimSpace(text), ok
+}
+
+func resourceError(index int, message string) error {
+	return fmt.Errorf("%w: resource %d: %s", ErrInvalidManifest, index+1, message)
+}
+
+func dnsName(value, fallback string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	lastDash := false
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			builder.WriteRune(char)
+			lastDash = false
+		} else if builder.Len() > 0 && !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	result := strings.Trim(builder.String(), "-")
+	if result == "" || len(result) > 63 || len(validation.IsDNS1123Subdomain(result)) > 0 {
+		return fallback
+	}
+	return result
+}

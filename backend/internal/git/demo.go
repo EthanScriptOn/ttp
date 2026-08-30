@@ -1,0 +1,509 @@
+package git
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+type demoRepository struct {
+	repository Repository
+	branches   map[string][]Commit
+	tags       []Tag
+}
+
+// DemoProvider serves deterministic data and never reads credentials or
+// connects to a Git server.
+type DemoProvider struct {
+	mu            sync.RWMutex
+	repositories  map[string]demoRepository
+	mergeSessions map[string]demoMergeSession
+}
+
+type demoMergeSession struct {
+	request   MergeRequest
+	conflicts []MergeConflict
+}
+
+func NewDemoProvider() *DemoProvider {
+	base := time.Date(2026, time.January, 12, 8, 0, 0, 0, time.UTC)
+	return NewDemoProviderWithRepositories([]DemoRepositoryInput{
+		{
+			Repository: Repository{ID: "demo-repo", Name: "Android Reverse Lab", URL: "https://example.invalid/android-reverse-lab", DefaultBranch: "main"},
+			Branches: map[string][]Commit{
+				"main": {
+					newDemoCommit("a1b2c3d4e5f6", "Add runtime health probe", "demo", base.Add(2*time.Hour)),
+					newDemoCommit("f6e5d4c3b2a1", "Document release workflow", "demo", base),
+				},
+				"release/2026.01": {
+					newDemoCommit("112233445566", "Prepare January release", "demo", base.Add(3*time.Hour)),
+				},
+			},
+			Tags: []Tag{
+				{Name: "v1.0.0", SHA: "a1b2c3d4e5f6"},
+				{Name: "release-2026.01", SHA: "112233445566"},
+			},
+		},
+	})
+}
+
+type DemoRepositoryInput struct {
+	Repository Repository
+	Branches   map[string][]Commit
+	Tags       []Tag
+}
+
+func NewDemoProviderWithRepositories(inputs []DemoRepositoryInput) *DemoProvider {
+	provider := &DemoProvider{repositories: make(map[string]demoRepository, len(inputs)), mergeSessions: make(map[string]demoMergeSession)}
+	for _, input := range inputs {
+		branches := make(map[string][]Commit, len(input.Branches))
+		for name, commits := range input.Branches {
+			branches[name] = append([]Commit(nil), commits...)
+		}
+		provider.repositories[input.Repository.ID] = demoRepository{repository: input.Repository, branches: branches, tags: append([]Tag(nil), input.Tags...)}
+	}
+	return provider
+}
+
+// PrepareMerge creates an isolated, in-memory merge workspace. It mirrors the
+// shape of the production operation while making it impossible for a demo run
+// to modify a real Git server or the protected base branch.
+func (p *DemoProvider) PrepareMerge(ctx context.Context, request MergeRequest) (MergeResult, error) {
+	if err := ctx.Err(); err != nil {
+		return MergeResult{}, err
+	}
+	request = normalizeMergeRequest(request)
+	if request.RepositoryID == "" || request.SourceBranch == "" || request.BaseBranch == "" || request.SelectedSHA == "" {
+		return MergeResult{}, ErrBranchNotFound
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	repository, ok := p.repositories[request.RepositoryID]
+	if !ok {
+		return MergeResult{}, ErrRepositoryNotFound
+	}
+	sourceCommits, sourceOK := repository.branches[request.SourceBranch]
+	baseCommits, baseOK := repository.branches[request.BaseBranch]
+	if !sourceOK || len(sourceCommits) == 0 {
+		return MergeResult{}, ErrBranchNotFound
+	}
+	if !baseOK || len(baseCommits) == 0 {
+		return MergeResult{}, ErrBranchNotFound
+	}
+	if !containsDemoCommit(sourceCommits, request.SelectedSHA) {
+		return MergeResult{}, ErrCommitNotFound
+	}
+	if request.TemporaryBranch == "" {
+		request.TemporaryBranch = "demo-release-prep-" + shortSHA(request.SelectedSHA)
+	}
+	if request.SourceBranch == request.BaseBranch || demoCommitSetContainsAll(sourceCommits, baseCommits) {
+		return MergeResult{TemporaryBranch: request.TemporaryBranch, Status: "ready", HeadSHA: sourceCommits[0].SHA, Message: "演示模式：源分支已经包含基准分支，可以直接发布。"}, nil
+	}
+
+	// The fixture intentionally exposes one realistic file conflict when the
+	// sample release branch is compared with main. This lets the browser flow be
+	// exercised without fabricating a remote repository response at runtime.
+	conflicts := []MergeConflict{{
+		Path:            "deploy/application.yaml",
+		BaseContent:     "replicas: 2\nimageTag: main\n",
+		SourceContent:   "replicas: 1\nimageTag: release\n",
+		ResolvedContent: "replicas: 2\nimageTag: release\n",
+		Status:          "conflict",
+	}}
+	p.mergeSessions[mergeSessionKey(request)] = demoMergeSession{request: request, conflicts: cloneMergeConflicts(conflicts)}
+	return MergeResult{
+		TemporaryBranch: request.TemporaryBranch,
+		Status:          "conflict",
+		Conflicts:       conflicts,
+		Message:         "演示模式：已创建临时发布分支，发现 1 个冲突文件；基准分支保持不变。",
+	}, nil
+}
+
+// ResolveMerge completes a demo merge only after every reported file has a
+// resolution. The resulting temporary branch is added to the in-memory
+// fixture, so a subsequent refresh can show the prepared version.
+func (p *DemoProvider) ResolveMerge(ctx context.Context, request MergeRequest, resolutions []MergeResolution) (MergeResult, error) {
+	if err := ctx.Err(); err != nil {
+		return MergeResult{}, err
+	}
+	request = normalizeMergeRequest(request)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	session, ok := p.mergeSessions[mergeSessionKey(request)]
+	if !ok {
+		return MergeResult{}, ErrBranchNotFound
+	}
+	resolved := make(map[string]string, len(resolutions))
+	for _, item := range resolutions {
+		path := strings.TrimSpace(item.Path)
+		if path == "" {
+			continue
+		}
+		resolved[path] = item.Content
+	}
+	conflicts := cloneMergeConflicts(session.conflicts)
+	for index := range conflicts {
+		content, exists := resolved[conflicts[index].Path]
+		if !exists {
+			return MergeResult{TemporaryBranch: request.TemporaryBranch, Status: "conflict", Conflicts: conflicts, Message: "还有冲突文件没有完成处理。"}, nil
+		}
+		conflicts[index].ResolvedContent = content
+		conflicts[index].Status = "resolved"
+	}
+
+	hashInput := request.RepositoryID + "\x00" + request.SourceBranch + "\x00" + request.BaseBranch + "\x00" + request.SelectedSHA + "\x00" + request.TemporaryBranch
+	for _, item := range conflicts {
+		hashInput += "\x00" + item.Path + "\x00" + item.ResolvedContent
+	}
+	digest := sha256.Sum256([]byte(hashInput))
+	mergeSHA := hex.EncodeToString(digest[:])
+	commit := Commit{SHA: mergeSHA, ShortSHA: shortSHA(mergeSHA), Message: "Prepare release merge", Author: "demo", AuthoredAt: time.Now().UTC()}
+	repository := p.repositories[request.RepositoryID]
+	repository.branches[request.TemporaryBranch] = []Commit{commit}
+	p.repositories[request.RepositoryID] = repository
+	delete(p.mergeSessions, mergeSessionKey(request))
+	return MergeResult{
+		TemporaryBranch: request.TemporaryBranch,
+		Status:          "ready",
+		Conflicts:       conflicts,
+		HeadSHA:         mergeSHA,
+		Message:         "演示模式：冲突已解决，临时发布分支已准备好；main 未被修改，可以继续发布。",
+	}, nil
+}
+
+// IntegrateReleaseToBatch creates the shared integration branch from the
+// batch's frozen main base and adds only the commits selected by this release
+// item. Main is never changed here.
+func (p *DemoProvider) IntegrateReleaseToBatch(ctx context.Context, request BatchBranchRequest) (BatchBranchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return BatchBranchResult{}, err
+	}
+	request.RepositoryID = strings.TrimSpace(request.RepositoryID)
+	request.BatchBranch = strings.TrimSpace(request.BatchBranch)
+	request.BaseBranch = strings.TrimSpace(request.BaseBranch)
+	request.SourceBranch = strings.TrimSpace(request.SourceBranch)
+	request.BaseSHA = strings.TrimSpace(request.BaseSHA)
+	request.CurrentHeadSHA = strings.TrimSpace(request.CurrentHeadSHA)
+	if request.RepositoryID == "" || request.BatchBranch == "" || request.BaseBranch == "" || request.SourceBranch == "" || len(request.SelectedSHAs) == 0 {
+		return BatchBranchResult{}, ErrCommitNotFound
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	repository, ok := p.repositories[request.RepositoryID]
+	if !ok {
+		return BatchBranchResult{}, ErrRepositoryNotFound
+	}
+	baseCommits, baseOK := repository.branches[request.BaseBranch]
+	sourceCommits, sourceOK := repository.branches[request.SourceBranch]
+	if !baseOK || !sourceOK {
+		return BatchBranchResult{}, ErrBranchNotFound
+	}
+	selected, err := selectDemoCommits(sourceCommits, request.SelectedSHAs)
+	if err != nil {
+		return BatchBranchResult{}, err
+	}
+
+	batchCommits, exists := repository.branches[request.BatchBranch]
+	if !exists {
+		batchCommits, err = demoHistoryAt(baseCommits, request.BaseSHA)
+		if err != nil {
+			return BatchBranchResult{}, err
+		}
+	} else if request.CurrentHeadSHA != "" && (len(batchCommits) == 0 || !strings.EqualFold(batchCommits[0].SHA, request.CurrentHeadSHA)) {
+		return BatchBranchResult{Status: "conflict", BatchBranch: request.BatchBranch, HeadSHA: demoHeadSHA(batchCommits), Message: "批次分支已被其他操作更新，请刷新后重试。"}, nil
+	}
+
+	known := demoCommitSHASet(batchCommits)
+	added := make([]Commit, 0, len(selected))
+	for index := len(selected) - 1; index >= 0; index-- {
+		commit := selected[index]
+		key := strings.ToLower(strings.TrimSpace(commit.SHA))
+		if _, duplicate := known[key]; duplicate {
+			continue
+		}
+		added = append([]Commit{commit}, added...)
+		known[key] = struct{}{}
+	}
+	if len(added) == 0 {
+		repository.branches[request.BatchBranch] = batchCommits
+		p.repositories[request.RepositoryID] = repository
+		// The shared branch did not move, but this release still needs its own
+		// immutable checkout version. Using the selected commit keeps that
+		// version reachable in Git instead of incorrectly reusing the shared
+		// batch HEAD.
+		return BatchBranchResult{
+			Status:             "ready",
+			BatchBranch:        request.BatchBranch,
+			HeadSHA:            demoHeadSHA(batchCommits),
+			ReleaseSnapshotSHA: strings.TrimSpace(selected[0].SHA),
+			Message:            "选中的提交已经在当前批次中。",
+		}, nil
+	}
+
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(request.BatchBranch + "\x00" + demoHeadSHA(batchCommits)))
+	for _, commit := range added {
+		_, _ = hash.Write([]byte(commit.SHA + "\x00"))
+	}
+	mergeSHA := hex.EncodeToString(hash.Sum(nil))
+	mergeCommit := Commit{SHA: mergeSHA, ShortSHA: shortSHA(mergeSHA), Message: "Integrate release into " + request.BatchBranch, Author: "cicd-bot", AuthoredAt: time.Now().UTC()}
+	batchCommits = append([]Commit{mergeCommit}, append(added, batchCommits...)...)
+	repository.branches[request.BatchBranch] = batchCommits
+	p.repositories[request.RepositoryID] = repository
+	return BatchBranchResult{
+		Status:             "ready",
+		BatchBranch:        request.BatchBranch,
+		HeadSHA:            mergeSHA,
+		ReleaseSnapshotSHA: mergeSHA,
+		Message:            "选中的提交已加入共享发布批次；main 保持不变。",
+	}, nil
+}
+
+// MergeReleaseToMain updates only the selected release commits in the demo
+// repository. The shared batch branch is never used as the new main head.
+func (p *DemoProvider) MergeReleaseToMain(ctx context.Context, request MainMergeRequest) (MainMergeResult, error) {
+	if err := ctx.Err(); err != nil {
+		return MainMergeResult{}, err
+	}
+	request.RepositoryID = strings.TrimSpace(request.RepositoryID)
+	request.SourceBranch = strings.TrimSpace(request.SourceBranch)
+	request.BaseBranch = strings.TrimSpace(request.BaseBranch)
+	if request.RepositoryID == "" || request.SourceBranch == "" || request.BaseBranch == "" || len(request.SelectedSHAs) == 0 {
+		return MainMergeResult{}, ErrCommitNotFound
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	repository, ok := p.repositories[request.RepositoryID]
+	if !ok {
+		return MainMergeResult{}, ErrRepositoryNotFound
+	}
+	baseCommits, baseOK := repository.branches[request.BaseBranch]
+	sourceCommits, sourceOK := repository.branches[request.SourceBranch]
+	if !baseOK || !sourceOK {
+		return MainMergeResult{}, ErrBranchNotFound
+	}
+	if request.CurrentMainSHA != "" && (len(baseCommits) == 0 || !strings.EqualFold(baseCommits[0].SHA, request.CurrentMainSHA)) {
+		return MainMergeResult{Status: "conflict", HeadSHA: demoHeadSHA(baseCommits), Message: "main 已发生变化，请刷新后重新确认。"}, nil
+	}
+	selected, err := selectDemoCommits(sourceCommits, request.SelectedSHAs)
+	if err != nil {
+		return MainMergeResult{}, err
+	}
+	baseSet := make(map[string]struct{}, len(baseCommits))
+	for _, commit := range baseCommits {
+		baseSet[strings.ToLower(strings.TrimSpace(commit.SHA))] = struct{}{}
+	}
+	next := append([]Commit(nil), baseCommits...)
+	for index := len(selected) - 1; index >= 0; index-- {
+		commit := selected[index]
+		key := strings.ToLower(strings.TrimSpace(commit.SHA))
+		if _, exists := baseSet[key]; exists {
+			continue
+		}
+		next = append([]Commit{commit}, next...)
+		baseSet[key] = struct{}{}
+	}
+	hash := sha256.New()
+	for _, commit := range next {
+		_, _ = hash.Write([]byte(commit.SHA + "\x00"))
+	}
+	_, _ = hash.Write([]byte(request.CurrentMainSHA + "\x00" + request.SourceBranch))
+	mergeSHA := hex.EncodeToString(hash.Sum(nil))
+	mergeCommit := Commit{SHA: mergeSHA, ShortSHA: shortSHA(mergeSHA), Message: "Merge selected TTP release into " + request.BaseBranch, Author: "cicd-bot", AuthoredAt: time.Now().UTC()}
+	repository.branches[request.BaseBranch] = append([]Commit{mergeCommit}, next...)
+	p.repositories[request.RepositoryID] = repository
+	return MainMergeResult{Status: "merged", HeadSHA: mergeSHA, Message: "选中的发布项已合入 " + request.BaseBranch + "；批次中的其他提交没有被带入。"}, nil
+}
+
+func selectDemoCommits(history []Commit, shas []string) ([]Commit, error) {
+	selected := make([]Commit, 0, len(shas))
+	for _, sha := range shas {
+		found := false
+		for _, commit := range history {
+			if strings.EqualFold(strings.TrimSpace(commit.SHA), strings.TrimSpace(sha)) {
+				selected = append(selected, commit)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, ErrCommitNotFound
+		}
+	}
+	return selected, nil
+}
+
+func demoHistoryAt(history []Commit, sha string) ([]Commit, error) {
+	if strings.TrimSpace(sha) == "" {
+		return append([]Commit(nil), history...), nil
+	}
+	for index, commit := range history {
+		if strings.EqualFold(strings.TrimSpace(commit.SHA), strings.TrimSpace(sha)) {
+			return append([]Commit(nil), history[index:]...), nil
+		}
+	}
+	return nil, ErrCommitNotFound
+}
+
+func demoCommitSHASet(commits []Commit) map[string]struct{} {
+	result := make(map[string]struct{}, len(commits))
+	for _, commit := range commits {
+		if sha := strings.ToLower(strings.TrimSpace(commit.SHA)); sha != "" {
+			result[sha] = struct{}{}
+		}
+	}
+	return result
+}
+
+func demoHeadSHA(commits []Commit) string {
+	if len(commits) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(commits[0].SHA)
+}
+
+func normalizeMergeRequest(request MergeRequest) MergeRequest {
+	request.RepositoryID = strings.TrimSpace(request.RepositoryID)
+	request.SourceBranch = strings.TrimSpace(request.SourceBranch)
+	request.BaseBranch = strings.TrimSpace(request.BaseBranch)
+	request.SelectedSHA = strings.TrimSpace(request.SelectedSHA)
+	request.TemporaryBranch = strings.TrimSpace(request.TemporaryBranch)
+	return request
+}
+
+func mergeSessionKey(request MergeRequest) string {
+	return strings.Join([]string{request.RepositoryID, request.SourceBranch, request.BaseBranch, request.SelectedSHA, request.TemporaryBranch}, "\x00")
+}
+
+func containsDemoCommit(commits []Commit, sha string) bool {
+	for _, commit := range commits {
+		if strings.EqualFold(strings.TrimSpace(commit.SHA), strings.TrimSpace(sha)) {
+			return true
+		}
+	}
+	return false
+}
+
+func demoCommitSetContainsAll(source, base []Commit) bool {
+	if len(base) == 0 {
+		return false
+	}
+	set := make(map[string]struct{}, len(source))
+	for _, commit := range source {
+		set[strings.ToLower(strings.TrimSpace(commit.SHA))] = struct{}{}
+	}
+	for _, commit := range base {
+		if _, ok := set[strings.ToLower(strings.TrimSpace(commit.SHA))]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneMergeConflicts(source []MergeConflict) []MergeConflict {
+	return append([]MergeConflict(nil), source...)
+}
+
+func newDemoCommit(sha, message, author string, authoredAt time.Time) Commit {
+	short := sha
+	if len(short) > 7 {
+		short = short[:7]
+	}
+	return Commit{SHA: sha, ShortSHA: short, Message: message, Author: author, AuthoredAt: authoredAt}
+}
+
+func (p *DemoProvider) ListRepositories(ctx context.Context) ([]Repository, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	result := make([]Repository, 0, len(p.repositories))
+	for _, repository := range p.repositories {
+		result = append(result, repository.repository)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result, nil
+}
+
+func (p *DemoProvider) ListBranches(ctx context.Context, repositoryID string) ([]Branch, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	repository, ok := p.repositories[repositoryID]
+	if !ok {
+		return nil, ErrRepositoryNotFound
+	}
+	branches := make([]Branch, 0, len(repository.branches))
+	for name, commits := range repository.branches {
+		if len(commits) == 0 {
+			continue
+		}
+		branches = append(branches, Branch{Name: name, Head: commits[0], IsHead: name == repository.repository.DefaultBranch})
+	}
+	sort.Slice(branches, func(i, j int) bool { return branches[i].Name < branches[j].Name })
+	return branches, nil
+}
+
+func (p *DemoProvider) ListCommits(ctx context.Context, repositoryID, branch string, limit int) ([]Commit, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	repository, ok := p.repositories[repositoryID]
+	if !ok {
+		return nil, ErrRepositoryNotFound
+	}
+	commits, ok := repository.branches[branch]
+	if !ok {
+		return nil, ErrBranchNotFound
+	}
+	if limit <= 0 || limit > len(commits) {
+		limit = len(commits)
+	}
+	return append([]Commit(nil), commits[:limit]...), nil
+}
+
+func (p *DemoProvider) ListTags(ctx context.Context, repositoryID string, limit int) ([]Tag, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	repository, ok := p.repositories[repositoryID]
+	if !ok {
+		return nil, ErrRepositoryNotFound
+	}
+	if limit <= 0 || limit > len(repository.tags) {
+		limit = len(repository.tags)
+	}
+	return append([]Tag(nil), repository.tags[:limit]...), nil
+}
+
+func (p *DemoProvider) GetCommit(ctx context.Context, repositoryID, sha string) (Commit, error) {
+	if err := ctx.Err(); err != nil {
+		return Commit{}, err
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	repository, ok := p.repositories[repositoryID]
+	if !ok {
+		return Commit{}, ErrRepositoryNotFound
+	}
+	for _, commits := range repository.branches {
+		for _, commit := range commits {
+			if strings.EqualFold(commit.SHA, sha) {
+				return commit, nil
+			}
+		}
+	}
+	return Commit{}, ErrCommitNotFound
+}

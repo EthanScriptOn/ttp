@@ -1,0 +1,22 @@
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+.tmp/
+tmp/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite-cache/
+
+# Backend build output
+backend/bin/
