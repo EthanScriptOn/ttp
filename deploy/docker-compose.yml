@@ -1,6 +1,6 @@
 services:
   mysql:
-    image: mysql:8.0.36
+    image: docker.m.daocloud.io/library/mysql:8.0.36
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-cicd_platform}
@@ -25,7 +25,7 @@ services:
       - cicd-platform
 
   redis:
-    image: redis:7.2-alpine
+    image: docker.m.daocloud.io/library/redis:7.2-alpine
     restart: unless-stopped
     profiles:
       - cache

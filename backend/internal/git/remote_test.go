@@ -115,6 +115,37 @@ func TestGitLabProviderReadsRepositoryBranchesAndPaginatedCommits(t *testing.T) 
 	}
 }
 
+func TestGitLabProviderMapsEmptyCommitListToBranchNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/api/v4/projects/group%2Fwidget":
+			writeTestJSON(t, w, map[string]any{"name": "widget", "default_branch": "main"})
+		case "/api/v4/projects/group%2Fwidget/repository/commits":
+			writeTestJSON(t, w, []any{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider, err := NewGitLabProvider(
+		server.URL+"/group/widget.git",
+		"",
+		WithAPIBaseURL(server.URL+"/api/v4"),
+		WithAllowedHosts(server.Listener.Addr().String()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositories, err := provider.ListRepositories(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.ListCommits(context.Background(), repositories[0].ID, "missing", 1); !errors.Is(err, ErrBranchNotFound) {
+		t.Fatalf("empty GitLab commit list error = %v, want ErrBranchNotFound", err)
+	}
+}
+
 func TestGitHubProviderReadsBranchesAndLinkPaginatedCommits(t *testing.T) {
 	const token = "github-test-token"
 	var commitPageRequests atomic.Int32
@@ -147,6 +178,8 @@ func TestGitHubProviderReadsBranchesAndLinkPaginatedCommits(t *testing.T) {
 			}})
 		case r.URL.EscapedPath() == "/api/v3/repos/acme/widget/commits/333333333333":
 			writeTestJSON(t, w, map[string]any{"sha": "333333333333", "commit": map[string]any{"message": "release", "author": map[string]string{"name": "Grace", "date": "2026-08-26T10:00:00Z"}}})
+		case r.URL.EscapedPath() == "/api/v3/repos/acme/widget/commits/missing":
+			w.WriteHeader(http.StatusUnprocessableEntity)
 		case r.URL.EscapedPath() == "/api/v3/repos/acme/widget/tags":
 			if r.URL.Query().Get("page") != "1" || r.URL.Query().Get("per_page") != "2" {
 				t.Errorf("unexpected tag pagination: %s", r.URL.RawQuery)
@@ -187,6 +220,9 @@ func TestGitHubProviderReadsBranchesAndLinkPaginatedCommits(t *testing.T) {
 	}
 	if commitPageRequests.Load() != 1 {
 		t.Fatalf("commit page requests = %d, want 1", commitPageRequests.Load())
+	}
+	if _, err := provider.GetCommit(context.Background(), repositories[0].ID, "missing"); !errors.Is(err, ErrCommitNotFound) {
+		t.Fatalf("unresolved GitHub SHA error = %v, want ErrCommitNotFound", err)
 	}
 	tags, err := provider.ListTags(context.Background(), repositories[0].ID, 2)
 	if err != nil || len(tags) != 1 || tags[0].Name != "v2.0.0" || tags[0].SHA != "333333333333" {

@@ -161,6 +161,12 @@ func (p *GitLabProvider) ListCommits(ctx context.Context, repositoryID, branch s
 		seen[next.String()] = struct{}{}
 		endpoint = next
 	}
+	// GitLab returns HTTP 200 with an empty array when ref_name does not
+	// resolve. A branch always has at least one commit, so normalize that
+	// provider-specific response to the common branch-not-found contract.
+	if len(result) == 0 {
+		return nil, ErrBranchNotFound
+	}
 	return result, nil
 }
 
@@ -233,7 +239,7 @@ func (p *GitLabProvider) GetCommit(ctx context.Context, repositoryID, sha string
 	var payload gitLabCommitResponse
 	_, err := p.remote.getJSON(ctx, "get GitLab commit", p.remote.apiURL("projects", p.remote.repository.projectPath, "repository", "commits", sha), &payload)
 	if err != nil {
-		return Commit{}, mapNotFound(err, ErrCommitNotFound)
+		return Commit{}, mapCommitNotFound(err)
 	}
 	commit, err := payload.toCommit()
 	if err != nil {

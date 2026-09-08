@@ -97,9 +97,9 @@ function responseErrorMessage(payload) {
 const codeMessages = {
   unauthorized: '登录已失效，请重新登录',
   forbidden: '没有权限执行这个操作',
-  git_write_access_denied: '平台 Git 服务账号没有目标仓库的写权限',
-  git_access_check_timeout: '检查平台 Git 服务账号超时，请稍后重试',
-  git_access_check_failed: '暂时无法检查平台 Git 服务账号，请稍后重试',
+  git_write_access_denied: '项目仓库机器人没有目标仓库的写权限',
+  git_access_check_timeout: '检查项目仓库机器人超时，请稍后重试',
+  git_access_check_failed: '暂时无法检查项目仓库机器人，请稍后重试',
   provider_timeout: 'Git 服务响应超时，请稍后重试',
   provider_error: 'Git 服务暂时不可用，请稍后重试',
   repository_conflict: '这个仓库地址已经绑定到其他项目，请检查项目配置',
@@ -289,6 +289,24 @@ export function normalizeGitServiceAccount(value) {
   }
 }
 
+export function normalizeGitCredential(value) {
+  const source = isRecord(value?.credential)
+    ? value.credential
+    : isRecord(value?.data?.credential)
+      ? value.data.credential
+      : isRecord(value)
+        ? value
+        : {}
+  return {
+    project_id: asString(firstValue(source, 'project_id', 'projectId')),
+    space_id: asString(firstValue(source, 'space_id', 'spaceId')),
+    provider: asString(firstValue(source, 'provider'), 'auto'),
+    username: asString(firstValue(source, 'username', 'user_name', 'userName')),
+    configured: asBoolean(firstValue(source, 'configured', 'is_configured', 'isConfigured')),
+    updated_at: firstValue(source, 'updated_at', 'updatedAt'),
+  }
+}
+
 export function normalizeGitAccess(value) {
   const source = isRecord(value?.access)
     ? value.access
@@ -343,7 +361,7 @@ export function normalizeProject(value) {
     health: asString(firstValue(source, 'health', 'status'), 'unknown'),
     pod_count: asNumber(firstValue(source, 'pod_count', 'podCount'), 0),
     healthy_pod_count: asNumber(firstValue(source, 'healthy_pod_count', 'healthyPodCount'), 0),
-    deployment_target_count: asNumber(firstValue(source, 'deployment_target_count', 'deploymentTargetCount'), 1),
+    deployment_target_count: asNumber(firstValue(source, 'deployment_target_count', 'deploymentTargetCount'), 0),
     default_target_id: asString(firstValue(source, 'default_target_id', 'defaultTargetId')),
     last_release: asString(firstValue(source, 'last_release', 'lastRelease')),
     last_commit: asString(firstValue(source, 'last_commit', 'lastCommit')),
@@ -538,10 +556,6 @@ export function normalizePod(value) {
     ready: asBoolean(firstValue(source, 'ready'), phase.toLowerCase() === 'running'),
     restarts: restartCount,
     restart_count: restartCount,
-    cpu_millicores: asNumber(firstValue(source, 'cpu_millicores', 'cpuMillicores'), 0),
-    memory_bytes: asNumber(firstValue(source, 'memory_bytes', 'memoryBytes'), 0),
-    metrics_available: asBoolean(firstValue(source, 'metrics_available', 'metricsAvailable'), false),
-    metrics_source: asString(firstValue(source, 'metrics_source', 'metricsSource')),
     container: asString(firstValue(source, 'container', 'container_name', 'containerName')),
     labels: isRecord(firstValue(source, 'labels')) ? firstValue(source, 'labels') : {},
     started_at: firstValue(source, 'started_at', 'startedAt'),
@@ -758,6 +772,7 @@ export function normalizeRelease(value) {
       error: asString(firstValue(target, 'error', 'error_message', 'errorMessage')),
       started_at: firstValue(target, 'started_at', 'startedAt'),
       finished_at: firstValue(target, 'finished_at', 'finishedAt'),
+      logs: firstValue(target, 'logs', 'execution_logs', 'executionLogs', 'raw_logs', 'rawLogs', 'output'),
     }
   }).filter((item) => item.id)
   const strategy = asString(firstValue(source, 'strategy', 'deploy_strategy', 'deployStrategy') || planSource.strategy, 'rolling')
@@ -775,20 +790,6 @@ export function normalizeRelease(value) {
     project_id: asString(firstValue(source, 'project_id', 'projectId')),
     repository_id: asString(firstValue(source, 'repository_id', 'repositoryId')),
     branch: asString(firstValue(source, 'branch', 'branch_name', 'branchName')),
-    source_branch: asString(firstValue(source, 'source_branch', 'sourceBranch')),
-    base_branch: asString(firstValue(source, 'base_branch', 'baseBranch')),
-    owner_id: asNumber(firstValue(source, 'owner_id', 'ownerId'), 0),
-    owner_name: asString(firstValue(source, 'owner_name', 'ownerName', 'operator', 'created_by_name')),
-    batch_id: asString(firstValue(source, 'batch_id', 'batchId')),
-    batch_branch: asString(firstValue(source, 'batch_branch', 'batchBranch')),
-    batch_base_sha: asString(firstValue(source, 'batch_base_sha', 'batchBaseSHA', 'batchBaseSha')),
-    batch_head_sha: asString(firstValue(source, 'batch_head_sha', 'batchHeadSHA', 'batchHeadSha')),
-    batch_revision: asNumber(firstValue(source, 'batch_revision', 'batchRevision'), 0),
-    batch_snapshot_sha: asString(firstValue(source, 'batch_snapshot_sha', 'batchSnapshotSHA', 'batchSnapshotSha')),
-    batch_snapshot_revision: asNumber(firstValue(source, 'batch_snapshot_revision', 'batchSnapshotRevision'), 0),
-    main_merge_status: asString(firstValue(source, 'main_merge_status', 'mainMergeStatus'), 'pending').toLowerCase(),
-    main_merge_sha: asString(firstValue(source, 'main_merge_sha', 'mainMergeSHA', 'mainMergeSha')),
-    main_merged_at: firstValue(source, 'main_merged_at', 'mainMergedAt'),
     commits,
     targets,
     plan: {
@@ -810,55 +811,87 @@ export function normalizeRelease(value) {
   }
 }
 
-function normalizeBatchItem(value) {
+function normalizeABVersion(value) {
   const source = isRecord(value) ? value : {}
-  const rawCommits = firstValue(source, 'commits', 'commit_list', 'commitList')
   return {
     ...source,
-    release_id: asString(firstValue(source, 'release_id', 'releaseId', 'id')),
-    branch: asString(firstValue(source, 'branch', 'source_branch', 'sourceBranch')),
-    source_branch: asString(firstValue(source, 'source_branch', 'sourceBranch')),
-    owner_id: asNumber(firstValue(source, 'owner_id', 'ownerId'), 0),
-    owner_name: asString(firstValue(source, 'owner_name', 'ownerName', 'operator')),
-    commits: (Array.isArray(rawCommits) ? rawCommits : []).map(normalizeCommit).filter((item) => item.sha),
-    release_status: normalizeStatus(firstValue(source, 'release_status', 'releaseStatus', 'status')),
-    current_environment: asString(firstValue(source, 'current_environment', 'currentEnvironment')),
-    completed_environments: asNumber(firstValue(source, 'completed_environments', 'completedEnvironments'), 0),
-    environment_count: asNumber(firstValue(source, 'environment_count', 'environmentCount'), 0),
-    main_merge_status: asString(firstValue(source, 'main_merge_status', 'mainMergeStatus'), 'pending').toLowerCase(),
-    main_merge_sha: asString(firstValue(source, 'main_merge_sha', 'mainMergeSHA', 'mainMergeSha')),
-    main_merged_at: firstValue(source, 'main_merged_at', 'mainMergedAt'),
-    batch_snapshot_sha: asString(firstValue(source, 'batch_snapshot_sha', 'batchSnapshotSHA', 'batchSnapshotSha')),
-    batch_snapshot_revision: asNumber(firstValue(source, 'batch_snapshot_revision', 'batchSnapshotRevision'), 0),
-    created_at: firstValue(source, 'created_at', 'createdAt'),
+    role: asString(firstValue(source, 'role'), 'A'),
+    release_id: asString(firstValue(source, 'release_id', 'releaseId')),
+    branch: asString(firstValue(source, 'branch', 'branch_name', 'branchName')),
+    commit_sha: asString(firstValue(source, 'commit_sha', 'commitSha', 'sha')),
+    short_sha: asString(firstValue(source, 'short_sha', 'shortSha')),
+    message: asString(firstValue(source, 'message')),
   }
 }
 
-export function normalizeBatch(value) {
-  const source = isRecord(value?.batch)
-    ? value.batch
-    : isRecord(value?.data?.batch)
-      ? value.data.batch
-      : isRecord(value)
-        ? value
-        : {}
-  const rawItems = firstValue(source, 'items', 'release_items', 'releaseItems')
+function normalizeABStats(value) {
+  const source = isRecord(value) ? value : {}
   return {
     ...source,
-    id: asString(firstValue(source, 'id', 'batch_id', 'batchId')),
+    metrics_available: asBoolean(firstValue(source, 'metrics_available', 'metricsAvailable')),
+    metrics_message: asString(firstValue(source, 'metrics_message', 'metricsMessage')),
+    request_rate_rps: nullableNumber(firstValue(source, 'request_rate_rps', 'requestRateRPS')),
+    error_rate_percent: nullableNumber(firstValue(source, 'error_rate_percent', 'errorRatePercent')),
+    latency_p95_ms: nullableNumber(firstValue(source, 'latency_p95_ms', 'latencyP95Ms')),
+  }
+}
+
+function normalizeABRoutingRule(value) {
+  const source = isRecord(value) ? value : {}
+  return {
+    ...source,
+    source: asString(firstValue(source, 'source'), 'json_body'),
+    path: asString(firstValue(source, 'path'), '$.user_id'),
+    missing_behavior: asString(firstValue(source, 'missing_behavior', 'missingBehavior'), 'stable'),
+    algorithm: asString(firstValue(source, 'algorithm'), 'consistent_hash'),
+  }
+}
+
+function normalizeABPod(value) {
+  const source = isRecord(value) ? value : {}
+  return {
+    ...source,
+    name: asString(firstValue(source, 'name', 'pod_name', 'podName')),
+    variant: asString(firstValue(source, 'variant'), 'a'),
+    version: asString(firstValue(source, 'version')),
+    node_name: asString(firstValue(source, 'node_name', 'nodeName')),
+    pod_ip: asString(firstValue(source, 'pod_ip', 'podIP')),
+    phase: asString(firstValue(source, 'phase')),
+    ready: asBoolean(firstValue(source, 'ready')),
+    restart_count: asNumber(firstValue(source, 'restart_count', 'restartCount'), 0),
+  }
+}
+
+export function normalizeABExperiment(value) {
+  const source = isRecord(value?.experiment) ? value.experiment : isRecord(value?.data?.experiment) ? value.data.experiment : isRecord(value) ? value : {}
+  return {
+    ...source,
+    id: asString(firstValue(source, 'id', 'experiment_id', 'experimentId')),
     project_id: asString(firstValue(source, 'project_id', 'projectId')),
-    repository_id: asString(firstValue(source, 'repository_id', 'repositoryId')),
-    base_branch: asString(firstValue(source, 'base_branch', 'baseBranch'), 'main'),
-    base_sha: asString(firstValue(source, 'base_sha', 'baseSHA', 'baseSha')),
-    branch: asString(firstValue(source, 'branch', 'batch_branch', 'batchBranch')),
-    head_sha: asString(firstValue(source, 'head_sha', 'headSHA', 'headSha')),
-    current_main_sha: asString(firstValue(source, 'current_main_sha', 'currentMainSHA', 'currentMainSha')),
-    revision: asNumber(firstValue(source, 'revision', 'batch_revision', 'batchRevision'), 0),
-    status: asString(firstValue(source, 'status', 'state'), 'open').toLowerCase(),
-    items: (Array.isArray(rawItems) ? rawItems : []).map(normalizeBatchItem).filter((item) => item.release_id),
+    name: asString(firstValue(source, 'name'), '未命名实验'),
+    target_id: asString(firstValue(source, 'target_id', 'targetId')),
+    environment: asString(firstValue(source, 'environment', 'env')),
+    environment_stage: asString(firstValue(source, 'environment_stage', 'environmentStage')),
+    cluster_id: asString(firstValue(source, 'cluster_id', 'clusterId')),
+    namespace: asString(firstValue(source, 'namespace')),
+    replicas: asNumber(firstValue(source, 'replicas'), 1),
+    strategy: asString(firstValue(source, 'strategy'), 'rolling'),
+    assignment: asString(firstValue(source, 'assignment'), 'percentage'),
+    routing_rule: normalizeABRoutingRule(firstValue(source, 'routing_rule', 'routingRule')),
+    a_version: normalizeABVersion(firstValue(source, 'a_version', 'aVersion')),
+    b_version: normalizeABVersion(firstValue(source, 'b_version', 'bVersion')),
+    a_traffic: asNumber(firstValue(source, 'a_traffic', 'aTraffic'), 99),
+    b_traffic: asNumber(firstValue(source, 'b_traffic', 'bTraffic'), 1),
+    a_stats: normalizeABStats(firstValue(source, 'a_stats', 'aStats')),
+    b_stats: normalizeABStats(firstValue(source, 'b_stats', 'bStats')),
+    a_pods: (Array.isArray(firstValue(source, 'a_pods', 'aPods')) ? firstValue(source, 'a_pods', 'aPods') : []).map(normalizeABPod),
+    b_pods: (Array.isArray(firstValue(source, 'b_pods', 'bPods')) ? firstValue(source, 'b_pods', 'bPods') : []).map(normalizeABPod),
+    status: asString(firstValue(source, 'status'), 'running'),
+    started_at: firstValue(source, 'started_at', 'startedAt'),
+    finished_at: firstValue(source, 'finished_at', 'finishedAt'),
     created_at: firstValue(source, 'created_at', 'createdAt'),
     updated_at: firstValue(source, 'updated_at', 'updatedAt'),
-    closed_at: firstValue(source, 'closed_at', 'closedAt'),
+    events: Array.isArray(source.events) ? source.events : [],
   }
 }
 

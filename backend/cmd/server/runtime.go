@@ -10,19 +10,15 @@ import (
 	"github.com/yuebuy/cicd-platform/backend/internal/runtime"
 )
 
-// newRuntimeProvider keeps the choice between the local fixture and a real
-// Kubernetes client at the process boundary. The rest of the API only depends
-// on runtime.Provider, so switching modes does not change the UI contract.
+// newRuntimeProvider creates the real Kubernetes client at the process
+// boundary. The server never falls back to an in-memory runtime.
 func newRuntimeProvider(cfg config.Config) (runtime.Provider, error) {
 	mode := strings.ToLower(strings.TrimSpace(cfg.RuntimeProvider))
 	if mode == "" {
 		mode = "auto"
 	}
-	if mode == "demo" || (mode == "auto" && cfg.DemoMode) {
-		return runtime.NewDemoProvider(), nil
-	}
 	if mode != "auto" && mode != "kubernetes" && mode != "k8s" {
-		return nil, fmt.Errorf("unsupported CICD_RUNTIME_PROVIDER %q; use demo, auto, or kubernetes", cfg.RuntimeProvider)
+		return nil, fmt.Errorf("unsupported CICD_RUNTIME_PROVIDER %q; use auto or kubernetes", cfg.RuntimeProvider)
 	}
 
 	options := make([]runtime.KubernetesOption, 0, 2)
@@ -32,17 +28,13 @@ func newRuntimeProvider(cfg config.Config) (runtime.Provider, error) {
 	if cfg.KubeRolloutTimeout > 0 {
 		options = append(options, runtime.WithKubernetesRolloutTimeout(cfg.KubeRolloutTimeout))
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.KubeProjectLabel), "off") {
-		// Existing namespaces may not have TTP's project label yet. In this
-		// explicit mode, the namespace is the project boundary for observation.
-		options = append(options, runtime.WithProjectLabelKey(""))
-	} else if strings.TrimSpace(cfg.KubeProjectLabel) != "" {
+	if strings.TrimSpace(cfg.KubeProjectLabel) != "" {
 		options = append(options, runtime.WithProjectLabelKey(strings.TrimSpace(cfg.KubeProjectLabel)))
 	}
 	provider := runtime.NewKubernetesProvider(options...)
 	clusterID := strings.TrimSpace(cfg.KubeClusterID)
 	if clusterID == "" {
-		clusterID = "default-cluster"
+		return nil, fmt.Errorf("CICD_KUBE_CLUSTER_ID is required")
 	}
 
 	kubeconfig := strings.TrimSpace(cfg.KubeconfigPath)

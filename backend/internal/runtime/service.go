@@ -9,9 +9,11 @@ import (
 )
 
 var (
+	ErrProviderNotConfigured        = errors.New("runtime provider is not configured")
 	ErrClusterManagementUnsupported = errors.New("runtime provider does not support cluster management")
 	ErrClusterRegistrationFailed    = errors.New("runtime cluster registration failed")
 	ErrReleaseDeploymentUnsupported = errors.New("runtime provider does not support release deployment")
+	ErrImageBuildUnsupported        = errors.New("image build and push provider is not configured")
 )
 
 // Service is the application-facing facade over a runtime provider. Keeping
@@ -20,13 +22,13 @@ var (
 type Service struct{ provider Provider }
 
 func NewService(provider Provider) *Service {
-	if provider == nil {
-		provider = NewDemoProvider()
-	}
 	return &Service{provider: provider}
 }
 
 func (s *Service) ListPods(ctx context.Context, clusterID, projectID string) ([]Pod, error) {
+	if s == nil || s.provider == nil {
+		return nil, ErrProviderNotConfigured
+	}
 	return s.provider.ListPods(ctx, clusterID, projectID)
 }
 
@@ -34,6 +36,9 @@ func (s *Service) ListPods(ctx context.Context, clusterID, projectID string) ([]
 // when the provider supports it. The fallback keeps older providers usable
 // while the Kubernetes implementation adopts namespace-aware queries.
 func (s *Service) ListPodsInNamespace(ctx context.Context, clusterID, namespace, projectID string) ([]Pod, error) {
+	if s == nil || s.provider == nil {
+		return nil, ErrProviderNotConfigured
+	}
 	provider, ok := s.provider.(interface {
 		ListPodsInNamespace(context.Context, string, string, string) ([]Pod, error)
 	})
@@ -56,13 +61,33 @@ func (s *Service) ListPodsInNamespace(ctx context.Context, clusterID, namespace,
 	return filtered, nil
 }
 func (s *Service) GetPod(ctx context.Context, ref PodRef) (PodDetail, error) {
+	if s == nil || s.provider == nil {
+		return PodDetail{}, ErrProviderNotConfigured
+	}
 	return s.provider.GetPod(ctx, ref)
 }
 func (s *Service) GetPodLogs(ctx context.Context, request PodLogRequest) (string, error) {
+	if s == nil || s.provider == nil {
+		return "", ErrProviderNotConfigured
+	}
 	return s.provider.GetPodLogs(ctx, request)
 }
 func (s *Service) UpdatePodConfig(ctx context.Context, ref PodRef, update PodConfigUpdate) (PodDetail, error) {
+	if s == nil || s.provider == nil {
+		return PodDetail{}, ErrProviderNotConfigured
+	}
 	return s.provider.UpdatePodConfig(ctx, ref, update)
+}
+
+func (s *Service) ExecPodCommand(ctx context.Context, request PodExecRequest) (PodExecResult, error) {
+	if s == nil || s.provider == nil {
+		return PodExecResult{}, ErrPodExecUnsupported
+	}
+	executor, ok := s.provider.(PodExecutor)
+	if !ok {
+		return PodExecResult{}, ErrPodExecUnsupported
+	}
+	return executor.ExecPodCommand(ctx, request)
 }
 
 // DeployRelease delegates a release deployment to the runtime provider. A
@@ -79,7 +104,102 @@ func (s *Service) DeployRelease(ctx context.Context, deployment ReleaseDeploymen
 	return deployer.DeployRelease(ctx, deployment)
 }
 
+// CleanupEnvironment refuses to claim success when the configured provider
+// cannot prove that the target's Kubernetes resources were removed.
+func (s *Service) CleanupEnvironment(ctx context.Context, clusterID, namespace, projectID, targetID string) error {
+	if s == nil || s.provider == nil {
+		return ErrEnvironmentCleanupUnsupported
+	}
+	cleaner, ok := s.provider.(EnvironmentCleaner)
+	if !ok {
+		return ErrEnvironmentCleanupUnsupported
+	}
+	return cleaner.CleanupEnvironment(ctx, clusterID, namespace, projectID, targetID)
+}
+
+func (s *Service) SupportsABExperiment() bool {
+	if s == nil || s.provider == nil {
+		return false
+	}
+	_, ok := s.provider.(ABExperimentDeployer)
+	return ok
+}
+
+func (s *Service) DeployABExperiment(ctx context.Context, deployment ABExperimentDeployment) error {
+	if s == nil || s.provider == nil {
+		return ErrReleaseDeploymentUnsupported
+	}
+	deployer, ok := s.provider.(ABExperimentDeployer)
+	if !ok {
+		return ErrReleaseDeploymentUnsupported
+	}
+	return deployer.DeployABExperiment(ctx, deployment)
+}
+
+func (s *Service) UpdateABExperimentTraffic(ctx context.Context, clusterID, namespace, projectID, experimentID string, aTraffic, bTraffic int) error {
+	if s == nil || s.provider == nil {
+		return ErrReleaseDeploymentUnsupported
+	}
+	deployer, ok := s.provider.(ABExperimentDeployer)
+	if !ok {
+		return ErrReleaseDeploymentUnsupported
+	}
+	return deployer.UpdateABExperimentTraffic(ctx, clusterID, namespace, projectID, experimentID, aTraffic, bTraffic)
+}
+
+func (s *Service) StopABExperiment(ctx context.Context, clusterID, namespace, projectID, experimentID, keepVariant string) error {
+	if s == nil || s.provider == nil {
+		return ErrReleaseDeploymentUnsupported
+	}
+	deployer, ok := s.provider.(ABExperimentDeployer)
+	if !ok {
+		return ErrReleaseDeploymentUnsupported
+	}
+	return deployer.StopABExperiment(ctx, clusterID, namespace, projectID, experimentID, keepVariant)
+}
+
+func (s *Service) ListABExperimentPods(ctx context.Context, clusterID, namespace, projectID, experimentID string) ([]Pod, error) {
+	if s == nil || s.provider == nil {
+		return nil, ErrReleaseDeploymentUnsupported
+	}
+	deployer, ok := s.provider.(ABExperimentDeployer)
+	if !ok {
+		return nil, ErrReleaseDeploymentUnsupported
+	}
+	return deployer.ListABExperimentPods(ctx, clusterID, namespace, projectID, experimentID)
+}
+
+func (s *Service) CleanupABExperiment(ctx context.Context, clusterID, namespace, projectID, experimentID string) error {
+	if s == nil || s.provider == nil {
+		return ErrReleaseDeploymentUnsupported
+	}
+	if cleaner, ok := s.provider.(ABExperimentCleaner); ok {
+		return cleaner.CleanupABExperiment(ctx, clusterID, namespace, projectID, experimentID)
+	}
+	// Keep providers that predate the explicit cleaner usable. An empty
+	// keepVariant is reserved for setup rollback and removes both variants.
+	deployer, ok := s.provider.(ABExperimentDeployer)
+	if !ok {
+		return ErrReleaseDeploymentUnsupported
+	}
+	return deployer.StopABExperiment(ctx, clusterID, namespace, projectID, experimentID, "")
+}
+
+func (s *Service) GetABExperimentMetrics(ctx context.Context, clusterID, namespace, projectID, experimentID string) (ABExperimentMetrics, error) {
+	if s == nil || s.provider == nil {
+		return ABExperimentMetrics{}, ErrReleaseDeploymentUnsupported
+	}
+	provider, ok := s.provider.(ABExperimentMetricsProvider)
+	if !ok {
+		return ABExperimentMetrics{}, ErrReleaseDeploymentUnsupported
+	}
+	return provider.GetABExperimentMetrics(ctx, clusterID, namespace, projectID, experimentID)
+}
+
 func (s *Service) GetClusterMetrics(ctx context.Context, clusterID string) (ClusterMetrics, error) {
+	if s == nil || s.provider == nil {
+		return ClusterMetrics{}, ErrProviderNotConfigured
+	}
 	return s.provider.GetClusterMetrics(ctx, clusterID)
 }
 
@@ -122,6 +242,9 @@ func (s *Service) CheckCluster(ctx context.Context, clusterID string) (ClusterCo
 	return checker.CheckCluster(ctx, clusterID)
 }
 func (s *Service) GetProjectMetrics(ctx context.Context, clusterID, projectID string) (ProjectMetrics, error) {
+	if s == nil || s.provider == nil {
+		return ProjectMetrics{}, ErrProviderNotConfigured
+	}
 	return s.provider.GetProjectMetrics(ctx, clusterID, projectID)
 }
 
@@ -130,6 +253,9 @@ func (s *Service) GetProjectMetrics(ctx context.Context, clusterID, projectID st
 // correctly scoped count from their Pod list; resource metrics remain the
 // provider's responsibility.
 func (s *Service) GetProjectMetricsInNamespace(ctx context.Context, clusterID, namespace, projectID string) (ProjectMetrics, error) {
+	if s == nil || s.provider == nil {
+		return ProjectMetrics{}, ErrProviderNotConfigured
+	}
 	provider, ok := s.provider.(interface {
 		GetProjectMetricsInNamespace(context.Context, string, string, string) (ProjectMetrics, error)
 	})

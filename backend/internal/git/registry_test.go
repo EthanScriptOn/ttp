@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -141,5 +142,60 @@ func TestRegistryProviderAutoDetectsPublicHosts(t *testing.T) {
 	}
 	if _, err := registry.kindForURL(mustParseTestURL(t, "https://git.example.com/group/widget")); err == nil {
 		t.Fatal("custom host should require an explicit provider")
+	}
+}
+
+func TestRegistryProviderUsesDifferentProjectCredentialsForTheSameRepository(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if r.URL.Path == "/api/v3/user" {
+			login := map[string]string{"first-token": "first-bot", "second-token": "second-bot"}[token]
+			if login == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			writeTestJSON(t, w, map[string]string{"login": login})
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widget" {
+			writeTestJSON(t, w, map[string]any{"permissions": map[string]bool{"pull": true, "push": true}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	registry, err := NewRegistry(RegistryConfig{
+		Provider:     "github",
+		APIBaseURL:   server.URL + "/api/v3",
+		AllowedHosts: []string{server.Listener.Addr().String()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositoryURL := server.URL + "/acme/widget.git"
+	credentials := []struct {
+		id       string
+		username string
+		token    string
+	}{
+		{id: "project-one", username: "first-bot", token: "first-token"},
+		{id: "project-two", username: "second-bot", token: "second-token"},
+	}
+	for _, item := range credentials {
+		credential := RepositoryCredential{Provider: "github", Username: item.username, Token: item.token}
+		report, err := registry.CheckRepositoryCredential(context.Background(), item.id, repositoryURL, credential)
+		if err != nil || !report.Usable || !report.CanWrite || report.AuthenticatedUsername != item.username {
+			t.Fatalf("credential check for %s: report=%#v err=%v", item.id, report, err)
+		}
+		if err := registry.ConfigureRepositoryCredential(item.id, repositoryURL, credential); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, item := range credentials {
+		report, err := registry.CheckRepositoryAccess(context.Background(), item.id)
+		if err != nil || report.AuthenticatedUsername != item.username || !report.CanWrite {
+			t.Fatalf("configured credential for %s was not used: report=%#v err=%v", item.id, report, err)
+		}
 	}
 }

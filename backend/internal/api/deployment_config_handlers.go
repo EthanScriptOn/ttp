@@ -134,39 +134,38 @@ func (s *Server) resolveDeploymentConfig(c *gin.Context, project domain.Project)
 }
 
 func (s *Server) resolveDeploymentConfigWithContext(ctx context.Context, project domain.Project) (domain.DeploymentConfig, deploymentconfig.Validation, error) {
-	return s.resolveDeploymentConfigForTargetWithContext(ctx, project, deploymentTargetFromProject(project))
+	target, err := s.deps.Store.GetDeploymentTarget(ctx, project.SpaceID, project.ID, "")
+	if err != nil {
+		return domain.DeploymentConfig{}, deploymentconfig.Validation{}, err
+	}
+	return s.resolveDeploymentConfigForTargetWithContext(ctx, project, target)
 }
 
 func (s *Server) resolveDeploymentConfigForTargetWithContext(ctx context.Context, project domain.Project, target domain.DeploymentTarget) (domain.DeploymentConfig, deploymentconfig.Validation, error) {
 	stored, err := s.deps.Store.GetDeploymentConfig(ctx, project.SpaceID, project.ID)
-	isDefault := false
 	if errors.Is(err, store.ErrNotFound) {
-		// An absent row is a real, empty project state. Do not manufacture a
-		// manifest here: the deployment editor must reflect what is persisted.
+		// An empty configuration is a valid project setup state. Return it so
+		// the editor can create the first manifest, but never invent an image or
+		// Kubernetes resource on the user's behalf.
 		stored = domain.DeploymentConfig{
 			ProjectID: project.ID,
 			Namespace: target.Namespace,
-			Format:    "yaml",
-			Version:   0,
 		}
 	} else if err != nil {
 		return domain.DeploymentConfig{}, deploymentconfig.Validation{}, err
 	}
 	manifest := stored.Manifest
-	if strings.TrimSpace(manifest) == "" {
-		stored.Manifest = ""
-		stored.Namespace = target.Namespace
-		stored.Format = normalizedStoredFormat(stored.Format, "yaml")
-		stored.ResourceCount = 0
-		stored.Resources = deploymentResources(nil)
-		stored.IsDefault = false
-		return stored, deploymentconfig.Validation{Format: stored.Format, Resources: []deploymentconfig.Resource{}}, nil
-	}
 	if strings.TrimSpace(target.Namespace) != strings.TrimSpace(project.Namespace) {
 		manifest, err = deploymentconfig.RetargetNamespace(manifest, target.Namespace)
 		if err != nil {
 			return domain.DeploymentConfig{}, deploymentconfig.Validation{}, err
 		}
+	}
+	if strings.TrimSpace(manifest) == "" {
+		stored.Manifest = ""
+		stored.Namespace = target.Namespace
+		stored.IsDefault = false
+		return stored, deploymentconfig.Validation{}, nil
 	}
 	validated, err := deploymentconfig.Validate(manifest, target.Namespace)
 	if err != nil {
@@ -177,7 +176,7 @@ func (s *Server) resolveDeploymentConfigForTargetWithContext(ctx context.Context
 	stored.Format = normalizedStoredFormat(stored.Format, validated.Format)
 	stored.ResourceCount = len(validated.Resources)
 	stored.Resources = deploymentResources(validated.Resources)
-	stored.IsDefault = isDefault
+	stored.IsDefault = false
 	return stored, validated, nil
 }
 

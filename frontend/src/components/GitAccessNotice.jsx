@@ -17,7 +17,7 @@ function accountLabel(account) {
 }
 
 function providerLabel(value) {
-  return ({ github: 'GitHub', gitlab: 'GitLab', demo: '演示 Git' })[value] || value || 'Git'
+  return ({ github: 'GitHub', gitlab: 'GitLab' })[value] || value || 'Git'
 }
 
 function permissionLabel(value) {
@@ -29,7 +29,6 @@ function permissionDescription(provider, value) {
   const normalizedProvider = String(provider || '').toLowerCase()
   if (normalizedProvider === 'github' && permission.toLowerCase() === 'write') return 'Write（可写）'
   if (normalizedProvider === 'gitlab' && permission.toLowerCase() === 'developer') return 'Developer（开发者）'
-  if (normalizedProvider === 'demo' && permission.toLowerCase() === 'write') return 'Write（可写）'
   return permission ? `${permission}（${permissionLabel(permission)}）` : '至少可写'
 }
 
@@ -38,18 +37,17 @@ export default function GitAccessNotice({ account, access, loading = false, erro
   const usable = access?.usable === true
   const accessAccount = access?.account?.username ? access.account : account
   const provider = access?.provider || accessAccount?.provider || 'unknown'
-  const isDemo = provider === 'demo' || accessAccount?.auth_method === 'demo'
-  const status = loading ? 'loading' : isDemo ? 'demo' : usable ? 'success' : 'warning'
-  const Icon = loading ? ReloadOutlined : isDemo ? InfoCircleOutlined : usable ? CheckCircleOutlined : WarningOutlined
+  const status = loading ? 'loading' : usable ? 'success' : 'warning'
+  const Icon = loading ? ReloadOutlined : usable ? CheckCircleOutlined : WarningOutlined
   const title = loading
     ? '正在检查代码仓库'
     : usable
-      ? isDemo ? '当前是演示模式' : '代码仓库已连接'
+      ? '代码仓库已连接'
       : '还不能发布'
   const subtitle = loading
     ? '正在确认平台是否可以访问这个仓库'
     : usable
-      ? isDemo ? '下面的发布只模拟流程，不会连接真实 Git 仓库。' : '你只需要选择 commit，平台会自动完成发布准备。'
+      ? '平台可以读取仓库并准备发布版本。'
       : '先完成一次仓库授权，平台才能读取代码并发布。'
   const targetRepository = access?.repository_url || repositoryUrl || '未读取到仓库地址'
   const requiredPermission = access?.required_permission || (provider === 'gitlab' ? 'Developer' : 'Write')
@@ -63,10 +61,10 @@ export default function GitAccessNotice({ account, access, loading = false, erro
     : requiredPermissionText
   const message = error
     || (usable
-      ? isDemo ? '当前页面展示的是模拟结果，点击发布不会改动任何真实代码。' : '仓库已准备好，直接选择 commit 即可。平台会使用上面的专用账号访问这个仓库。'
+      ? '仓库已准备好，平台会使用上面配置的项目机器人访问这个仓库。'
       : hasAccount
         ? `简单说：在这个仓库的“成员/协作者”设置中，把账号 ${accountLabel(accessAccount)} 加入上面的目标仓库，权限选择 ${permissionInstruction}；完成后点击“重新检查”。`
-        : '平台还没有配置 Git 专用账号，请先联系平台管理员完成配置；配置后再点击“重新检查”。')
+        : '这个项目还没有配置仓库机器人，请在项目设置中填写机器人账号和 Token；配置后再点击“重新检查”。')
   const actualAccount = access?.authenticated_username
     ? `实际认证账号：${accountLabel({ username: access.authenticated_username })}`
     : '尚未完成身份认证'
@@ -75,7 +73,7 @@ export default function GitAccessNotice({ account, access, loading = false, erro
     { key: 'branch', label: '准备发布版本', value: access?.can_create_temporary_branch },
     { key: 'merge', label: '执行发布', value: access?.can_merge },
   ]
-  const statusLabel = isDemo ? '仅演示' : usable ? '已连接' : '需要授权'
+  const statusLabel = usable ? '已连接' : '需要授权'
 
   return (
     <div className={`git-access-notice is-${status}`}>
@@ -98,7 +96,7 @@ export default function GitAccessNotice({ account, access, loading = false, erro
               <strong>{accountLabel(accessAccount)}</strong>
             </div>
           </div>
-          <Tag color={isDemo ? 'default' : usable ? 'success' : 'warning'}>{statusLabel}</Tag>
+        <Tag color={usable ? 'success' : 'warning'}>{statusLabel}</Tag>
         </div>
         <div className="git-access-requirements">
           <div className="git-access-requirement">
@@ -131,7 +129,7 @@ export default function GitAccessNotice({ account, access, loading = false, erro
           <span>最低要求：{permissionLabel(requiredPermission)}</span>
         </div>}
       </>}
-      {loading && <div className="git-access-loading">请稍候，正在确认平台账号和仓库权限...</div>}
+      {loading && <div className="git-access-loading">请稍候，正在确认项目仓库机器人和仓库权限...</div>}
     </div>
   )
 }

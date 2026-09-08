@@ -256,7 +256,7 @@ spec:
 	if !errors.Is(err, ErrDeploymentRolloutTimeout) {
 		t.Fatalf("error = %v, want rollout timeout", err)
 	}
-	if !strings.Contains(err.Error(), "checkout") || !strings.Contains(err.Error(), "未就绪") {
+	if !strings.Contains(err.Error(), "checkout") || !strings.Contains(err.Error(), "副本") {
 		t.Fatalf("timeout error omitted rollout details: %v", err)
 	}
 }
@@ -366,6 +366,38 @@ metadata:
 				t.Fatalf("boundary failure wrote a deployment: %v", err)
 			}
 		})
+	}
+}
+
+func TestKubernetesProviderRejectsZeroReplicas(t *testing.T) {
+	provider := NewKubernetesProvider()
+	if err := provider.RegisterClient("cluster-a", fake.NewSimpleClientset()); err != nil {
+		t.Fatal(err)
+	}
+	err := provider.DeployRelease(context.Background(), ReleaseDeployment{
+		ClusterID: "cluster-a", Namespace: "lab", ProjectID: "checkout", ReleaseID: "release-zero",
+		Branch: "main", CommitSHA: "abcdef123456", Image: "registry.example/checkout:abcdef1234",
+		Replicas: 0, Strategy: "rolling", StablePercent: 100,
+		Manifest: `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+spec:
+  selector:
+    matchLabels:
+      app: checkout
+  template:
+    metadata:
+      labels:
+        app: checkout
+    spec:
+      containers:
+        - name: api
+          image: old.invalid/checkout:old
+`, ManifestFormat: "yaml",
+	})
+	if !errors.Is(err, ErrInvalidKubernetesInput) {
+		t.Fatalf("zero replicas error = %v, want ErrInvalidKubernetesInput", err)
 	}
 }
 

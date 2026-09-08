@@ -28,7 +28,7 @@ func (p *GitHubProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	report := newRepositoryAccess(p.remote, "github")
 	report.Account = p.ServiceAccount()
 	if !report.Account.Configured {
-		report.Message = fmt.Sprintf("尚未配置平台 Git 服务账号 Token，请配置 CICD_GIT_TOKEN，并把 %s 加入目标仓库。", serviceAccountLabel(report.Account))
+		report.Message = "尚未配置项目仓库机器人，请在项目设置中填写机器人用户名和 Token。"
 		finalizeRepositoryAccess(&report)
 		return report, nil
 	}
@@ -37,7 +37,7 @@ func (p *GitHubProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	_, err := p.remote.getJSON(ctx, "verify GitHub service account", p.remote.apiURL("user"), &user)
 	if err != nil {
 		if isAccessDeniedStatus(accessHTTPStatus(err)) {
-			report.Message = "平台 Git 服务账号认证失败，请检查 CICD_GIT_TOKEN 是否有效。"
+			report.Message = "项目仓库机器人认证失败，请检查用户名和 Token 是否匹配。"
 			finalizeRepositoryAccess(&report)
 			return report, nil
 		}
@@ -51,7 +51,7 @@ func (p *GitHubProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	report.AuthenticatedUsername = login
 	report.AccountMatches = strings.EqualFold(login, report.Account.Username)
 	if !report.AccountMatches {
-		report.Message = fmt.Sprintf("当前 Token 属于 %s，但平台指定账号是 %s；发布不会使用个人 Git 账号。", serviceAccountLabel(ServiceAccount{Username: login}), serviceAccountLabel(report.Account))
+		report.Message = fmt.Sprintf("当前 Token 属于 %s，但填写的机器人账号是 %s。", serviceAccountLabel(ServiceAccount{Username: login}), serviceAccountLabel(report.Account))
 		finalizeRepositoryAccess(&report)
 		return report, nil
 	}
@@ -61,9 +61,9 @@ func (p *GitHubProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	if err != nil {
 		switch accessHTTPStatus(err) {
 		case 404:
-			report.Message = fmt.Sprintf("平台账号 %s 无法访问目标仓库，请先把它加入仓库。", serviceAccountLabel(report.Account))
+			report.Message = fmt.Sprintf("项目仓库机器人 %s 无法访问目标仓库，请先把它加入仓库。", serviceAccountLabel(report.Account))
 		case 401, 403:
-			report.Message = "平台 Git 服务账号已认证，但 GitHub 拒绝访问目标仓库，请检查仓库授权或组织 SSO。"
+			report.Message = "项目仓库机器人已认证，但 GitHub 拒绝访问目标仓库，请检查仓库授权或组织 SSO。"
 		default:
 			return report, err
 		}
@@ -80,12 +80,12 @@ func (p *GitHubProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	// conservatively require Maintain/Admin for an unconditional merge claim.
 	report.CanMerge = repository.Permissions.Maintain || repository.Permissions.Admin
 	if report.CanWrite {
-		report.Message = fmt.Sprintf("授权已通过：平台账号 %s 对目标仓库具有 %s 权限，可以创建临时发布分支。", serviceAccountLabel(report.Account), report.Permission)
+		report.Message = fmt.Sprintf("授权已通过：项目仓库机器人 %s 对目标仓库具有 %s 权限，可以创建临时发布分支。", serviceAccountLabel(report.Account), report.Permission)
 		if !report.CanMerge {
 			report.Message += "受保护分支的合并可能还需要 Maintain 或 Admin。"
 		}
 	} else {
-		report.Message = fmt.Sprintf("平台账号 %s 当前只有 %s 权限，GitHub 至少需要 Write 才能发布。", serviceAccountLabel(report.Account), report.Permission)
+		report.Message = fmt.Sprintf("项目仓库机器人 %s 当前只有 %s 权限，GitHub 至少需要 Write 才能发布。", serviceAccountLabel(report.Account), report.Permission)
 	}
 	finalizeRepositoryAccess(&report)
 	return report, nil
@@ -112,7 +112,7 @@ func (p *GitLabProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	report := newRepositoryAccess(p.remote, "gitlab")
 	report.Account = p.ServiceAccount()
 	if !report.Account.Configured {
-		report.Message = fmt.Sprintf("尚未配置平台 Git 服务账号 Token，请配置 CICD_GIT_TOKEN，并把 %s 加入目标项目。", serviceAccountLabel(report.Account))
+		report.Message = "尚未配置项目仓库机器人，请在项目设置中填写机器人用户名和 Token。"
 		finalizeRepositoryAccess(&report)
 		return report, nil
 	}
@@ -121,7 +121,7 @@ func (p *GitLabProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	_, err := p.remote.getJSON(ctx, "verify GitLab service account", p.remote.apiURL("user"), &user)
 	if err != nil {
 		if isAccessDeniedStatus(accessHTTPStatus(err)) {
-			report.Message = "平台 Git 服务账号认证失败，请检查 CICD_GIT_TOKEN 是否有效。"
+			report.Message = "项目仓库机器人认证失败，请检查用户名和 Token 是否匹配。"
 			finalizeRepositoryAccess(&report)
 			return report, nil
 		}
@@ -135,7 +135,7 @@ func (p *GitLabProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	report.AuthenticatedUsername = username
 	report.AccountMatches = strings.EqualFold(username, report.Account.Username)
 	if !report.AccountMatches {
-		report.Message = fmt.Sprintf("当前 Token 属于 %s，但平台指定账号是 %s；发布不会使用个人 Git 账号。", serviceAccountLabel(ServiceAccount{Username: username}), serviceAccountLabel(report.Account))
+		report.Message = fmt.Sprintf("当前 Token 属于 %s，但填写的机器人账号是 %s。", serviceAccountLabel(ServiceAccount{Username: username}), serviceAccountLabel(report.Account))
 		finalizeRepositoryAccess(&report)
 		return report, nil
 	}
@@ -145,9 +145,9 @@ func (p *GitLabProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	if err != nil {
 		switch accessHTTPStatus(err) {
 		case 404:
-			report.Message = fmt.Sprintf("平台账号 %s 无法访问目标项目，请先把它加入项目。", serviceAccountLabel(report.Account))
+			report.Message = fmt.Sprintf("项目仓库机器人 %s 无法访问目标项目，请先把它加入项目。", serviceAccountLabel(report.Account))
 		case 401, 403:
-			report.Message = "平台 Git 服务账号已认证，但 GitLab 拒绝访问目标项目，请检查项目成员权限。"
+			report.Message = "项目仓库机器人已认证，但 GitLab 拒绝访问目标项目，请检查项目成员权限。"
 		default:
 			return report, err
 		}
@@ -165,12 +165,12 @@ func (p *GitLabProvider) CheckRepositoryAccess(ctx context.Context, repositoryID
 	// Maintainer is the conservative unconditional merge capability.
 	report.CanMerge = level >= 40
 	if report.CanWrite {
-		report.Message = fmt.Sprintf("授权已通过：平台账号 %s 对目标项目具有 %s 权限，可以创建临时发布分支。", serviceAccountLabel(report.Account), report.Permission)
+		report.Message = fmt.Sprintf("授权已通过：项目仓库机器人 %s 对目标项目具有 %s 权限，可以创建临时发布分支。", serviceAccountLabel(report.Account), report.Permission)
 		if !report.CanMerge {
 			report.Message += "受保护分支的合并通常还需要 Maintainer。"
 		}
 	} else {
-		report.Message = fmt.Sprintf("平台账号 %s 当前只有 %s 权限，GitLab 至少需要 Developer 才能发布。", serviceAccountLabel(report.Account), report.Permission)
+		report.Message = fmt.Sprintf("项目仓库机器人 %s 当前只有 %s 权限，GitLab 至少需要 Developer 才能发布。", serviceAccountLabel(report.Account), report.Permission)
 	}
 	finalizeRepositoryAccess(&report)
 	return report, nil
@@ -188,7 +188,7 @@ func (p *remoteProvider) serviceAccountSnapshot(provider string) ServiceAccount 
 func serviceAccountLabel(account ServiceAccount) string {
 	username := strings.TrimSpace(account.Username)
 	if username == "" {
-		return "平台账号"
+		return "项目仓库机器人"
 	}
 	if strings.HasPrefix(username, "@") {
 		return username

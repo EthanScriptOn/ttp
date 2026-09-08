@@ -21,16 +21,36 @@ var (
 )
 
 type CreateProjectInput struct {
-	Name           string `json:"name"`
-	Description    string `json:"description"`
-	RepositoryID   string `json:"repository_id"`
-	RepositoryURL  string `json:"repository_url"`
-	DefaultBranch  string `json:"default_branch"`
-	ClusterID      string `json:"cluster_id"`
-	Namespace      string `json:"namespace"`
-	DeployStrategy string `json:"deploy_strategy"`
-	Replicas       int    `json:"replicas"`
-	ContainerPort  int    `json:"container_port"`
+	ID              string `json:"-"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	RepositoryID    string `json:"repository_id"`
+	RepositoryURL   string `json:"repository_url"`
+	DefaultBranch   string `json:"default_branch"`
+	ClusterID       string `json:"cluster_id"`
+	Namespace       string `json:"namespace"`
+	DeployStrategy  string `json:"deploy_strategy"`
+	Replicas        int    `json:"replicas"`
+	ContainerPort   int    `json:"container_port"`
+	ImageRepository string `json:"image_repository"`
+}
+
+// ProjectGitCredential is the safe project-level Git identity. The encrypted
+// token is used internally by the API and is never serialized.
+type ProjectGitCredential struct {
+	ProjectID       string    `json:"project_id"`
+	SpaceID         string    `json:"space_id"`
+	Provider        string    `json:"provider"`
+	Username        string    `json:"username"`
+	TokenCiphertext string    `json:"-"`
+	Configured      bool      `json:"configured"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type SaveProjectGitCredentialInput struct {
+	Provider        string
+	Username        string
+	TokenCiphertext string
 }
 
 // Cluster is a deployment target registered in a space. The runtime provider
@@ -189,32 +209,8 @@ func validClusterIdentifier(value string) bool {
 	return true
 }
 
-const defaultDemoClusterID = "demo-cluster"
-
-// demoClusterIDForSpace keeps the original ID for the seeded lab space while
-// giving each newly created space a globally unique cluster ID. The database
-// schema uses clusters.id as a primary key, so the same literal ID cannot be
-// reused across spaces.
-func demoClusterIDForSpace(spaceID string) string {
-	spaceID = strings.TrimSpace(spaceID)
-	if spaceID == "" || spaceID == "space-lab" {
-		return defaultDemoClusterID
-	}
-	suffix := strings.TrimPrefix(spaceID, "space-")
-	if suffix == "" {
-		suffix = "default"
-	}
-	return defaultDemoClusterID + "-" + suffix
-}
-
-// normalizeClusterID treats the UI's existing demo-cluster value as the
-// default alias for the current space. Explicit non-demo IDs remain unchanged.
-func normalizeClusterID(spaceID, requested string) string {
-	requested = strings.TrimSpace(requested)
-	if requested == "" || requested == defaultDemoClusterID {
-		return demoClusterIDForSpace(spaceID)
-	}
-	return requested
+func normalizeClusterID(_ string, requested string) string {
+	return strings.TrimSpace(requested)
 }
 
 type CreateSpaceInput struct {
@@ -240,14 +236,15 @@ type UpdateSpaceMemberInput struct {
 }
 
 type UpdateProjectInput struct {
-	RepositoryURL *string `json:"repository_url"`
-	RepositoryID  *string `json:"-"`
-	Description   *string `json:"description"`
-	DefaultBranch *string `json:"default_branch"`
-	ClusterID     *string `json:"cluster_id"`
-	Namespace     *string `json:"namespace"`
-	Replicas      *int    `json:"replicas"`
-	ContainerPort *int    `json:"container_port"`
+	RepositoryURL   *string `json:"repository_url"`
+	RepositoryID    *string `json:"-"`
+	Description     *string `json:"description"`
+	DefaultBranch   *string `json:"default_branch"`
+	ClusterID       *string `json:"cluster_id"`
+	Namespace       *string `json:"namespace"`
+	Replicas        *int    `json:"replicas"`
+	ContainerPort   *int    `json:"container_port"`
+	ImageRepository *string `json:"image_repository"`
 }
 
 type CreateDeploymentTargetInput struct {
@@ -281,8 +278,31 @@ type SaveDeploymentConfigInput struct {
 	Format   string `json:"format"`
 }
 
+type CreateABExperimentInput struct {
+	Name             string
+	TargetID         string
+	Environment      string
+	EnvironmentStage string
+	ClusterID        string
+	Namespace        string
+	Replicas         int
+	Strategy         string
+	Assignment       string
+	RoutingRule      domain.ABRoutingRule
+	AVersion         domain.ABExperimentVersion
+	BVersion         domain.ABExperimentVersion
+	ATraffic         int
+	BTraffic         int
+	CreatedBy        uint64
+}
+
+type UpdateABTrafficInput struct {
+	ATraffic int
+	BTraffic int
+}
+
 // Store is deliberately narrower than the database schema. It keeps request
-// handlers independent from GORM and makes the local demo mode deterministic.
+// handlers independent from GORM and makes isolated tests deterministic.
 type Store interface {
 	Close() error
 	Authenticate(ctx context.Context, username, password string) (domain.User, error)
@@ -304,6 +324,9 @@ type Store interface {
 	GetProject(ctx context.Context, spaceID, projectID string) (domain.Project, error)
 	CreateProject(ctx context.Context, spaceID string, input CreateProjectInput) (domain.Project, error)
 	UpdateProject(ctx context.Context, spaceID, projectID string, input UpdateProjectInput) (domain.Project, error)
+	GetProjectGitCredential(ctx context.Context, spaceID, projectID string) (ProjectGitCredential, error)
+	SaveProjectGitCredential(ctx context.Context, spaceID, projectID string, input SaveProjectGitCredentialInput) (ProjectGitCredential, error)
+	DeleteProjectGitCredential(ctx context.Context, spaceID, projectID string) error
 	ListDeploymentTargets(ctx context.Context, spaceID, projectID string) ([]domain.DeploymentTarget, error)
 	GetDeploymentTarget(ctx context.Context, spaceID, projectID, targetID string) (domain.DeploymentTarget, error)
 	CreateDeploymentTarget(ctx context.Context, spaceID, projectID string, input CreateDeploymentTargetInput) (domain.DeploymentTarget, error)
@@ -313,4 +336,10 @@ type Store interface {
 	SaveDeploymentConfig(ctx context.Context, spaceID, projectID string, input SaveDeploymentConfigInput) (domain.DeploymentConfig, error)
 	AppendAuditLog(ctx context.Context, entry domain.AuditLog) error
 	ListAuditLogs(ctx context.Context, spaceID string, limit int) ([]domain.AuditLog, error)
+	ListABExperiments(ctx context.Context, spaceID, projectID string) ([]domain.ABExperiment, error)
+	GetABExperiment(ctx context.Context, spaceID, projectID, experimentID string) (domain.ABExperiment, error)
+	CreateABExperiment(ctx context.Context, spaceID, projectID string, input CreateABExperimentInput) (domain.ABExperiment, error)
+	UpdateABExperimentTraffic(ctx context.Context, spaceID, projectID, experimentID string, input UpdateABTrafficInput) (domain.ABExperiment, error)
+	StopABExperiment(ctx context.Context, spaceID, projectID, experimentID string) (domain.ABExperiment, error)
+	FinishABExperiment(ctx context.Context, spaceID, projectID, experimentID, result string) (domain.ABExperiment, error)
 }

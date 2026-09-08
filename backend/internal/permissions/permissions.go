@@ -20,22 +20,23 @@ type Role struct {
 }
 
 const (
-	SpaceRead      = "space:read"
-	SpaceUpdate    = "space:update"
-	MemberRead     = "member:read"
-	MemberManage   = "member:manage"
-	ClusterRead    = "cluster:read"
-	ClusterManage  = "cluster:manage"
-	ProjectRead    = "project:read"
-	ProjectCreate  = "project:create"
-	ProjectUpdate  = "project:update"
-	ReleaseRead    = "release:read"
-	ReleaseCreate  = "release:create"
-	ReleaseUpdate  = "release:update"
-	ReleasePublish = "release:publish"
-	RuntimeRead    = "runtime:read"
-	RuntimeConfig  = "runtime:config"
-	AuditRead      = "audit:read"
+	SpaceRead       = "space:read"
+	SpaceUpdate     = "space:update"
+	MemberRead      = "member:read"
+	MemberManage    = "member:manage"
+	ClusterRead     = "cluster:read"
+	ClusterManage   = "cluster:manage"
+	ProjectRead     = "project:read"
+	ProjectCreate   = "project:create"
+	ProjectUpdate   = "project:update"
+	ReleaseRead     = "release:read"
+	ReleaseCreate   = "release:create"
+	ReleaseUpdate   = "release:update"
+	ReleasePublish  = "release:publish"
+	RuntimeRead     = "runtime:read"
+	RuntimeConfig   = "runtime:config"
+	RuntimeTerminal = "runtime:terminal"
+	AuditRead       = "audit:read"
 )
 
 var permissionCatalog = []Permission{
@@ -54,6 +55,7 @@ var permissionCatalog = []Permission{
 	{Key: ReleasePublish, Name: "执行发布", Description: "开始、取消或重复发布"},
 	{Key: RuntimeRead, Name: "查看运行态", Description: "查看 Pod、日志和运行指标"},
 	{Key: RuntimeConfig, Name: "修改运行配置", Description: "修改 Pod 对应的运行时配置"},
+	{Key: RuntimeTerminal, Name: "进入 Pod 终端", Description: "在 Pod 容器内执行命令"},
 	{Key: AuditRead, Name: "查看操作记录", Description: "查看空间内的审计记录"},
 }
 
@@ -64,7 +66,7 @@ var roleCatalog = []Role{
 	{Key: "admin", Name: "管理员", Description: "负责空间日常管理，但不能移除或降级所有者。", Permissions: allPermissionKeys},
 	{Key: "developer", Name: "开发者", Description: "可以创建项目、准备发布和修改运行配置。", Permissions: []string{
 		SpaceRead, MemberRead, ClusterRead, ProjectRead, ProjectCreate, ProjectUpdate,
-		ReleaseRead, ReleaseCreate, ReleaseUpdate, ReleasePublish, RuntimeRead, RuntimeConfig, AuditRead,
+		ReleaseRead, ReleaseCreate, ReleaseUpdate, ReleasePublish, RuntimeRead, RuntimeConfig, RuntimeTerminal, AuditRead,
 	}},
 	{Key: "viewer", Name: "只读成员", Description: "只能查看项目、集群、发布和运行状态。", Permissions: []string{
 		SpaceRead, MemberRead, ClusterRead, ProjectRead, ReleaseRead, RuntimeRead, AuditRead,

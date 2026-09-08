@@ -242,31 +242,3 @@ func validDeploymentNamespace(value string) bool {
 	}
 	return true
 }
-
-// LegacyDeploymentTarget gives old projects a stable target-shaped view until
-// their first target row is created. It is never persisted by this helper.
-func LegacyDeploymentTarget(project domain.Project) domain.DeploymentTarget {
-	return domain.DeploymentTarget{
-		ID:              "legacy-" + project.ID,
-		ProjectID:       project.ID,
-		SpaceID:         project.SpaceID,
-		Name:            defaultTargetName,
-		Environment:     defaultTargetEnvironment,
-		Stage:           DeploymentStageDev,
-		SortOrder:       1,
-		ClusterID:       project.ClusterID,
-		Namespace:       project.Namespace,
-		Replicas:        project.Replicas,
-		ContainerPort:   project.ContainerPort,
-		DeployStrategy:  project.DeployStrategy,
-		Enabled:         true,
-		Status:          "active",
-		Health:          project.Health,
-		PodCount:        project.PodCount,
-		HealthyPodCount: project.HealthyPodCount,
-		LastRelease:     project.LastRelease,
-		LastCommit:      project.LastCommit,
-		CreatedAt:       project.CreatedAt,
-		UpdatedAt:       project.UpdatedAt,
-	}
-}

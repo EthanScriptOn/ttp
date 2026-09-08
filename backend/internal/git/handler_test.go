@@ -37,7 +37,7 @@ func TestHandlerRequiresBranchForCommitQuery(t *testing.T) {
 func TestHandlerReturnsCommit(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/repositories/demo-repo/commits/a1b2c3d4e5f6", nil)
 	recorder := httptest.NewRecorder()
-	NewHandler(nil).ServeHTTP(recorder, request)
+	NewHandler(NewDemoProvider()).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", recorder.Code)
 	}

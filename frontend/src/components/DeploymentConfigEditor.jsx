@@ -10,11 +10,12 @@ import {
 } from 'antd'
 import {
   CheckCircleOutlined,
+  CodeOutlined,
   CopyOutlined,
+  FileTextOutlined,
   FormatPainterOutlined,
   ReloadOutlined,
   SaveOutlined,
-  WarningOutlined,
 } from '@ant-design/icons'
 import { useEffect, useRef, useState } from 'react'
 import {
@@ -51,7 +52,7 @@ export default function DeploymentConfigEditor({ project, readOnly = false }) {
     try {
       const next = await getDeploymentConfig(project.id)
       const nextText = next.manifest || ''
-      const nextFormat = next.format || detectManifestFormat(nextText)
+      const nextFormat = next.format || (nextText ? detectManifestFormat(nextText) : 'yaml')
       setConfig(next)
       setText(nextText)
       setSavedText(nextText)
@@ -73,19 +74,19 @@ export default function DeploymentConfigEditor({ project, readOnly = false }) {
     setText(value)
   }
 
-  const check = async (notify = true) => {
+  const check = async (showSuccess = true) => {
     const local = localValidateManifest(text, project.namespace)
     if (!local.ok) {
-      if (notify) message.error(local.message)
+      message.error(local.message)
       return false
     }
     setChecking(true)
     try {
       const result = await validateDeploymentConfig(project.id, { manifest: text, format })
-      if (notify) message.success(`配置检查通过，共 ${result.resource_count || local.resources.length} 个资源`)
+      if (showSuccess) message.success(`检查通过，共 ${result.resource_count || local.resources.length} 个资源`)
       return true
     } catch (error) {
-      if (notify) message.error(error?.message || '配置检查失败')
+      message.error(error?.message || '配置检查失败')
       return false
     } finally {
       setChecking(false)
@@ -161,22 +162,23 @@ export default function DeploymentConfigEditor({ project, readOnly = false }) {
 
   return <section className="deployment-config-page">
     <div className="deployment-config-heading">
-      <div className="deployment-config-heading-main">
-        <div className="deployment-config-title-row">
-          <Typography.Title level={3}>部署配置</Typography.Title>
-          <Space wrap>
-            {readOnly && <Tag color="default">只读</Tag>}
-            <Tag color={dirty ? 'warning' : 'success'} icon={dirty ? <WarningOutlined /> : <CheckCircleOutlined />}>
-              {dirty ? '有未保存修改' : '已保存'}
-            </Tag>
-            <Button icon={<ReloadOutlined />} onClick={load}>重新加载</Button>
-            <Button type="primary" icon={<SaveOutlined />} loading={saving} disabled={readOnly || !dirty} onClick={save}>保存配置</Button>
-          </Space>
-        </div>
+      <div>
+        <Typography.Title level={3}>部署配置</Typography.Title>
       </div>
+      <Space wrap>
+        {readOnly && <Tag color="default">只读</Tag>}
+        <Button icon={<ReloadOutlined />} onClick={load}>重新加载</Button>
+        <Button type="primary" icon={<SaveOutlined />} loading={saving} disabled={readOnly || !dirty} onClick={save}>保存配置</Button>
+      </Space>
     </div>
 
     {readOnly && <Alert className="deployment-readonly-alert" type="info" showIcon message="当前角色只能查看部署配置，不能修改或保存。" />}
+
+    <div className="deployment-config-context">
+      <span><CodeOutlined /> 目标集群 <strong>{project.cluster_id || '未配置'}</strong></span>
+      <span><FileTextOutlined /> 命名空间 <strong>{project.namespace || '未配置'}</strong></span>
+      {config?.version > 0 && <Typography.Text type="secondary">当前版本 v{config.version}</Typography.Text>}
+    </div>
 
     <div className="deployment-config-toolbar">
       <Segmented
@@ -187,7 +189,7 @@ export default function DeploymentConfigEditor({ project, readOnly = false }) {
       />
       <Space wrap size={6}>
         <Button size="small" icon={<FormatPainterOutlined />} disabled={readOnly} onClick={() => { try { updateText(formatManifest(text, format)) } catch (error) { message.error(error?.message || '格式化失败') } }}>格式化</Button>
-        <Button size="small" icon={<CheckCircleOutlined />} loading={checking} disabled={readOnly} onClick={() => check(true)}>检查配置</Button>
+        <Button size="small" icon={<CheckCircleOutlined />} loading={checking} disabled={readOnly} onClick={check}>检查配置</Button>
         <Button size="small" icon={<CopyOutlined />} onClick={copy}>复制</Button>
       </Space>
     </div>
@@ -212,11 +214,9 @@ export default function DeploymentConfigEditor({ project, readOnly = false }) {
             readOnly={readOnly}
             className="deployment-editor-textarea"
             aria-label="Kubernetes 部署配置编辑器"
-            placeholder="尚未配置部署清单，请在这里粘贴或编写 YAML / JSON"
           />
         </div>
       </div>
-
     </div>
   </section>
 }

@@ -7,11 +7,10 @@ import {
   LoadingOutlined,
   LockOutlined,
   MergeCellsOutlined,
-  QuestionCircleOutlined,
   ReloadOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
-import { Alert, Button, Divider, Input, Space, Spin, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Divider, Input, Select, Space, Spin, Tag, Typography } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
 
 const statusAliases = {
@@ -92,6 +91,27 @@ function normalizeStatus(value) {
   if (raw === undefined || raw === null || raw === '') return ''
   const normalized = String(raw).trim().toLowerCase().replace(/[\s-]+/g, '_')
   return statusAliases[normalized] || normalized
+}
+
+function normalizeBranches(branches, selectedBranch) {
+  const values = Array.isArray(branches) ? branches : []
+  const options = values.map((branch) => {
+    if (typeof branch === 'string' || typeof branch === 'number') {
+      const value = String(branch)
+      return { value, label: value }
+    }
+    if (!branch || typeof branch !== 'object') return null
+    const value = textValue(firstValue(branch, 'value', 'name', 'branch', 'ref', 'branch_name', 'branchName'))
+    if (!value) return null
+    const label = textValue(firstValue(branch, 'label', 'display_name', 'displayName', 'name', 'branch'), value)
+    return { value, label }
+  }).filter(Boolean)
+
+  if (selectedBranch && !options.some((option) => option.value === selectedBranch)) {
+    options.unshift({ value: selectedBranch, label: selectedBranch })
+  }
+
+  return options.filter((option, index, all) => all.findIndex((item) => item.value === option.value) === index)
 }
 
 function conflictPath(value, index) {
@@ -204,6 +224,8 @@ function hasConflictMarkers(content) {
 export default function ReleasePreparation({
   sourceBranch = '',
   baseBranch = '',
+  onBaseBranchChange,
+  branches = [],
   status,
   loading = false,
   preparation,
@@ -214,6 +236,7 @@ export default function ReleasePreparation({
   const preparedSourceBranch = textValue(firstValue(prepared, 'source_branch', 'sourceBranch'), textValue(sourceBranch))
   const preparedBaseBranch = textValue(firstValue(prepared, 'base_branch', 'baseBranch'), textValue(baseBranch))
   const selectedBaseBranch = textValue(baseBranch, preparedBaseBranch)
+  const branchOptions = useMemo(() => normalizeBranches(branches, selectedBaseBranch), [branches, selectedBaseBranch])
   const conflictFiles = useMemo(() => normalizeConflictFiles(prepared), [prepared])
   const currentStatus = loading ? 'loading' : statusFrom(prepared, status, conflictFiles)
   const summary = textValue(firstValue(prepared, 'summary', 'message', 'detail', 'description'))
@@ -312,6 +335,16 @@ export default function ReleasePreparation({
     })
   }
 
+  const renderContext = () => (
+    <div className="release-preparation-context">
+      <Typography.Text type="secondary">源分支</Typography.Text>
+      <Typography.Text code>{preparedSourceBranch || '未选择'}</Typography.Text>
+      <span>→</span>
+      <Typography.Text type="secondary">基准分支</Typography.Text>
+      <Typography.Text code>{selectedBaseBranch || '未选择'}</Typography.Text>
+    </div>
+  )
+
   const renderConflict = () => {
     if (!conflictFiles.length) {
       return (
@@ -347,8 +380,8 @@ export default function ReleasePreparation({
           <div className="conflict-mode-icon">{readOnlyMode ? <LockOutlined /> : <CheckCircleOutlined />}</div>
           <div>
             <div className="conflict-mode-title">
-              <Tag color={readOnlyMode ? 'warning' : 'success'}>{readOnlyMode ? '演示/只读' : '可写模式'}</Tag>
-              <Typography.Text strong>{readOnlyMode ? '可以练习处理，但不会改动仓库' : '平台已获得 Git 冲突写入能力'}</Typography.Text>
+              <Tag color={readOnlyMode ? 'warning' : 'success'}>{readOnlyMode ? '只读' : '可写'}</Tag>
+              <Typography.Text strong>{readOnlyMode ? '当前账号不能写回仓库' : '平台已获得 Git 冲突写入能力'}</Typography.Text>
             </div>
             <Typography.Text type="secondary">
               {readOnlyMode
@@ -464,7 +497,7 @@ export default function ReleasePreparation({
                 disabled={!allResolved || previewComplete}
                 onClick={() => finishConflictHandling(resolvePayload(conflictFiles, editedFiles), allResolved)}
               >
-                {previewComplete ? '演示已完成' : '完成本地演示'}
+                {previewComplete ? '已处理' : '标记为已处理'}
               </Button>
             )}
             <Button
@@ -484,7 +517,7 @@ export default function ReleasePreparation({
           <Alert
             type="info"
             showIcon
-            message="本地演示已完成，发布仍保持锁定"
+            message="本地处理已完成，发布仍保持锁定"
             description="这些编辑和标记没有保存到 Git。请在代码仓库完成真实合并，再点击“重新检查仓库”。"
           />
         )}
@@ -497,7 +530,7 @@ export default function ReleasePreparation({
       return (
         <div className="release-preparation-loading">
           <Spin indicator={<LoadingOutlined spin />} />
-          <Typography.Text>正在确认代码版本，请稍候...</Typography.Text>
+          <Typography.Text>正在检查分支关系，请稍候...</Typography.Text>
         </div>
       )
     }
@@ -506,41 +539,28 @@ export default function ReleasePreparation({
       return (
         <div className="release-preparation-empty">
           <FileSearchOutlined />
-          <Typography.Text type="secondary">选择分支和版本后自动确认</Typography.Text>
+          <Typography.Text type="secondary">选择基准分支后点击“检查”</Typography.Text>
         </div>
       )
     }
 
     if (currentStatus === 'ready') {
-      if (canPublish === false) {
-        return (
-          <Alert
-            className="release-preparation-status-alert"
-            type="warning"
-            showIcon
-            icon={<ExclamationCircleOutlined />}
-            message="版本暂时不能发布"
-            description={summary || '请重新选择有效的分支和代码版本。'}
-          />
-        )
-      }
       return (
-        <div className="release-preparation-ready">
-          <div className="release-preparation-ready-main">
-            <span className="release-preparation-ready-icon"><CheckCircleOutlined /></span>
-            <div className="release-preparation-ready-copy">
-              <Typography.Text strong>版本可发布</Typography.Text>
-            </div>
-          </div>
-          <Tag color="success">已确认</Tag>
-        </div>
+        <Alert
+          className="release-preparation-status-alert"
+          type={canPublish === false ? 'warning' : 'success'}
+          showIcon
+          icon={canPublish === false ? <ExclamationCircleOutlined /> : <CheckCircleOutlined />}
+          message={canPublish === false ? '检查完成，但当前版本暂不可直接发布' : '检查通过，可以发布'}
+          description={summary || '源分支与基准分支状态兼容，不需要额外合并。'}
+        />
       )
     }
 
     if (currentStatus === 'needs_merge') {
       return (
         <div className="release-preparation-result">
-          <Alert className="release-preparation-status-alert" type="warning" showIcon icon={<MergeCellsOutlined />} message="当前代码无法加入发布批次" description={summary || '请处理代码冲突后重新发布。'} />
+          <Alert className="release-preparation-status-alert" type="warning" showIcon icon={<MergeCellsOutlined />} message="需要先合并基准分支" description={summary || '源分支和基准分支存在差异，请先完成合并后再发布。'} />
           <div className="release-preparation-stats">
             <div>
               <Typography.Text type="secondary">源分支独有提交</Typography.Text>
@@ -554,7 +574,6 @@ export default function ReleasePreparation({
           <div className="release-preparation-followup">
             <div>
               <Typography.Text type="secondary">临时发布分支：{tempBranch ? <Typography.Text code copyable>{tempBranch}</Typography.Text> : '暂未生成'}</Typography.Text>
-              {readOnlyMode && <Typography.Text type="secondary"><Tag color="warning">演示/只读</Tag>当前 Git 连接不能创建分支、写入合并结果或处理真实冲突。</Typography.Text>}
             </div>
             <Button type={canPersistConflictResolution ? 'primary' : 'default'} icon={<MergeCellsOutlined />} onClick={openConflictResolution}>
               {canPersistConflictResolution ? '开始合并并检查冲突' : '查看处理说明'}
@@ -567,7 +586,7 @@ export default function ReleasePreparation({
     if (currentStatus === 'conflict') return renderConflict()
 
     if (currentStatus === 'unsupported') {
-      return <Alert className="release-preparation-status-alert" type="warning" showIcon icon={<ExclamationCircleOutlined />} message="暂时无法确认代码版本" description={summary || '请确认仓库和分支配置后重试。'} />
+      return <Alert className="release-preparation-status-alert" type="warning" showIcon icon={<ExclamationCircleOutlined />} message="暂不支持自动代码检查" description={summary || '当前仓库或分支类型不支持自动合并，请确认仓库配置后重试。'} />
     }
 
     return <Alert className="release-preparation-status-alert" type="info" showIcon message={`检查状态：${currentStatus}`} description={summary || '暂时无法识别该检查状态，请重新检查。'} />
@@ -577,19 +596,31 @@ export default function ReleasePreparation({
     <div className="release-preparation">
       <div className="release-preparation-header">
         <div className="release-preparation-heading">
-          <div className="release-preparation-title-row">
-            <Typography.Text strong>
-              版本确认
-            </Typography.Text>
-            <Tag color="blue">自动确认</Tag>
-            <Tooltip title="确认选中的代码版本属于当前分支；发布时加入批次，如果和批次中的其他代码冲突会提示处理。">
-              <QuestionCircleOutlined className="release-preparation-help" aria-label="代码检查说明" />
-            </Tooltip>
-          </div>
-          <Typography.Text type="secondary" className="release-preparation-explainer">
-            确认分支和 Commit 有效；发布时会自动加入当前开放批次。
-          </Typography.Text>
+          <Typography.Text strong>发布前代码检查</Typography.Text>
+          {renderContext()}
         </div>
+        <Space.Compact>
+          <Select
+            aria-label="选择基准分支"
+            value={selectedBaseBranch || undefined}
+            onChange={onBaseBranchChange}
+            options={branchOptions}
+            placeholder="选择基准分支"
+            style={{ minWidth: 190 }}
+            disabled={loading}
+            showSearch
+            optionFilterProp="label"
+          />
+          <Button
+            type="primary"
+            icon={<ReloadOutlined />}
+            loading={loading}
+            disabled={!preparedSourceBranch || !selectedBaseBranch}
+            onClick={() => onPrepare?.(selectedBaseBranch)}
+          >
+            检查
+          </Button>
+        </Space.Compact>
       </div>
       <Divider className="release-preparation-divider" style={{ margin: '2px 0 0' }} />
       {renderResult()}

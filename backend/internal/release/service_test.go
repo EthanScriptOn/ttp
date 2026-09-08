@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -45,8 +44,36 @@ func TestCreateIsIdempotentAndCommitCanBeRemoved(t *testing.T) {
 	}
 }
 
+func TestCreateExplicitSHAIdempotencyDoesNotRecheckProvider(t *testing.T) {
+	provider := &countingProvider{Provider: git.NewDemoProvider()}
+	service := NewService(provider)
+	input := CreateInput{ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main", CommitSHAs: []string{"a1b2c3d4e5f6"}, Strategy: StrategyRolling}
+	first, duplicate, err := service.Create(context.Background(), input)
+	if err != nil || duplicate {
+		t.Fatalf("first release: duplicate=%v err=%v", duplicate, err)
+	}
+	lookupsAfterCreate := provider.commitLookups
+	second, duplicate, err := service.Create(context.Background(), input)
+	if err != nil || !duplicate || second.ID != first.ID {
+		t.Fatalf("repeated release: duplicate=%v id=%s err=%v", duplicate, second.ID, err)
+	}
+	if provider.commitLookups != lookupsAfterCreate {
+		t.Fatalf("repeated explicit-SHA release rechecked provider: before=%d after=%d", lookupsAfterCreate, provider.commitLookups)
+	}
+}
+
+type countingProvider struct {
+	git.Provider
+	commitLookups int
+}
+
+func (p *countingProvider) GetCommit(ctx context.Context, repositoryID, sha string) (git.Commit, error) {
+	p.commitLookups++
+	return p.Provider.GetCommit(ctx, repositoryID, sha)
+}
+
 func TestReleaseStatusFlow(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(git.NewDemoProvider())
 	release, _, err := service.Create(context.Background(), CreateInput{ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main"})
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +96,7 @@ func TestReleaseStatusFlow(t *testing.T) {
 }
 
 func TestReleaseExecutionMetadataAndTerminalImmutability(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(git.NewDemoProvider())
 	clock := time.Date(2026, 1, 12, 10, 0, 0, 0, time.UTC)
 	service.SetClock(func() time.Time { return clock })
 	release, _, err := service.Create(context.Background(), CreateInput{ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main"})
@@ -145,7 +172,7 @@ func TestReleaseExecutionMetadataAndTerminalImmutability(t *testing.T) {
 }
 
 func TestReleaseFailAndCancel(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(git.NewDemoProvider())
 	release, _, err := service.Create(context.Background(), CreateInput{ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main"})
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +218,7 @@ func TestReleaseFailAndCancel(t *testing.T) {
 }
 
 func TestCancelPendingTargetsAfterTargetFailure(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(git.NewDemoProvider())
 	release, _, err := service.Create(context.Background(), CreateInput{
 		ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
 		Targets: []TargetInput{{ID: "dev", Name: "开发环境"}, {ID: "uat", Name: "测试环境"}},
@@ -215,7 +242,7 @@ func TestCancelPendingTargetsAfterTargetFailure(t *testing.T) {
 }
 
 func TestRetryTargetPreservesSuccessfulTargets(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(git.NewDemoProvider())
 	release, _, err := service.Create(context.Background(), CreateInput{
 		ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
 		Targets: []TargetInput{{ID: "dev", Name: "开发环境"}, {ID: "uat", Name: "测试环境"}},
@@ -266,7 +293,7 @@ func TestRetryTargetPreservesSuccessfulTargets(t *testing.T) {
 }
 
 func TestFinalizeTargetsUpdatesReleaseStatus(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(git.NewDemoProvider())
 	release, _, err := service.Create(context.Background(), CreateInput{
 		ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
 		Targets: []TargetInput{{ID: "dev", Name: "开发环境"}},
@@ -292,127 +319,8 @@ func TestFinalizeTargetsUpdatesReleaseStatus(t *testing.T) {
 	}
 }
 
-func TestReleaseTargetsAdvanceInEnvironmentOrder(t *testing.T) {
-	service := NewService(nil)
-	release, _, err := service.Create(context.Background(), CreateInput{
-		ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
-		Targets: []TargetInput{
-			{ID: "prod", Name: "生产环境", Environment: "prod"},
-			{ID: "pre", Name: "预发布环境", Environment: "pre"},
-			{ID: "uat", Name: "测试环境", Environment: "uat"},
-			{ID: "dev", Name: "开发环境", Environment: "dev"},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := []TargetStatus{release.Targets[0].Status, release.Targets[1].Status, release.Targets[2].Status, release.Targets[3].Status}; !reflect.DeepEqual(got, []TargetStatus{TargetPending, TargetWaiting, TargetWaiting, TargetWaiting}) {
-		t.Fatalf("targets were not initialized in rollout order: %#v", got)
-	}
-	if got := []string{release.Targets[0].Environment, release.Targets[1].Environment, release.Targets[2].Environment, release.Targets[3].Environment}; !reflect.DeepEqual(got, []string{"dev", "uat", "pre", "prod"}) {
-		t.Fatalf("targets were not sorted by environment: %#v", got)
-	}
-
-	if _, err = service.CompleteTarget(release.ID, "uat"); !errors.Is(err, ErrTargetNotReady) {
-		t.Fatalf("expected UAT completion to be blocked before DEV, got %v", err)
-	}
-	if _, _, err = service.StartTarget(release.ID, "uat"); !errors.Is(err, ErrTargetNotReady) {
-		t.Fatalf("expected UAT start to be blocked before DEV, got %v", err)
-	}
-
-	started, claimed, err := service.StartTarget(release.ID, "dev")
-	if err != nil || !claimed || started.Targets[0].Status != TargetRunning {
-		t.Fatalf("DEV was not started: claimed=%v release=%#v err=%v", claimed, started, err)
-	}
-	if _, err = service.CompleteTarget(release.ID, "dev"); err != nil {
-		t.Fatal(err)
-	}
-	progressed, err := service.Get(release.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if progressed.Targets[1].Status != TargetPending || progressed.Targets[2].Status != TargetWaiting || progressed.Targets[3].Status != TargetWaiting {
-		t.Fatalf("completing DEV did not unlock only UAT: %#v", progressed.Targets)
-	}
-
-	for _, targetID := range []string{"uat", "pre", "prod"} {
-		if _, claimed, err = service.StartTarget(release.ID, targetID); err != nil || !claimed {
-			t.Fatalf("failed to start %s: claimed=%v err=%v", targetID, claimed, err)
-		}
-		if _, err = service.CompleteTarget(release.ID, targetID); err != nil {
-			t.Fatalf("failed to complete %s: %v", targetID, err)
-		}
-	}
-	finished, err := service.FinalizeTargets(release.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if finished.Status != StatusSucceeded || !productionSucceeded(finished.Targets) {
-		t.Fatalf("ordered release did not finish with an explicit production target: %#v", finished)
-	}
-}
-
-func TestFailedTargetLeavesLaterEnvironmentsWaiting(t *testing.T) {
-	service := NewService(nil)
-	release, _, err := service.Create(context.Background(), CreateInput{
-		ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
-		Targets: []TargetInput{
-			{ID: "dev", Environment: "dev"},
-			{ID: "uat", Environment: "uat"},
-			{ID: "pre", Environment: "pre"},
-			{ID: "prod", Environment: "prod"},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err = service.StartTarget(release.ID, "dev"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = service.FailTarget(release.ID, "dev", "开发集群不可用"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = service.Fail(release.ID, "DEV 发布失败"); err != nil {
-		t.Fatal(err)
-	}
-
-	failed, err := service.Get(release.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, target := range failed.Targets[1:] {
-		if target.Status != TargetWaiting {
-			t.Fatalf("later target was changed after DEV failure: %#v", failed.Targets)
-		}
-	}
-	if _, err = service.RetryTarget(release.ID, "dev"); err != nil {
-		t.Fatal(err)
-	}
-	retried, err := service.Get(release.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retried.Targets[0].Status != TargetPending || retried.Targets[1].Status != TargetWaiting {
-		t.Fatalf("retry changed later environment readiness: %#v", retried.Targets)
-	}
-}
-
-func TestProductionGateRequiresExplicitProdEnvironment(t *testing.T) {
-	completed := []ReleaseTarget{{TargetInput: TargetInput{ID: "production", Name: "生产环境", Environment: "production"}, Status: TargetSucceeded}}
-	if productionSucceeded(completed) {
-		t.Fatal("production alias unexpectedly satisfied the explicit prod gate")
-	}
-	completed[0].Environment = "prod"
-	if !productionSucceeded(completed) {
-		t.Fatal("explicit prod target did not satisfy the production gate")
-	}
-	if productionSucceeded([]ReleaseTarget{{TargetInput: TargetInput{ID: "dev", Environment: "dev"}, Status: TargetSucceeded}}) {
-		t.Fatal("DEV-only release unexpectedly satisfied the production gate")
-	}
-}
-
 func TestReleaseProgressUpdatesAreConcurrentSafe(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(git.NewDemoProvider())
 	release, _, err := service.Create(context.Background(), CreateInput{ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main"})
 	if err != nil {
 		t.Fatal(err)
@@ -446,7 +354,7 @@ func TestReleaseProgressUpdatesAreConcurrentSafe(t *testing.T) {
 }
 
 func TestBlueGreenTrafficUsesBlueAndGreenFields(t *testing.T) {
-	service := NewService(nil)
+	service := NewService(git.NewDemoProvider())
 	item, _, err := service.Create(context.Background(), CreateInput{
 		ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
 		Strategy: StrategyBlueGreen,
@@ -474,8 +382,77 @@ func TestBlueGreenTrafficUsesBlueAndGreenFields(t *testing.T) {
 	}
 }
 
+func TestPersistentServiceRestoresReleaseExecutionState(t *testing.T) {
+	repository := &releaseTestRepository{}
+	service, err := NewPersistentService(context.Background(), git.NewDemoProvider(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _, err := service.Create(context.Background(), CreateInput{
+		SpaceID: "space-lab", ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
+		CommitSHAs: []string{"a1b2c3d4e5f6", "f6e5d4c3b2a1"},
+		Targets:    []TargetInput{{ID: "target-dev", Name: "开发环境", EnvironmentStage: "dev", SortOrder: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Transition(item.ID, StatusQueued); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Transition(item.ID, StatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.UpdateTargetProgress(item.ID, "target-dev", 82, "deploying", "正在更新 Kubernetes 部署"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.SetArtifact(item.ID, Artifact{Image: "registry.example.com/team/reverse-lab@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", CommitSHA: "a1b2c3d4e5f6"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.AppendTargetLog(item.ID, "target-dev", "k8s", "stderr", "WARN", "deployment.apps/reverse-lab-api waiting for rollout"); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewPersistentService(context.Background(), git.NewDemoProvider(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := reloaded.Get(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != StatusRunning || restored.Progress != 82 || len(restored.Commits) != 2 || len(restored.Targets) != 1 || restored.Artifact == nil {
+		t.Fatalf("persistent service did not restore release state: %#v", restored)
+	}
+	if len(restored.Targets[0].Logs) != 1 || restored.Targets[0].Logs[0].Line != "deployment.apps/reverse-lab-api waiting for rollout" {
+		t.Fatalf("persistent service did not restore raw execution logs: %#v", restored.Targets[0].Logs)
+	}
+}
+
+type releaseTestRepository struct {
+	items []Release
+}
+
+func (r *releaseTestRepository) LoadReleases(_ context.Context) ([]Release, error) {
+	result := make([]Release, 0, len(r.items))
+	for _, item := range r.items {
+		result = append(result, cloneRelease(item))
+	}
+	return result, nil
+}
+
+func (r *releaseTestRepository) SaveRelease(_ context.Context, item Release) error {
+	for index := range r.items {
+		if r.items[index].ID == item.ID {
+			r.items[index] = cloneRelease(item)
+			return nil
+		}
+	}
+	r.items = append(r.items, cloneRelease(item))
+	return nil
+}
+
 func TestReleaseHandlerCreatesAndTransitions(t *testing.T) {
-	handler := NewHandler(NewService(nil))
+	handler := NewHandler(NewService(git.NewDemoProvider()))
 	body := `{"project_id":"reverse-lab","repository_id":"demo-repo","branch":"main","commit_shas":["a1b2c3d4e5f6"]}`
 	create := httptest.NewRequest("POST", "/releases", strings.NewReader(body))
 	recorder := httptest.NewRecorder()

@@ -1,8 +1,6 @@
 package auth
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"strconv"
 	"strings"
@@ -31,20 +29,12 @@ type Manager struct {
 
 func NewManager(secret string, minutes int) *Manager {
 	if strings.TrimSpace(secret) == "" {
-		secret = ephemeralSecret()
+		secret = "local-only-change-this-secret"
 	}
 	if minutes <= 0 {
 		minutes = 720
 	}
 	return &Manager{secret: []byte(secret), ttl: time.Duration(minutes) * time.Minute}
-}
-
-func ephemeralSecret() string {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err == nil {
-		return base64.RawURLEncoding.EncodeToString(bytes)
-	}
-	return base64.RawURLEncoding.EncodeToString([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
 }
 
 func (m *Manager) Issue(user domain.User, spaceID, role string) (string, time.Time, error) {

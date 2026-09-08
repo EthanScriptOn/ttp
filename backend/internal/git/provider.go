@@ -7,11 +7,12 @@ import (
 )
 
 var (
-	ErrRepositoryNotFound = errors.New("git repository not found")
-	ErrRepositoryConflict = errors.New("git repository ID is already bound to another repository")
-	ErrBranchNotFound     = errors.New("git branch not found")
-	ErrCommitNotFound     = errors.New("git commit not found")
-	ErrWriteUnsupported   = errors.New("git write operations are not supported")
+	ErrProviderNotConfigured = errors.New("git provider is not configured")
+	ErrRepositoryNotFound    = errors.New("git repository not found")
+	ErrRepositoryConflict    = errors.New("git repository ID is already bound to another repository")
+	ErrBranchNotFound        = errors.New("git branch not found")
+	ErrCommitNotFound        = errors.New("git commit not found")
+	ErrWriteUnsupported      = errors.New("git write operations are not supported")
 )
 
 // Repository is the provider-neutral identity of a Git repository.
@@ -44,8 +45,25 @@ type Tag struct {
 	SHA  string `json:"sha"`
 }
 
+// RepositoryCredential is the project-owned machine identity used for Git
+// operations. Token is kept in memory only while a request configures a
+// provider and is never included in API responses.
+type RepositoryCredential struct {
+	Provider string
+	Username string
+	Token    string
+}
+
+// RepositoryCredentialRegistry lets the API bind a project's encrypted
+// credential to the provider used for that project's repository.
+type RepositoryCredentialRegistry interface {
+	ConfigureRepositoryCredential(repositoryID, repositoryURL string, credential RepositoryCredential) error
+	CheckRepositoryCredential(ctx context.Context, repositoryID, repositoryURL string, credential RepositoryCredential) (RepositoryAccess, error)
+	ClearRepositoryCredential(repositoryID, repositoryURL string) error
+}
+
 // TagProvider is optional so existing custom read-only providers remain
-// source-compatible. Built-in GitHub, GitLab, and demo providers implement it.
+// source-compatible. Built-in GitHub and GitLab providers implement it.
 type TagProvider interface {
 	ListTags(ctx context.Context, repositoryID string, limit int) ([]Tag, error)
 }
@@ -62,7 +80,7 @@ type MergeRequest struct {
 }
 
 // MergeConflict is deliberately provider-neutral so the UI can present the
-// same conflict editor for GitHub, GitLab, or the local demo provider.
+// same conflict editor for GitHub or GitLab.
 type MergeConflict struct {
 	Path            string
 	BaseContent     string
@@ -87,76 +105,8 @@ type MergeResult struct {
 	Message         string
 }
 
-// MainMergeRequest describes the only Git write that can finish a TTP
-// release. The batch branch is intentionally informational here: callers
-// merge the selected release commits into the current main branch, never the
-// whole batch branch.
-type MainMergeRequest struct {
-	RepositoryID   string
-	SourceBranch   string
-	BaseBranch     string
-	BatchBranch    string
-	CurrentMainSHA string
-	SelectedSHAs   []string
-}
-
-// MainMergeResult is returned by a provider that can perform the final,
-// per-release merge. Read-only providers can omit this optional interface; the
-// API will then refuse the operation instead of claiming that main changed.
-type MainMergeResult struct {
-	Status    string
-	HeadSHA   string
-	Conflicts []MergeConflict
-	Message   string
-}
-
-// BatchBranchRequest describes the shared integration branch used while
-// several developers validate their own release items. The batch branch is a
-// test workspace only; it is never a replacement for the protected main
-// branch.
-type BatchBranchRequest struct {
-	RepositoryID   string
-	BatchBranch    string
-	BaseBranch     string
-	BaseSHA        string
-	SourceBranch   string
-	CurrentHeadSHA string
-	SelectedSHAs   []string
-}
-
-// BatchBranchResult reports the branch created or updated by a batch
-// integration operation. Providers may omit this optional interface when
-// they are intentionally read-only.
-type BatchBranchResult struct {
-	Status             string
-	BatchBranch        string
-	HeadSHA            string
-	ReleaseSnapshotSHA string
-	Message            string
-}
-
-// BatchOperator is optional so existing read-only providers remain source
-// compatible. Implementations must create the batch branch from BaseBranch
-// when it does not exist and then integrate only SelectedSHAs from the
-// individual release. They must not change BaseBranch.
-type BatchOperator interface {
-	IntegrateReleaseToBatch(ctx context.Context, request BatchBranchRequest) (BatchBranchResult, error)
-}
-
-// MainMergeOperator is optional so existing read-only Git providers remain
-// source-compatible. Implementations must merge only SelectedSHAs into the
-// current base and must not fast-forward main to the shared batch branch.
-type MainMergeOperator interface {
-	// Implementations must compare CurrentMainSHA with the live BaseBranch head
-	// as part of the remote merge operation and return a conflict when they do
-	// not match. This keeps a main update that happens after the service's
-	// pre-check from being silently overwritten.
-	MergeReleaseToMain(ctx context.Context, request MainMergeRequest) (MainMergeResult, error)
-}
-
 // MergeOperator is optional. The default remote providers remain read-only;
-// the local demo provider implements this interface in memory so the complete
-// preparation flow can be exercised without touching a real repository.
+// tests may provide an in-memory implementation without touching a repository.
 type MergeOperator interface {
 	PrepareMerge(ctx context.Context, request MergeRequest) (MergeResult, error)
 	ResolveMerge(ctx context.Context, request MergeRequest, resolutions []MergeResolution) (MergeResult, error)

@@ -46,6 +46,7 @@ type Project struct {
 	DeployStrategy        string    `json:"deploy_strategy"`
 	Replicas              int       `json:"replicas"`
 	ContainerPort         int       `json:"container_port"`
+	ImageRepository       string    `json:"image_repository,omitempty"`
 	Health                string    `json:"health,omitempty"`
 	PodCount              int       `json:"pod_count"`
 	HealthyPodCount       int       `json:"healthy_pod_count"`

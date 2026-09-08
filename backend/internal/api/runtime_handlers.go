@@ -81,6 +81,39 @@ func (s *Server) getPodLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"logs": logs})
 }
 
+func (s *Server) execPodCommand(c *gin.Context) {
+	project, ok := s.projectForRequest(c)
+	if !ok {
+		return
+	}
+	target, ok := s.deploymentTargetForProject(c, project)
+	if !ok {
+		return
+	}
+	if !s.ensureRuntimeTarget(c, project, target) {
+		return
+	}
+	var input struct {
+		Container string `json:"container"`
+		Command   string `json:"command" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request", "命令不能为空")
+		return
+	}
+	result, err := s.deps.Runtime.ExecPodCommand(c.Request.Context(), runtime.PodExecRequest{
+		PodRef:    runtime.PodRef{ClusterID: target.ClusterID, Namespace: target.Namespace, Name: c.Param("podName"), ProjectID: project.ID},
+		Container: input.Container,
+		Command:   input.Command,
+	})
+	if err != nil {
+		writeRuntimeError(c, err)
+		return
+	}
+	s.recordAudit(c, "进入 Pod 终端", project.Name+" · "+c.Param("podName"))
+	c.JSON(http.StatusOK, result)
+}
+
 func (s *Server) updatePodConfig(c *gin.Context) {
 	project, ok := s.projectForRequest(c)
 	if !ok {
@@ -180,12 +213,18 @@ func writeRuntimeError(c *gin.Context, err error) {
 	status, code := http.StatusInternalServerError, "runtime_error"
 	message := err.Error()
 	switch {
+	case errors.Is(err, runtime.ErrProviderNotConfigured):
+		status, code, message = http.StatusServiceUnavailable, "runtime_provider_not_configured", "运行时未配置"
 	case errors.Is(err, runtime.ErrClusterNotFound), errors.Is(err, runtime.ErrProjectNotFound), errors.Is(err, runtime.ErrPodNotFound), errors.Is(err, runtime.ErrContainerNotFound):
 		status, code = http.StatusNotFound, "not_found"
 	case errors.Is(err, store.ErrNotFound):
 		status, code, message = http.StatusNotFound, "not_found", "集群不存在"
 	case errors.Is(err, runtime.ErrClusterManagementUnsupported):
 		status, code, message = http.StatusNotImplemented, "cluster_management_unsupported", "当前运行时不支持集群动态接入"
+	case errors.Is(err, runtime.ErrEnvironmentCleanupUnsupported):
+		status, code, message = http.StatusNotImplemented, "environment_cleanup_unsupported", "当前运行时不支持安全清理环境资源"
+	case errors.Is(err, runtime.ErrEnvironmentCleanupFailed):
+		status, code = http.StatusBadGateway, "environment_cleanup_failed"
 	case errors.Is(err, runtime.ErrClusterRegistrationFailed):
 		status, code, message = http.StatusBadGateway, "cluster_connection_failed", "集群连接失败，请检查 API Server、kubeconfig 路径和 Context"
 	case errors.Is(err, context.DeadlineExceeded):

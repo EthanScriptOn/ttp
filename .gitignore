@@ -1,22 +1,5 @@
-# OS and editor files
-.DS_Store
-.idea/
-.vscode/
+.runtime/
 
-# Local configuration and secrets
-.env
-.env.*
-!.env.example
-
-# Logs and temporary files
-*.log
-.tmp/
-tmp/
-
-# Frontend dependencies and build output
-frontend/node_modules/
-frontend/dist/
-frontend/.vite-cache/
-
-# Backend build output
-backend/bin/
+# Builder credentials are intentionally local-only.
+deploy/builder/registry-credentials.json
+*.credentials.json

@@ -1,10 +1,12 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -16,9 +18,10 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 const (
@@ -99,10 +102,6 @@ func WithKubernetesRolloutWait(enabled bool) KubernetesOption {
 // pod and metrics queries.
 func WithProjectLabelKey(key string) KubernetesOption {
 	return func(provider *KubernetesProvider) {
-		if strings.TrimSpace(key) == "" {
-			provider.projectLabelKey = ""
-			return
-		}
 		if len(validation.IsQualifiedName(key)) == 0 {
 			provider.projectLabelKey = key
 		}
@@ -125,7 +124,7 @@ func WithKubernetesTargetContainer(name string) KubernetesOption {
 type KubernetesProvider struct {
 	mu                  sync.RWMutex
 	clients             map[string]kubernetes.Interface
-	metricsClients      map[string]metricsclientset.Interface
+	configs             map[string]*rest.Config
 	timeout             time.Duration
 	rolloutTimeout      time.Duration
 	rolloutPollInterval time.Duration
@@ -143,7 +142,7 @@ var _ Provider = (*KubernetesProvider)(nil)
 func NewKubernetesProvider(options ...KubernetesOption) *KubernetesProvider {
 	provider := &KubernetesProvider{
 		clients:             make(map[string]kubernetes.Interface),
-		metricsClients:      make(map[string]metricsclientset.Interface),
+		configs:             make(map[string]*rest.Config),
 		timeout:             defaultKubeTimeout,
 		rolloutTimeout:      defaultRolloutTimeout,
 		rolloutPollInterval: defaultRolloutPollInterval,
@@ -163,10 +162,6 @@ func NewKubernetesProvider(options ...KubernetesOption) *KubernetesProvider {
 // RegisterClient registers an already-created client. It is useful for tests
 // and for applications that create rest.Config objects themselves.
 func (p *KubernetesProvider) RegisterClient(clusterID string, client kubernetes.Interface) error {
-	return p.registerClient(clusterID, client, nil)
-}
-
-func (p *KubernetesProvider) registerClient(clusterID string, client kubernetes.Interface, metricsClient metricsclientset.Interface) error {
 	if err := validateClusterID(clusterID); err != nil {
 		return err
 	}
@@ -176,11 +171,7 @@ func (p *KubernetesProvider) registerClient(clusterID string, client kubernetes.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.clients[clusterID] = client
-	if metricsClient != nil {
-		p.metricsClients[clusterID] = metricsClient
-	} else {
-		delete(p.metricsClients, clusterID)
-	}
+	p.configs[clusterID] = nil
 	return nil
 }
 
@@ -216,11 +207,13 @@ func (p *KubernetesProvider) RegisterKubeconfigWithContext(clusterID, kubeconfig
 	if err != nil {
 		return fmt.Errorf("create kubernetes client: %w", err)
 	}
-	metricsClient, err := metricsclientset.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("create kubernetes metrics client: %w", err)
+	if err := p.RegisterClient(clusterID, client); err != nil {
+		return err
 	}
-	return p.registerClient(clusterID, client, metricsClient)
+	p.mu.Lock()
+	p.configs[clusterID] = config
+	p.mu.Unlock()
+	return nil
 }
 
 // RegisterInCluster registers a client using the service account and API
@@ -237,11 +230,13 @@ func (p *KubernetesProvider) RegisterInCluster(clusterID string) error {
 	if err != nil {
 		return fmt.Errorf("create kubernetes client: %w", err)
 	}
-	metricsClient, err := metricsclientset.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("create kubernetes metrics client: %w", err)
+	if err := p.RegisterClient(clusterID, client); err != nil {
+		return err
 	}
-	return p.registerClient(clusterID, client, metricsClient)
+	p.mu.Lock()
+	p.configs[clusterID] = config
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *KubernetesProvider) CheckCluster(ctx context.Context, clusterID string) (ClusterConnection, error) {
@@ -264,7 +259,7 @@ func (p *KubernetesProvider) ListPods(ctx context.Context, clusterID, projectID 
 }
 
 // ListPodsInNamespace provides the namespace-aware form of ListPods while the
-// existing Provider interface remains compatible with the demo provider.
+// existing Provider interface remains compatible with read-only providers.
 func (p *KubernetesProvider) ListPodsInNamespace(ctx context.Context, clusterID, namespace, projectID string) ([]Pod, error) {
 	client, err := p.clientFor(clusterID)
 	if err != nil {
@@ -288,7 +283,6 @@ func (p *KubernetesProvider) ListPodsInNamespace(ctx context.Context, clusterID,
 	for _, item := range list.Items {
 		result = append(result, p.podFromKubernetes(clusterID, item, projectID))
 	}
-	p.attachPodMetrics(requestContext, clusterID, namespace, projectID, result)
 	return result, nil
 }
 
@@ -365,6 +359,72 @@ func (p *KubernetesProvider) GetPodLogs(ctx context.Context, request PodLogReque
 	return string(data), nil
 }
 
+func (p *KubernetesProvider) ExecPodCommand(ctx context.Context, request PodExecRequest) (PodExecResult, error) {
+	client, err := p.clientFor(request.ClusterID)
+	if err != nil {
+		return PodExecResult{}, err
+	}
+	if err := validatePodRef(request.PodRef); err != nil {
+		return PodExecResult{}, err
+	}
+	command := strings.TrimSpace(request.Command)
+	if command == "" || len(command) > 4096 || strings.ContainsAny(command, "\x00\r\n") {
+		return PodExecResult{}, fmt.Errorf("%w: command must be between 1 and 4096 characters", ErrInvalidKubernetesInput)
+	}
+
+	p.mu.RLock()
+	config := p.configs[request.ClusterID]
+	p.mu.RUnlock()
+	if config == nil {
+		return PodExecResult{}, ErrPodExecUnsupported
+	}
+
+	requestContext, cancel := p.requestContext(ctx)
+	defer cancel()
+	pod, err := client.CoreV1().Pods(request.Namespace).Get(requestContext, request.Name, metav1.GetOptions{})
+	if err != nil {
+		return PodExecResult{}, mapKubernetesNotFound(err, ErrPodNotFound)
+	}
+	if !p.podBelongsToProject(pod, request.ProjectID) {
+		return PodExecResult{}, ErrPodNotFound
+	}
+	container := strings.TrimSpace(request.Container)
+	if container == "" {
+		if len(pod.Spec.Containers) != 1 {
+			return PodExecResult{}, ErrContainerNotFound
+		}
+		container = pod.Spec.Containers[0].Name
+	}
+	if err := validateContainerName(container); err != nil {
+		return PodExecResult{}, err
+	}
+
+	execURL := client.CoreV1().RESTClient().Post().Resource("pods").Name(request.Name).Namespace(request.Namespace).SubResource("exec").VersionedParams(&corev1.PodExecOptions{
+		Container: container,
+		Command:   []string{"/bin/sh", "-c", command},
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       false,
+	}, scheme.ParameterCodec).URL()
+	executor, err := remotecommand.NewSPDYExecutor(config, http.MethodPost, execURL)
+	if err != nil {
+		return PodExecResult{}, err
+	}
+	var stdout, stderr bytes.Buffer
+	err = executor.StreamWithContext(requestContext, remotecommand.StreamOptions{Stdout: &stdout, Stderr: &stderr})
+	output := stdout.String()
+	if stderr.Len() > 0 {
+		if output != "" && !strings.HasSuffix(output, "\n") {
+			output += "\n"
+		}
+		output += stderr.String()
+	}
+	if len(output) > maxPodLogBytes {
+		return PodExecResult{}, ErrRuntimeResponseTooLarge
+	}
+	return PodExecResult{Output: output}, err
+}
+
 // UpdatePodConfig intentionally does not update the Pod object. Pods are
 // disposable workload instances; the owning Deployment template is the
 // persistent source of truth and its template annotation triggers a rollout.
@@ -398,7 +458,7 @@ func (p *KubernetesProvider) UpdatePodConfig(ctx context.Context, ref PodRef, up
 	}
 	if len(update.Config) > 0 {
 		projectID := p.projectIDFromWorkload(pod, deployment)
-		if err := p.upsertConfigMap(requestContext, client, deployment, projectID, update.Config); err != nil {
+		if err := p.upsertConfigMap(requestContext, client, deployment, projectID, deployment.Labels[targetLabelKey], update.Config); err != nil {
 			return PodDetail{}, err
 		}
 		configName := p.configMapName(deployment.Name)
@@ -518,58 +578,6 @@ func (p *KubernetesProvider) clientFor(clusterID string) (kubernetes.Interface, 
 	return client, nil
 }
 
-func (p *KubernetesProvider) metricsClientFor(clusterID string) (metricsclientset.Interface, error) {
-	if err := validateClusterID(clusterID); err != nil {
-		return nil, err
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	client, ok := p.metricsClients[clusterID]
-	if !ok {
-		return nil, ErrClusterNotFound
-	}
-	return client, nil
-}
-
-func (p *KubernetesProvider) attachPodMetrics(ctx context.Context, clusterID, namespace, projectID string, pods []Pod) {
-	if len(pods) == 0 {
-		return
-	}
-	client, err := p.metricsClientFor(clusterID)
-	if err != nil {
-		return
-	}
-	// Metrics-server versions differ in whether PodMetrics preserves workload
-	// labels. The Pod list has already been scoped by project and namespace, so
-	// fetch metrics for that scope and match them back by the stable Pod key.
-	metrics, err := client.MetricsV1beta1().PodMetricses(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return
-	}
-
-	usageByPod := make(map[string][2]int64, len(metrics.Items))
-	for _, item := range metrics.Items {
-		var cpuMilli, memoryBytes int64
-		for _, container := range item.Containers {
-			cpu := container.Usage[corev1.ResourceCPU]
-			memory := container.Usage[corev1.ResourceMemory]
-			cpuMilli += cpu.MilliValue()
-			memoryBytes += memory.Value()
-		}
-		usageByPod[item.Namespace+"\x00"+item.Name] = [2]int64{cpuMilli, memoryBytes}
-	}
-	for index := range pods {
-		usage, ok := usageByPod[pods[index].Namespace+"\x00"+pods[index].Name]
-		if !ok {
-			continue
-		}
-		pods[index].CPUUsageMilli = usage[0]
-		pods[index].MemoryUsageBytes = usage[1]
-		pods[index].MetricsAvailable = true
-		pods[index].MetricsSource = "metrics-server"
-	}
-}
-
 func (p *KubernetesProvider) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -582,7 +590,7 @@ func (p *KubernetesProvider) requestContext(ctx context.Context) (context.Contex
 }
 
 func (p *KubernetesProvider) projectSelector(projectID string) string {
-	if projectID == "" || p.projectLabelKey == "" {
+	if projectID == "" {
 		return ""
 	}
 	return labels.Set{p.projectLabelKey: projectID}.AsSelector().String()
@@ -629,9 +637,6 @@ func (p *KubernetesProvider) podDetail(ctx context.Context, client kubernetes.In
 			}
 		}
 	}
-	pods := []Pod{detail.Pod}
-	p.attachPodMetrics(ctx, clusterID, pod.Namespace, "", pods)
-	detail.Pod = pods[0]
 	return detail, nil
 }
 
@@ -707,7 +712,7 @@ func (p *KubernetesProvider) configMapName(deploymentName string) string {
 	return base + p.configMapSuffix
 }
 
-func (p *KubernetesProvider) upsertConfigMap(ctx context.Context, client kubernetes.Interface, deployment *appsv1.Deployment, projectID string, values map[string]string) error {
+func (p *KubernetesProvider) upsertConfigMap(ctx context.Context, client kubernetes.Interface, deployment *appsv1.Deployment, projectID, targetID string, values map[string]string) error {
 	name := p.configMapName(deployment.Name)
 	configMaps := client.CoreV1().ConfigMaps(deployment.Namespace)
 	configMap, err := configMaps.Get(ctx, name, metav1.GetOptions{})
@@ -716,6 +721,10 @@ func (p *KubernetesProvider) upsertConfigMap(ctx context.Context, client kuberne
 		labels := make(map[string]string)
 		if projectID != "" {
 			labels[p.projectLabelKey] = projectID
+		}
+		if targetID != "" {
+			labels[targetLabelKey] = targetID
+			labels[managedByLabelKey] = managedByLabelValue
 		}
 		object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: deployment.Namespace, Labels: labels}, Data: data}
 		if deployment.UID != "" {
@@ -734,6 +743,10 @@ func (p *KubernetesProvider) upsertConfigMap(ctx context.Context, client kuberne
 		configMap.Labels[p.projectLabelKey] = projectID
 	} else {
 		delete(configMap.Labels, p.projectLabelKey)
+	}
+	if targetID != "" {
+		configMap.Labels[targetLabelKey] = targetID
+		configMap.Labels[managedByLabelKey] = managedByLabelValue
 	}
 	if configMap.Data == nil {
 		configMap.Data = make(map[string]string)
@@ -764,7 +777,7 @@ func (p *KubernetesProvider) projectIDFromWorkload(pod *corev1.Pod, deployment *
 
 func (p *KubernetesProvider) podBelongsToProject(pod *corev1.Pod, projectID string) bool {
 	projectID = strings.TrimSpace(projectID)
-	if projectID == "" || p.projectLabelKey == "" {
+	if projectID == "" {
 		return true
 	}
 	return pod != nil && strings.TrimSpace(pod.Labels[p.projectLabelKey]) == projectID

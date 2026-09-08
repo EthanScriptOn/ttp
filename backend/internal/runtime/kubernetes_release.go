@@ -27,12 +27,21 @@ const (
 	releaseLabelKey       = "cicd.yuebuy.com/release"
 	releaseVersionLabel   = "cicd.yuebuy.com/version"
 	releaseBranchAnnotKey = "cicd.yuebuy.com/branch"
+	targetLabelKey        = "cicd.yuebuy.com/target"
+	managedByLabelKey     = "cicd.yuebuy.com/managed-by"
+	managedByLabelValue   = "ttp"
 )
 
 // DeployRelease applies the namespaced resources supported by the current
 // deployment manifest contract. All resources are parsed and checked before
 // the first API write so unsupported input cannot result in a partial rollout.
-func (p *KubernetesProvider) DeployRelease(ctx context.Context, deployment ReleaseDeployment) error {
+func (p *KubernetesProvider) DeployRelease(ctx context.Context, deployment ReleaseDeployment) (err error) {
+	log := deployment.Log
+	defer func() {
+		if err != nil {
+			releaseLog(log, "k8s", "stderr", "ERROR", err.Error())
+		}
+	}()
 	deployment.ClusterID = strings.TrimSpace(deployment.ClusterID)
 	deployment.Namespace = strings.TrimSpace(deployment.Namespace)
 	deployment.ProjectID = strings.TrimSpace(deployment.ProjectID)
@@ -43,6 +52,7 @@ func (p *KubernetesProvider) DeployRelease(ctx context.Context, deployment Relea
 	if err := validateReleaseDeployment(deployment); err != nil {
 		return err
 	}
+	releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("client-go cluster=%s namespace=%s", deployment.ClusterID, deployment.Namespace))
 	client, err := p.clientFor(deployment.ClusterID)
 	if err != nil {
 		return err
@@ -61,6 +71,7 @@ func (p *KubernetesProvider) DeployRelease(ctx context.Context, deployment Relea
 	if err != nil {
 		return err
 	}
+	releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("decoded %d Kubernetes resources from manifest", len(resources)))
 
 	requestContext, cancel := p.requestContext(ctx)
 	defer cancel()
@@ -68,42 +79,62 @@ func (p *KubernetesProvider) DeployRelease(ctx context.Context, deployment Relea
 	for _, resource := range resources {
 		switch resource.kind {
 		case "Deployment":
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("apply Deployment/%s namespace=%s", resource.deployment.Name, resource.deployment.Namespace))
 			applied, err := p.applyReleaseDeployment(requestContext, client, resource.deployment)
 			if err != nil {
 				return err
 			}
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("deployment.apps/%s configured resourceVersion=%s generation=%d", applied.Name, applied.ResourceVersion, applied.Generation))
 			appliedDeployments = append(appliedDeployments, applied)
 		case "Service":
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("apply Service/%s namespace=%s", resource.service.Name, resource.service.Namespace))
 			if err := p.applyReleaseService(requestContext, client, resource.service); err != nil {
 				return err
 			}
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("service/%s configured", resource.service.Name))
 		case "ConfigMap":
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("apply ConfigMap/%s namespace=%s", resource.configMap.Name, resource.configMap.Namespace))
 			if err := p.applyReleaseConfigMap(requestContext, client, resource.configMap); err != nil {
 				return err
 			}
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("configmap/%s configured", resource.configMap.Name))
 		case "Secret":
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("apply Secret/%s namespace=%s", resource.secret.Name, resource.secret.Namespace))
 			if err := p.applyReleaseSecret(requestContext, client, resource.secret); err != nil {
 				return err
 			}
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("secret/%s configured", resource.secret.Name))
 		case "Ingress":
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("apply Ingress/%s namespace=%s", resource.ingress.Name, resource.ingress.Namespace))
 			if err := p.applyReleaseIngress(requestContext, client, resource.ingress); err != nil {
 				return err
 			}
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("ingress.networking.k8s.io/%s configured", resource.ingress.Name))
 		case "HorizontalPodAutoscaler":
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("apply HorizontalPodAutoscaler/%s namespace=%s", resource.hpa.Name, resource.hpa.Namespace))
 			if err := p.applyReleaseHPA(requestContext, client, resource.hpa); err != nil {
 				return err
 			}
+			releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("horizontalpodautoscaler.autoscaling/%s configured", resource.hpa.Name))
 		}
 	}
 	if !p.rolloutWait {
 		return nil
 	}
 	for _, applied := range appliedDeployments {
-		if err := p.waitForDeploymentRollout(ctx, client, applied); err != nil {
+		releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("deployment/%s rollout status", applied.Name))
+		if err := p.waitForDeploymentRollout(ctx, client, applied, log); err != nil {
 			return err
 		}
+		releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("deployment/%s successfully rolled out", applied.Name))
 	}
 	return nil
+}
+
+func releaseLog(log ReleaseLogFunc, source, stream, level, line string) {
+	if log != nil && strings.TrimSpace(line) != "" {
+		log(source, stream, level, line)
+	}
 }
 
 type releaseResource struct {
@@ -144,7 +175,7 @@ func validateReleaseDeployment(deployment ReleaseDeployment) error {
 	if strings.ContainsAny(deployment.Branch, "\x00\r\n") {
 		return fmt.Errorf("%w: branch contains invalid control characters", ErrInvalidKubernetesInput)
 	}
-	if deployment.Replicas < 0 || deployment.Replicas > 100 {
+	if deployment.Replicas <= 0 || deployment.Replicas > 100 {
 		return fmt.Errorf("%w: replicas must be between 1 and 100", ErrInvalidKubernetesInput)
 	}
 	if strings.TrimSpace(deployment.Strategy) != "" && strings.TrimSpace(deployment.Strategy) != "rolling" {
@@ -250,21 +281,25 @@ func (p *KubernetesProvider) prepareReleaseResources(objects []map[string]any, d
 			if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(unstructuredObject.Object, resource.service); err != nil {
 				return nil, fmt.Errorf("%w: resource %d service is invalid: %v", deploymentconfig.ErrInvalidManifest, index+1, err)
 			}
+			p.prepareReleaseObjectMeta(&resource.service.ObjectMeta, deployment)
 		case "ConfigMap":
 			resource.configMap = &corev1.ConfigMap{}
 			if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(unstructuredObject.Object, resource.configMap); err != nil {
 				return nil, fmt.Errorf("%w: resource %d config map is invalid: %v", deploymentconfig.ErrInvalidManifest, index+1, err)
 			}
+			p.prepareReleaseObjectMeta(&resource.configMap.ObjectMeta, deployment)
 		case "Secret":
 			resource.secret = &corev1.Secret{}
 			if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(unstructuredObject.Object, resource.secret); err != nil {
 				return nil, fmt.Errorf("%w: resource %d secret is invalid: %v", deploymentconfig.ErrInvalidManifest, index+1, err)
 			}
+			p.prepareReleaseObjectMeta(&resource.secret.ObjectMeta, deployment)
 		case "Ingress":
 			resource.ingress = &networkingv1.Ingress{}
 			if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(unstructuredObject.Object, resource.ingress); err != nil {
 				return nil, fmt.Errorf("%w: resource %d ingress is invalid: %v", deploymentconfig.ErrInvalidManifest, index+1, err)
 			}
+			p.prepareReleaseObjectMeta(&resource.ingress.ObjectMeta, deployment)
 		case "HorizontalPodAutoscaler":
 			resource.hpa = &autoscalingv2.HorizontalPodAutoscaler{}
 			if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(unstructuredObject.Object, resource.hpa); err != nil {
@@ -273,6 +308,7 @@ func (p *KubernetesProvider) prepareReleaseResources(objects []map[string]any, d
 			if err := validateReleaseHPA(resource.hpa); err != nil {
 				return nil, fmt.Errorf("%w: resource %d: %v", deploymentconfig.ErrInvalidManifest, index+1, err)
 			}
+			p.prepareReleaseObjectMeta(&resource.hpa.ObjectMeta, deployment)
 		}
 		resources = append(resources, resource)
 	}
@@ -287,13 +323,8 @@ func (p *KubernetesProvider) prepareReleaseDeployment(deployment *appsv1.Deploym
 		return errors.New("deployment name is required")
 	}
 	replicas := int32(release.Replicas)
-	if replicas == 0 {
-		replicas = 1
-	}
 	deployment.Spec.Replicas = &replicas
-	if deployment.Labels == nil {
-		deployment.Labels = make(map[string]string)
-	}
+	p.prepareReleaseObjectMeta(&deployment.ObjectMeta, release)
 	if deployment.Spec.Template.Labels == nil {
 		deployment.Spec.Template.Labels = make(map[string]string)
 	}
@@ -301,6 +332,9 @@ func (p *KubernetesProvider) prepareReleaseDeployment(deployment *appsv1.Deploym
 	deployment.Spec.Template.Labels[p.projectLabelKey] = release.ProjectID
 	deployment.Labels[releaseLabelKey] = release.ReleaseID
 	deployment.Spec.Template.Labels[releaseLabelKey] = release.ReleaseID
+	if release.TargetID != "" {
+		deployment.Spec.Template.Labels[targetLabelKey] = release.TargetID
+	}
 	version := release.CommitSHA
 	if len(version) > 10 {
 		version = version[:10]
@@ -334,6 +368,21 @@ func (p *KubernetesProvider) prepareReleaseDeployment(deployment *appsv1.Deploym
 		"CICD_GREEN_PERCENT":     fmt.Sprint(release.GreenPercent),
 	})
 	return nil
+}
+
+func (p *KubernetesProvider) prepareReleaseObjectMeta(meta *metav1.ObjectMeta, release ReleaseDeployment) {
+	if meta == nil {
+		return
+	}
+	if meta.Labels == nil {
+		meta.Labels = make(map[string]string)
+	}
+	meta.Labels[p.projectLabelKey] = release.ProjectID
+	meta.Labels[managedByLabelKey] = managedByLabelValue
+	meta.Labels[releaseLabelKey] = release.ReleaseID
+	if release.TargetID != "" {
+		meta.Labels[targetLabelKey] = release.TargetID
+	}
 }
 
 func validLabelValue(value string) bool {
@@ -465,7 +514,7 @@ func validateReleaseHPA(hpa *autoscalingv2.HorizontalPodAutoscaler) error {
 // treating an accepted API write as a successful release. The caller's
 // context remains the outer cancellation boundary; rolloutTimeout gives this
 // provider its own, explicit readiness deadline.
-func (p *KubernetesProvider) waitForDeploymentRollout(ctx context.Context, client kubernetes.Interface, applied *appsv1.Deployment) error {
+func (p *KubernetesProvider) waitForDeploymentRollout(ctx context.Context, client kubernetes.Interface, applied *appsv1.Deployment, log ReleaseLogFunc) error {
 	if applied == nil {
 		return fmt.Errorf("%w: deployment response was empty", ErrDeploymentRolloutFailed)
 	}
@@ -502,6 +551,7 @@ func (p *KubernetesProvider) waitForDeploymentRollout(ctx context.Context, clien
 		}
 		ready, failure, summary := deploymentRolloutState(current, targetGeneration, desiredReplicas)
 		lastSummary = summary
+		releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("deployment/%s: %s", applied.Name, summary))
 		if failure != nil {
 			return failure
 		}

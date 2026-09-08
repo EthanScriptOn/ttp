@@ -1,0 +1,13 @@
+.pod-terminal-title { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.pod-terminal-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pod-terminal-title .anticon { color: #16856b; }
+.pod-terminal-context { display: flex; min-height: 34px; align-items: center; justify-content: space-between; margin-bottom: 12px; padding: 0 11px; border: 1px solid #dbe9e3; border-radius: 6px; color: #5f756d; background: #f8fbf9; font-size: 12px; }
+.pod-terminal-screen { min-height: 440px; max-height: calc(100vh - 260px); overflow: auto; margin: 0 0 12px; padding: 16px; border: 1px solid #cfe4d8; border-radius: 7px; color: #29483b; background: #f5fbf7; font: 12px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pod-terminal-screen pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.pod-terminal-cursor { color: #07a957; animation: pod-terminal-blink 1s steps(2, start) infinite; }
+.pod-terminal-input-row { display: flex; align-items: center; gap: 8px; }
+.pod-terminal-input-row .ant-typography { color: #16856b; }
+.pod-terminal-input-row .ant-input { min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pod-terminal-actions { margin-top: 10px; }
+@keyframes pod-terminal-blink { 50% { opacity: 0; } }
+@media (max-width: 660px) { .pod-terminal-screen { min-height: 360px; } .pod-terminal-input-row { align-items: stretch; } .pod-terminal-input-row .ant-btn { padding: 0 10px; } }

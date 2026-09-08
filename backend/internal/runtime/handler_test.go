@@ -9,7 +9,7 @@ import (
 )
 
 func TestHandlerListsPodsAndMetrics(t *testing.T) {
-	handler := NewHandler(nil)
+	handler := NewHandler(NewService(NewDemoProvider()))
 	request := httptest.NewRequest(http.MethodGet, "/clusters/demo-cluster/pods?project_id=reverse-lab", nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -36,7 +36,7 @@ func TestHandlerUpdatesPodConfig(t *testing.T) {
 	body := `{"config":{"LOG_LEVEL":"debug"},"environment":{"TRACE":"1"}}`
 	request := httptest.NewRequest(http.MethodPatch, "/clusters/demo-cluster/pods/lab/reverse-lab-api-7d9f8c6d4b-x2k9m/config", strings.NewReader(body))
 	recorder := httptest.NewRecorder()
-	NewHandler(nil).ServeHTTP(recorder, request)
+	NewHandler(NewService(NewDemoProvider())).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected update 200, got %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -52,7 +52,7 @@ func TestHandlerUpdatesPodConfig(t *testing.T) {
 func TestHandlerMapsUnknownCluster(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/clusters/missing/metrics", nil)
 	recorder := httptest.NewRecorder()
-	NewHandler(nil).ServeHTTP(recorder, request)
+	NewHandler(NewService(NewDemoProvider())).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", recorder.Code)
 	}

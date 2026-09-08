@@ -5,18 +5,6 @@ import { getPod, getPodLogs, updatePodConfig } from '../services/api'
 
 const emptyPod = {}
 
-function formatCPU(pod) {
-  return pod?.metrics_available ? `${Number(pod.cpu_millicores || 0).toLocaleString()}m` : '-'
-}
-
-function formatMemory(pod) {
-  if (!pod?.metrics_available) return '-'
-  const bytes = Number(pod.memory_bytes || 0)
-  const gibibytes = bytes / (1024 ** 3)
-  if (gibibytes >= 1) return `${gibibytes.toFixed(gibibytes >= 10 ? 1 : 2)} GiB`
-  return `${(bytes / (1024 ** 2)).toFixed(1)} MiB`
-}
-
 export default function PodDrawer({ project, pod: podValue, target, targetId = '', open, onClose, canEdit = true }) {
   const pod = podValue || emptyPod
   const [detail, setDetail] = useState(null)
@@ -84,9 +72,9 @@ export default function PodDrawer({ project, pod: podValue, target, targetId = '
 
   const targetContext = target ? `${target.name} · ${target.cluster_id} / ${target.namespace}` : `${detail?.cluster_id || pod?.cluster_id || '当前集群'} / ${detail?.namespace || pod?.namespace || '当前 namespace'}`
 
-  return <Drawer title={<div className="pod-drawer-title"><span>{pod?.name}</span><Tag color="green">运行中</Tag></div>} width={700} open={open} onClose={onClose} destroyOnClose>
+  return <Drawer title={<div className="pod-drawer-title"><span>{pod?.name}</span><Tag color="green">运行中</Tag></div>} width={700} open={open} onClose={onClose} destroyOnHidden>
     {loading ? <div className="drawer-loading"><Spin /></div> : loadError ? <Alert type="error" showIcon message="Pod 信息加载失败" description={loadError} /> : !detail ? <Alert type="warning" message="暂时拿不到 Pod 详情" /> : <Tabs defaultActiveKey="overview" items={[
-      { key: 'overview', label: <span><CodeOutlined /> 概览</span>, children: <><div className="pod-drawer-context"><EnvironmentOutlined /> {targetContext}</div><Descriptions column={1} bordered size="small"><Descriptions.Item label="命名空间">{detail.namespace}</Descriptions.Item><Descriptions.Item label="Pod IP">{detail.pod_ip || '-'}</Descriptions.Item><Descriptions.Item label="所在节点">{detail.node_name || '-'}</Descriptions.Item><Descriptions.Item label="CPU 使用">{formatCPU(detail)}</Descriptions.Item><Descriptions.Item label="内存使用">{formatMemory(detail)}</Descriptions.Item><Descriptions.Item label="磁盘使用">未接入</Descriptions.Item><Descriptions.Item label="容器">{Object.keys(detail.containers || {}).join(', ') || pod.container}</Descriptions.Item><Descriptions.Item label="镜像">{Object.values(detail.containers || {})[0]?.image || '-'}</Descriptions.Item></Descriptions></> },
+      { key: 'overview', label: <span><CodeOutlined /> 概览</span>, children: <><div className="pod-drawer-context"><EnvironmentOutlined /> {targetContext}</div><Descriptions column={1} bordered size="small"><Descriptions.Item label="命名空间">{detail.namespace}</Descriptions.Item><Descriptions.Item label="Pod IP">{detail.pod_ip || '-'}</Descriptions.Item><Descriptions.Item label="所在节点">{detail.node_name || '-'}</Descriptions.Item><Descriptions.Item label="容器">{Object.keys(detail.containers || {}).join(', ') || pod.container}</Descriptions.Item><Descriptions.Item label="镜像">{Object.values(detail.containers || {})[0]?.image || '-'}</Descriptions.Item></Descriptions></> },
       { key: 'logs', label: <span><FileTextOutlined /> 日志</span>, children: <pre className="pod-logs">{logs || '暂无日志'}</pre> },
       { key: 'config', label: <span><SettingOutlined /> 配置</span>, children: <><Alert className="config-alert" type={canEdit ? 'info' : 'warning'} showIcon message={canEdit ? '修改后会写入运行态配置；容器是否需要重启由部署策略决定。' : '当前角色只能查看 Pod 配置，不能修改运行态参数。'} /><Input.TextArea value={configText} readOnly={!canEdit} onChange={(event) => setConfigText(event.target.value)} autoSize={{ minRows: 14, maxRows: 24 }} className="config-editor" /><Space className="config-actions">{canEdit && <Button type="primary" loading={saving} onClick={save}>保存配置</Button>}<Button disabled={!canEdit} onClick={() => setConfigText(JSON.stringify({ config: detail.config || {}, environment: detail.environment || {} }, null, 2))}>恢复</Button></Space></> },
     ]} />}

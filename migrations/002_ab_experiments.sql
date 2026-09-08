@@ -1,0 +1,47 @@
+-- A/B experiments keep two already-built versions in one environment.
+-- Version snapshots and operation events are stored as JSON so an experiment
+-- remains auditable even when release records or environment labels change.
+CREATE TABLE IF NOT EXISTS ab_experiments (
+    id VARCHAR(64) NOT NULL,
+    space_id VARCHAR(64) NOT NULL,
+    project_id VARCHAR(64) NOT NULL,
+    name VARCHAR(120) NOT NULL,
+    target_id VARCHAR(64) NOT NULL,
+    environment VARCHAR(64) NOT NULL,
+    environment_stage VARCHAR(16) NOT NULL DEFAULT 'custom',
+    cluster_id VARCHAR(64) NOT NULL,
+    namespace VARCHAR(120) NOT NULL,
+    replicas INT UNSIGNED NOT NULL DEFAULT 1,
+    strategy VARCHAR(32) NOT NULL DEFAULT 'rolling',
+    assignment VARCHAR(32) NOT NULL DEFAULT 'percentage',
+    a_release_id VARCHAR(64) NOT NULL DEFAULT '',
+    b_release_id VARCHAR(64) NOT NULL,
+    a_version JSON NOT NULL,
+    b_version JSON NOT NULL,
+    a_stats JSON NOT NULL,
+    b_stats JSON NOT NULL,
+    a_pods JSON NOT NULL,
+    b_pods JSON NOT NULL,
+    events JSON NOT NULL,
+    a_traffic TINYINT UNSIGNED NOT NULL DEFAULT 99,
+    b_traffic TINYINT UNSIGNED NOT NULL DEFAULT 1,
+    status VARCHAR(32) NOT NULL DEFAULT 'running',
+    created_by BIGINT UNSIGNED NULL,
+    started_at DATETIME(3) NOT NULL,
+    finished_at DATETIME(3) NULL,
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_ab_experiments_space_id (space_id, id),
+    KEY idx_ab_experiments_project_status (space_id, project_id, status, created_at),
+    KEY idx_ab_experiments_target_status (space_id, project_id, target_id, status),
+    CONSTRAINT fk_ab_experiments_project_same_space FOREIGN KEY (space_id, project_id)
+        REFERENCES projects (space_id, id) ON DELETE CASCADE,
+    CONSTRAINT fk_ab_experiments_target_same_space FOREIGN KEY (space_id, target_id)
+        REFERENCES project_deployment_targets (space_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_ab_experiments_creator FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL,
+    CONSTRAINT chk_ab_experiments_assignment CHECK (assignment IN ('user_id', 'percentage')),
+    CONSTRAINT chk_ab_experiments_status CHECK (status IN ('running', 'stopped', 'finished')),
+    CONSTRAINT chk_ab_experiments_traffic CHECK (a_traffic <= 100 AND b_traffic <= 100 AND a_traffic + b_traffic = 100),
+    CONSTRAINT chk_ab_experiments_replicas CHECK (replicas > 0)
+) ENGINE = InnoDB;

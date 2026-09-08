@@ -36,7 +36,7 @@ func (p *recordingClusterRegistrar) snapshot() (string, string, string, int) {
 }
 
 func TestEnsureRuntimeClusterRestoresPersistedKubeconfig(t *testing.T) {
-	data := store.NewMemoryWithAdminPassword("test-password")
+	data := store.NewMemoryWithFixtures()
 	cluster, err := data.CreateCluster(context.Background(), "space-lab", store.CreateClusterInput{
 		ID: "persisted-cluster", Name: "持久化集群", Provider: "kubernetes",
 		ConnectionMode: store.ClusterConnectionKubeconfig, KubeconfigPath: "/etc/cicd/cluster.config", KubeContext: "prod",

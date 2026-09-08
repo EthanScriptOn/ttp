@@ -17,6 +17,12 @@ import (
 
 type MySQL struct{ db *gorm.DB }
 
+const (
+	defaultAdminUsername    = "admin"
+	defaultAdminDisplayName = "管理员"
+	defaultAdminPassword    = "ttp"
+)
+
 type userRow struct {
 	ID           uint64 `gorm:"primaryKey"`
 	Username     string `gorm:"size:100;uniqueIndex;not null"`
@@ -67,23 +73,36 @@ type clusterRow struct {
 func (clusterRow) TableName() string { return "clusters" }
 
 type projectRow struct {
-	ID             string `gorm:"size:64;primaryKey"`
-	SpaceID        string `gorm:"size:64;index;not null"`
-	Name           string `gorm:"size:120;not null"`
-	Description    string `gorm:"size:255"`
-	RepositoryID   string `gorm:"size:255;not null"`
-	RepositoryURL  string `gorm:"size:500;not null"`
-	DefaultBranch  string `gorm:"size:120;not null"`
-	ClusterID      string `gorm:"size:64;not null"`
-	Namespace      string `gorm:"size:120;not null"`
-	DeployStrategy string `gorm:"size:32;not null"`
-	Replicas       int    `gorm:"not null;default:1"`
-	ContainerPort  int    `gorm:"not null;default:8080"`
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID              string `gorm:"size:64;primaryKey"`
+	SpaceID         string `gorm:"size:64;index;not null"`
+	Name            string `gorm:"size:120;not null"`
+	Description     string `gorm:"size:255"`
+	RepositoryID    string `gorm:"size:255;not null"`
+	RepositoryURL   string `gorm:"size:500;not null"`
+	DefaultBranch   string `gorm:"size:120;not null"`
+	ClusterID       string `gorm:"size:64;not null"`
+	Namespace       string `gorm:"size:120;not null"`
+	DeployStrategy  string `gorm:"size:32;not null"`
+	Replicas        int    `gorm:"not null;default:1"`
+	ContainerPort   int    `gorm:"not null;default:8080"`
+	ImageRepository string `gorm:"size:500"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 func (projectRow) TableName() string { return "projects" }
+
+type projectGitCredentialRow struct {
+	ProjectID       string `gorm:"size:64;primaryKey"`
+	SpaceID         string `gorm:"size:64;index;not null"`
+	Provider        string `gorm:"size:32;not null"`
+	Username        string `gorm:"size:120;not null"`
+	TokenCiphertext string `gorm:"type:longtext;not null"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+func (projectGitCredentialRow) TableName() string { return "project_git_credentials" }
 
 type deploymentTargetRow struct {
 	ID             string `gorm:"size:64;primaryKey"`
@@ -132,7 +151,7 @@ type auditLogRow struct {
 
 func (auditLogRow) TableName() string { return "audit_logs" }
 
-func NewMySQL(ctx context.Context, dsn, bootstrapAdminPassword string) (*MySQL, error) {
+func NewMySQL(ctx context.Context, dsn string) (*MySQL, error) {
 	if strings.TrimSpace(dsn) == "" {
 		return nil, fmt.Errorf("mysql dsn is required")
 	}
@@ -149,7 +168,11 @@ func NewMySQL(ctx context.Context, dsn, bootstrapAdminPassword string) (*MySQL, 
 		return nil, err
 	}
 	store := &MySQL{db: db}
-	if err := db.AutoMigrate(&userRow{}, &spaceRow{}, &memberRow{}, &clusterRow{}, &projectRow{}, &deploymentTargetRow{}, &deploymentConfigRow{}, &projectReleaseRow{}, &releaseCommitRow{}, &releaseBatchStateRow{}, &auditLogRow{}); err != nil {
+	if err := db.AutoMigrate(&userRow{}, &spaceRow{}, &memberRow{}, &clusterRow{}, &projectRow{}, &projectGitCredentialRow{}, &deploymentTargetRow{}, &deploymentConfigRow{}, &auditLogRow{}, &abExperimentRow{}, &releaseRecordRow{}, &releaseCommitRecordRow{}, &releaseTargetRecordRow{}, &releaseExecutionLogRecordRow{}); err != nil {
+		_ = sqlDB.Close()
+		return nil, err
+	}
+	if err := store.dropRemovedSchema(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
@@ -157,7 +180,7 @@ func NewMySQL(ctx context.Context, dsn, bootstrapAdminPassword string) (*MySQL, 
 		_ = sqlDB.Close()
 		return nil, err
 	}
-	if err := store.seed(ctx, bootstrapAdminPassword); err != nil {
+	if err := store.seed(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
@@ -166,6 +189,14 @@ func NewMySQL(ctx context.Context, dsn, bootstrapAdminPassword string) (*MySQL, 
 		return nil, err
 	}
 	return store, nil
+}
+
+// dropRemovedSchema handles destructive migrations that AutoMigrate cannot.
+func (s *MySQL) dropRemovedSchema(ctx context.Context) error {
+	if err := s.db.WithContext(ctx).Migrator().DropTable("project_build_configs"); err != nil {
+		return fmt.Errorf("drop removed project build configuration table: %w", err)
+	}
+	return nil
 }
 
 func (s *MySQL) Close() error {
@@ -264,7 +295,6 @@ func (s *MySQL) CreateSpace(ctx context.Context, userID uint64, input CreateSpac
 		slug = "space-" + uuid.NewString()[:8]
 	}
 	space := spaceRow{ID: "space-" + uuid.NewString(), Name: name, Slug: slug, Description: strings.TrimSpace(input.Description)}
-	cluster := clusterRow{ID: demoClusterIDForSpace(space.ID), SpaceID: space.ID, Name: "演示集群", Provider: "kubernetes", ConnectionMode: ClusterConnectionKubeconfig, Status: "active"}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&space).Error; err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "duplicate") {
@@ -275,7 +305,7 @@ func (s *MySQL) CreateSpace(ctx context.Context, userID uint64, input CreateSpac
 		if err := tx.Create(&memberRow{UserID: userID, SpaceID: space.ID, Role: "owner"}).Error; err != nil {
 			return err
 		}
-		return tx.Create(&cluster).Error
+		return nil
 	})
 	if err != nil {
 		return domain.Space{}, err
@@ -373,32 +403,22 @@ func (s *MySQL) GetProject(ctx context.Context, spaceID, projectID string) (doma
 }
 
 func (s *MySQL) CreateProject(ctx context.Context, spaceID string, input CreateProjectInput) (domain.Project, error) {
-	name := strings.TrimSpace(input.Name)
-	repo := strings.TrimSpace(input.RepositoryURL)
-	if name == "" || repo == "" {
-		return domain.Project{}, fmt.Errorf("%w: name and repository_url are required", ErrInvalidInput)
+	var err error
+	input, err = normalizeCreateProjectInput(input)
+	if err != nil {
+		return domain.Project{}, err
 	}
-	branch := strings.TrimSpace(input.DefaultBranch)
-	if branch == "" {
-		branch = "main"
-	}
+	name := input.Name
+	repo := input.RepositoryURL
+	branch := input.DefaultBranch
 	cluster := normalizeClusterID(spaceID, input.ClusterID)
-	namespace := strings.TrimSpace(input.Namespace)
-	if namespace == "" {
-		namespace = "lab"
+	if cluster == "" {
+		return domain.Project{}, fmt.Errorf("%w: cluster_id is required", ErrInvalidInput)
 	}
-	strategy := strings.TrimSpace(input.DeployStrategy)
-	if strategy == "" {
-		strategy = "rolling"
-	}
+	namespace := input.Namespace
+	strategy := input.DeployStrategy
 	replicas := input.Replicas
-	if replicas <= 0 {
-		replicas = 1
-	}
 	port := input.ContainerPort
-	if port <= 0 {
-		port = 8080
-	}
 	repoID := strings.TrimSpace(input.RepositoryID)
 	if repoID == "" {
 		repoID = "repo-" + uuid.NewString()
@@ -406,13 +426,17 @@ func (s *MySQL) CreateProject(ctx context.Context, spaceID string, input CreateP
 	if err := s.clusterExists(ctx, spaceID, cluster); err != nil {
 		return domain.Project{}, err
 	}
-	row := projectRow{ID: uuid.NewString(), SpaceID: spaceID, Name: name, Description: strings.TrimSpace(input.Description), RepositoryID: repoID, RepositoryURL: repo, DefaultBranch: branch, ClusterID: cluster, Namespace: namespace, DeployStrategy: strategy, Replicas: replicas, ContainerPort: port}
-	now := time.Now().UTC()
+	projectID := strings.TrimSpace(input.ID)
+	if projectID == "" {
+		projectID = uuid.NewString()
+	}
+	row := projectRow{ID: projectID, SpaceID: spaceID, Name: name, Description: strings.TrimSpace(input.Description), RepositoryID: repoID, RepositoryURL: repo, DefaultBranch: branch, ClusterID: cluster, Namespace: namespace, DeployStrategy: strategy, Replicas: replicas, ContainerPort: port, ImageRepository: strings.TrimSpace(input.ImageRepository)}
 	target := domain.DeploymentTarget{
 		ID: "target-" + uuid.NewString(), ProjectID: row.ID, SpaceID: spaceID,
 		Name: defaultTargetName, Environment: defaultTargetEnvironment, Stage: DeploymentStageDev, SortOrder: 1,
 		ClusterID: cluster, Namespace: namespace, Replicas: replicas, ContainerPort: port,
-		DeployStrategy: strategy, Enabled: true, Status: "active", Health: "unknown", CreatedAt: now, UpdatedAt: now,
+		DeployStrategy: strategy, Enabled: true, Status: "active", Health: "unknown",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&row).Error; err != nil {
@@ -435,6 +459,9 @@ func (s *MySQL) CreateProject(ctx context.Context, spaceID string, input CreateP
 }
 
 func (s *MySQL) UpdateProject(ctx context.Context, spaceID, projectID string, input UpdateProjectInput) (domain.Project, error) {
+	if err := validateProjectUpdateInput(input); err != nil {
+		return domain.Project{}, err
+	}
 	if _, err := s.GetProject(ctx, spaceID, projectID); err != nil {
 		return domain.Project{}, err
 	}
@@ -452,24 +479,27 @@ func (s *MySQL) UpdateProject(ctx context.Context, spaceID, projectID string, in
 	if input.Description != nil {
 		updates["description"] = strings.TrimSpace(*input.Description)
 	}
-	if input.DefaultBranch != nil && strings.TrimSpace(*input.DefaultBranch) != "" {
+	if input.DefaultBranch != nil {
 		updates["default_branch"] = strings.TrimSpace(*input.DefaultBranch)
 	}
-	if input.ClusterID != nil && strings.TrimSpace(*input.ClusterID) != "" {
+	if input.ClusterID != nil {
 		clusterID := normalizeClusterID(spaceID, *input.ClusterID)
 		if err := s.clusterExists(ctx, spaceID, clusterID); err != nil {
 			return domain.Project{}, err
 		}
 		updates["cluster_id"] = clusterID
 	}
-	if input.Namespace != nil && strings.TrimSpace(*input.Namespace) != "" {
+	if input.Namespace != nil {
 		updates["namespace"] = strings.TrimSpace(*input.Namespace)
 	}
-	if input.Replicas != nil && *input.Replicas > 0 {
+	if input.Replicas != nil {
 		updates["replicas"] = *input.Replicas
 	}
-	if input.ContainerPort != nil && *input.ContainerPort > 0 {
+	if input.ContainerPort != nil {
 		updates["container_port"] = *input.ContainerPort
+	}
+	if input.ImageRepository != nil {
+		updates["image_repository"] = strings.TrimSpace(*input.ImageRepository)
 	}
 	if len(updates) > 0 {
 		if err := s.db.WithContext(ctx).Model(&projectRow{}).Where("id = ? AND space_id = ?", projectID, spaceID).Updates(updates).Error; err != nil {
@@ -479,17 +509,52 @@ func (s *MySQL) UpdateProject(ctx context.Context, spaceID, projectID string, in
 	return s.GetProject(ctx, spaceID, projectID)
 }
 
+func (s *MySQL) GetProjectGitCredential(ctx context.Context, spaceID, projectID string) (ProjectGitCredential, error) {
+	var row projectGitCredentialRow
+	if err := s.db.WithContext(ctx).Where("space_id = ? AND project_id = ?", spaceID, projectID).First(&row).Error; err != nil {
+		return ProjectGitCredential{}, mapDBError(err)
+	}
+	return toProjectGitCredential(row), nil
+}
+
+func (s *MySQL) SaveProjectGitCredential(ctx context.Context, spaceID, projectID string, input SaveProjectGitCredentialInput) (ProjectGitCredential, error) {
+	if strings.TrimSpace(input.Provider) == "" || strings.TrimSpace(input.Username) == "" || strings.TrimSpace(input.TokenCiphertext) == "" {
+		return ProjectGitCredential{}, fmt.Errorf("%w: git credential fields are required", ErrInvalidInput)
+	}
+	if _, err := s.GetProject(ctx, spaceID, projectID); err != nil {
+		return ProjectGitCredential{}, err
+	}
+	now := time.Now().UTC()
+	row := projectGitCredentialRow{ProjectID: projectID, SpaceID: spaceID, Provider: strings.ToLower(strings.TrimSpace(input.Provider)), Username: strings.TrimSpace(input.Username), TokenCiphertext: input.TokenCiphertext, CreatedAt: now, UpdatedAt: now}
+	var existing projectGitCredentialRow
+	err := s.db.WithContext(ctx).Where("space_id = ? AND project_id = ?", spaceID, projectID).First(&existing).Error
+	switch {
+	case err == nil:
+		if err := s.db.WithContext(ctx).Model(&projectGitCredentialRow{}).Where("space_id = ? AND project_id = ?", spaceID, projectID).Updates(map[string]any{"provider": row.Provider, "username": row.Username, "token_ciphertext": row.TokenCiphertext, "updated_at": now}).Error; err != nil {
+			return ProjectGitCredential{}, err
+		}
+	case err == gorm.ErrRecordNotFound:
+		if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
+			return ProjectGitCredential{}, err
+		}
+	default:
+		return ProjectGitCredential{}, err
+	}
+	return s.GetProjectGitCredential(ctx, spaceID, projectID)
+}
+
+func (s *MySQL) DeleteProjectGitCredential(ctx context.Context, spaceID, projectID string) error {
+	result := s.db.WithContext(ctx).Where("space_id = ? AND project_id = ?", spaceID, projectID).Delete(&projectGitCredentialRow{})
+	return result.Error
+}
+
 func (s *MySQL) ListDeploymentTargets(ctx context.Context, spaceID, projectID string) ([]domain.DeploymentTarget, error) {
-	project, err := s.GetProject(ctx, spaceID, projectID)
-	if err != nil {
+	if _, err := s.GetProject(ctx, spaceID, projectID); err != nil {
 		return nil, err
 	}
 	var rows []deploymentTargetRow
 	if err := s.db.WithContext(ctx).Where("space_id = ? AND project_id = ?", spaceID, projectID).Order("sort_order ASC, created_at ASC, name ASC").Find(&rows).Error; err != nil {
 		return nil, err
-	}
-	if len(rows) == 0 {
-		return []domain.DeploymentTarget{LegacyDeploymentTarget(project)}, nil
 	}
 	result := make([]domain.DeploymentTarget, 0, len(rows))
 	for _, row := range rows {
@@ -499,8 +564,7 @@ func (s *MySQL) ListDeploymentTargets(ctx context.Context, spaceID, projectID st
 }
 
 func (s *MySQL) GetDeploymentTarget(ctx context.Context, spaceID, projectID, targetID string) (domain.DeploymentTarget, error) {
-	project, err := s.GetProject(ctx, spaceID, projectID)
-	if err != nil {
+	if _, err := s.GetProject(ctx, spaceID, projectID); err != nil {
 		return domain.DeploymentTarget{}, err
 	}
 	var row deploymentTargetRow
@@ -511,12 +575,6 @@ func (s *MySQL) GetDeploymentTarget(ctx context.Context, spaceID, projectID, tar
 		query = query.Where("id = ?", strings.TrimSpace(targetID))
 	}
 	if err := query.First(&row).Error; err != nil {
-		if err == gorm.ErrRecordNotFound && strings.TrimSpace(targetID) == "" {
-			if fallbackErr := s.db.WithContext(ctx).Where("space_id = ? AND project_id = ?", spaceID, projectID).Order("sort_order ASC, created_at ASC, name ASC").First(&row).Error; fallbackErr == nil {
-				return toDeploymentTarget(row), nil
-			}
-			return LegacyDeploymentTarget(project), nil
-		}
 		return domain.DeploymentTarget{}, mapDBError(err)
 	}
 	return toDeploymentTarget(row), nil
@@ -591,9 +649,6 @@ func (s *MySQL) UpdateDeploymentTarget(ctx context.Context, spaceID, projectID, 
 	if err != nil {
 		return domain.DeploymentTarget{}, err
 	}
-	if strings.HasPrefix(current.ID, "legacy-") {
-		return domain.DeploymentTarget{}, ErrNotFound
-	}
 	if input.ClusterID != nil {
 		clusterID := normalizeClusterID(spaceID, *input.ClusterID)
 		if err := s.clusterExists(ctx, spaceID, clusterID); err != nil {
@@ -612,8 +667,8 @@ func (s *MySQL) UpdateDeploymentTarget(ctx context.Context, spaceID, projectID, 
 	if duplicate > 0 {
 		return domain.DeploymentTarget{}, ErrConflict
 	}
+	var otherDevCount int64
 	if updated.Stage == DeploymentStageDev {
-		var otherDevCount int64
 		if err := s.db.WithContext(ctx).Model(&deploymentTargetRow{}).Where("space_id = ? AND project_id = ? AND id <> ? AND stage = ?", spaceID, projectID, targetID, DeploymentStageDev).Count(&otherDevCount).Error; err != nil {
 			return domain.DeploymentTarget{}, err
 		}
@@ -651,9 +706,6 @@ func (s *MySQL) DeleteDeploymentTarget(ctx context.Context, spaceID, projectID, 
 	if err != nil {
 		return err
 	}
-	if strings.HasPrefix(target.ID, "legacy-") {
-		return ErrNotFound
-	}
 	var count int64
 	if err := s.db.WithContext(ctx).Model(&deploymentTargetRow{}).Where("space_id = ? AND project_id = ?", spaceID, projectID).Count(&count).Error; err != nil {
 		return err
@@ -670,7 +722,9 @@ func (s *MySQL) DeleteDeploymentTarget(ctx context.Context, spaceID, projectID, 
 			return fmt.Errorf("%w: 项目必须保留 DEV 环境", ErrConflict)
 		}
 	}
-	return s.db.WithContext(ctx).Where("id = ? AND space_id = ? AND project_id = ?", targetID, spaceID, projectID).Delete(&deploymentTargetRow{}).Error
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return tx.Where("id = ? AND space_id = ? AND project_id = ?", targetID, spaceID, projectID).Delete(&deploymentTargetRow{}).Error
+	})
 }
 
 func (s *MySQL) GetDeploymentConfig(ctx context.Context, spaceID, projectID string) (domain.DeploymentConfig, error) {
@@ -769,36 +823,24 @@ func (s *MySQL) ListAuditLogs(ctx context.Context, spaceID string, limit int) ([
 	return result, nil
 }
 
-func (s *MySQL) seed(ctx context.Context, bootstrapAdminPassword string) error {
+func (s *MySQL) seed(ctx context.Context) error {
 	var count int64
-	if err := s.db.WithContext(ctx).Model(&userRow{}).Where("username = ?", "admin").Count(&count).Error; err != nil {
+	if err := s.db.WithContext(ctx).Model(&userRow{}).Count(&count).Error; err != nil {
 		return err
 	}
-	if count == 0 {
-		if strings.TrimSpace(bootstrapAdminPassword) == "" {
-			return fmt.Errorf("bootstrap admin password is required; set CICD_BOOTSTRAP_ADMIN_PASSWORD")
-		}
-		hash, err := bcrypt.GenerateFromPassword([]byte(bootstrapAdminPassword), bcrypt.DefaultCost)
-		if err != nil {
-			return err
-		}
-		if err := s.db.WithContext(ctx).Create(&userRow{ID: 1, Username: "admin", DisplayName: "平台管理员", PasswordHash: string(hash), IsSuperAdmin: true}).Error; err != nil {
-			return err
-		}
+	if count > 0 {
+		return nil
 	}
-	space := spaceRow{ID: "space-lab", Name: "实验室空间", Slug: "lab", Description: "TTP 默认工作空间"}
-	if err := s.db.WithContext(ctx).Where("id = ?", space.ID).FirstOrCreate(&space).Error; err != nil {
-		return err
+	hash, err := bcrypt.GenerateFromPassword([]byte(defaultAdminPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash default admin password: %w", err)
 	}
-	member := memberRow{UserID: 1, SpaceID: space.ID, Role: "owner"}
-	if err := s.db.WithContext(ctx).Where("user_id = ? AND space_id = ?", 1, space.ID).FirstOrCreate(&member).Error; err != nil {
-		return err
-	}
-	cluster := clusterRow{ID: demoClusterIDForSpace(space.ID), SpaceID: space.ID, Name: "演示集群", Provider: "kubernetes", ConnectionMode: ClusterConnectionKubeconfig, Status: "active"}
-	if err := s.db.WithContext(ctx).Where("id = ?", cluster.ID).FirstOrCreate(&cluster).Error; err != nil {
-		return err
-	}
-	return nil
+	return s.db.WithContext(ctx).Create(&userRow{
+		Username:     defaultAdminUsername,
+		DisplayName:  defaultAdminDisplayName,
+		PasswordHash: string(hash),
+		IsSuperAdmin: true,
+	}).Error
 }
 
 func (s *MySQL) seedLegacyDeploymentTargets(ctx context.Context) error {
@@ -849,17 +891,6 @@ func (s *MySQL) migrateDeploymentTargetMetadata(ctx context.Context) error {
 		byProject[key] = append(byProject[key], row)
 	}
 	for _, projectRows := range byProject {
-		needsMigration := false
-		for _, row := range projectRows {
-			stage := strings.TrimSpace(strings.ToLower(row.Stage))
-			if stage == "" || (stage == DeploymentStageCustom && row.SortOrder <= 1) {
-				needsMigration = true
-				break
-			}
-		}
-		if !needsMigration {
-			continue
-		}
 		sort.SliceStable(projectRows, func(i, j int) bool {
 			if projectRows[i].IsDefault != projectRows[j].IsDefault {
 				return projectRows[i].IsDefault
@@ -934,7 +965,11 @@ func toCluster(row clusterRow) Cluster {
 	}
 }
 func toProject(row projectRow) domain.Project {
-	return domain.Project{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Description: row.Description, RepositoryID: row.RepositoryID, RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch, ClusterID: row.ClusterID, Namespace: row.Namespace, DeployStrategy: row.DeployStrategy, Replicas: row.Replicas, ContainerPort: row.ContainerPort, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+	return domain.Project{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Description: row.Description, RepositoryID: row.RepositoryID, RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch, ClusterID: row.ClusterID, Namespace: row.Namespace, DeployStrategy: row.DeployStrategy, Replicas: row.Replicas, ContainerPort: row.ContainerPort, ImageRepository: row.ImageRepository, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+}
+
+func toProjectGitCredential(row projectGitCredentialRow) ProjectGitCredential {
+	return ProjectGitCredential{ProjectID: row.ProjectID, SpaceID: row.SpaceID, Provider: row.Provider, Username: row.Username, TokenCiphertext: row.TokenCiphertext, Configured: strings.TrimSpace(row.TokenCiphertext) != "", UpdatedAt: row.UpdatedAt}
 }
 
 func fromDeploymentTarget(target domain.DeploymentTarget) deploymentTargetRow {

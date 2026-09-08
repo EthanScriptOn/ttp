@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/yuebuy/cicd-platform/backend/internal/domain"
 	"github.com/yuebuy/cicd-platform/backend/internal/git"
@@ -42,19 +44,33 @@ func (s *Server) createProject(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request", "项目配置格式不正确")
 		return
 	}
-	if s.deps.Config.DemoMode {
-		input.RepositoryID = "demo-repo"
-	} else {
-		// The repository URL is the source of truth. Never trust a client-supplied
-		// ID because it could point a project at another registered repository.
-		input.RepositoryID = repositoryID(input.RepositoryURL)
+	if err := store.ValidateCreateProjectInput(input); err != nil {
+		writeStoreError(c, err)
+		return
 	}
+	// The repository URL is the source of truth. Never trust a client-supplied
+	// ID because it could point a project at another registered repository.
+	if strings.TrimSpace(input.ID) == "" {
+		input.ID = uuid.NewString()
+	}
+	if strings.TrimSpace(input.ClusterID) == "" {
+		writeError(c, http.StatusBadRequest, "invalid_request", "创建项目时必须选择集群")
+		return
+	}
+	if _, err := s.deps.Store.GetCluster(c.Request.Context(), claims.SpaceID, strings.TrimSpace(input.ClusterID)); err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	input.RepositoryID = repositoryID(input.ID, input.RepositoryURL)
 	if err := s.registerRepository(input.RepositoryID, input.RepositoryURL); err != nil {
 		writeProviderError(c, err)
 		return
 	}
 	project, err := s.deps.Store.CreateProject(c.Request.Context(), claims.SpaceID, input)
 	if err != nil {
+		if unregistrar, supported := s.deps.Git.(git.RepositoryUnregistrar); supported {
+			_ = unregistrar.UnregisterRepository(input.RepositoryID, input.RepositoryURL)
+		}
 		writeStoreError(c, err)
 		return
 	}
@@ -85,16 +101,26 @@ func (s *Server) updateProject(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request", "项目配置格式不正确")
 		return
 	}
+	if err := store.ValidateUpdateProjectInput(input); err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	var previousProject domain.Project
+	var previousProjectLoaded bool
+	var err error
 	if input.RepositoryURL != nil {
+		previousProject, err = s.deps.Store.GetProject(c.Request.Context(), claims.SpaceID, c.Param("projectID"))
+		if err != nil {
+			writeStoreError(c, err)
+			return
+		}
+		previousProjectLoaded = true
 		repositoryURL := strings.TrimSpace(*input.RepositoryURL)
 		if repositoryURL == "" {
 			writeError(c, http.StatusBadRequest, "invalid_request", "代码仓库地址不能为空")
 			return
 		}
-		nextRepositoryID := "demo-repo"
-		if !s.deps.Config.DemoMode {
-			nextRepositoryID = repositoryID(repositoryURL)
-		}
+		nextRepositoryID := repositoryID(previousProject.ID, repositoryURL)
 		input.RepositoryID = &nextRepositoryID
 	}
 	if input.RepositoryURL != nil {
@@ -108,6 +134,18 @@ func (s *Server) updateProject(c *gin.Context) {
 		writeStoreError(c, err)
 		return
 	}
+	if previousProjectLoaded && previousProject.RepositoryURL != project.RepositoryURL {
+		if err := s.deps.Store.DeleteProjectGitCredential(c.Request.Context(), claims.SpaceID, project.ID); err != nil {
+			writeStoreError(c, err)
+			return
+		}
+		if unregistrar, supported := s.deps.Git.(git.RepositoryUnregistrar); supported {
+			if err := unregistrar.UnregisterRepository(previousProject.RepositoryID, previousProject.RepositoryURL); err != nil {
+				writeProviderError(c, err)
+				return
+			}
+		}
+	}
 	s.recordAudit(c, "更新项目设置", project.Name)
 	c.JSON(http.StatusOK, s.enrichProject(c.Request.Context(), project))
 }
@@ -116,11 +154,12 @@ func (s *Server) updateProject(c *gin.Context) {
 // project store remains responsible for configuration; a provider outage
 // should leave the project visible with an explicit unknown health state.
 func (s *Server) enrichProject(ctx context.Context, project domain.Project) domain.Project {
-	project.DeploymentTargetCount = 1
+	project.DeploymentTargetCount = 0
 	project.DefaultTargetID = ""
 	if s.deps.Store != nil {
 		if targets, err := s.deps.Store.ListDeploymentTargets(ctx, project.SpaceID, project.ID); err == nil && len(targets) > 0 {
 			project.DeploymentTargetCount = len(targets)
+			project.DefaultTargetID = targets[0].ID
 		}
 	}
 	project.Health = "unknown"
@@ -234,11 +273,37 @@ func (s *Server) projectForRequest(c *gin.Context) (project domain.Project, ok b
 		writeStoreError(c, err)
 		return domain.Project{}, false
 	}
-	if err := s.registerRepository(item.RepositoryID, item.RepositoryURL); err != nil {
+	if err := s.configureProjectRepository(c.Request.Context(), item); err != nil {
 		writeProviderError(c, err)
 		return domain.Project{}, false
 	}
 	return item, true
+}
+
+func (s *Server) configureProjectRepository(ctx context.Context, project domain.Project) error {
+	if err := s.registerRepository(project.RepositoryID, project.RepositoryURL); err != nil {
+		return err
+	}
+	credential, err := s.deps.Store.GetProjectGitCredential(ctx, project.SpaceID, project.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: project Git credential lookup failed", git.ErrInvalidProviderConfig)
+	}
+	registry, supported := s.deps.Git.(git.RepositoryCredentialRegistry)
+	if !supported {
+		return fmt.Errorf("%w: project Git credential is not supported by this provider", git.ErrInvalidProviderConfig)
+	}
+	token, err := s.credentialCipher.open(credential.TokenCiphertext)
+	if err != nil {
+		return fmt.Errorf("%w: project Git credential is invalid", git.ErrInvalidProviderConfig)
+	}
+	return registry.ConfigureRepositoryCredential(project.RepositoryID, project.RepositoryURL, git.RepositoryCredential{
+		Provider: credential.Provider,
+		Username: credential.Username,
+		Token:    token,
+	})
 }
 
 func (s *Server) registerRepository(repositoryID, repositoryURL string) error {
@@ -256,8 +321,8 @@ func valueOrString(value *string) string {
 	return strings.TrimSpace(*value)
 }
 
-func repositoryID(url string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(url)))
+func repositoryID(projectID, url string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(projectID) + "\x00" + strings.TrimSpace(url)))
 	return "repo-" + hex.EncodeToString(sum[:8])
 }
 

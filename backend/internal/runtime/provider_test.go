@@ -220,3 +220,73 @@ func TestDemoProviderCanDeploySameCommitToUATWithoutChangingDevelopment(t *testi
 		t.Fatalf("uat deployment was not isolated: %#v", uatPods)
 	}
 }
+
+func TestDemoProviderABExperimentLifecycle(t *testing.T) {
+	provider := NewDemoProvider()
+	deployment := ABExperimentDeployment{
+		ClusterID: "demo-cluster", Namespace: "lab", ProjectID: "reverse-lab", ExperimentID: "ab-checkout-001",
+		ABranch: "main", ACommitSHA: "aaaaaaaaaaaa", AReleaseID: "rel-a", AImage: "example.invalid/reverse-lab:aaaaaaaaaa",
+		BBranch: "feature/checkout", BCommitSHA: "bbbbbbbbbbbb", BReleaseID: "rel-b", BImage: "example.invalid/reverse-lab:bbbbbbbbbb",
+		Replicas: 2, Strategy: "rolling", Assignment: "percentage", ATraffic: 99, BTraffic: 1,
+	}
+	if err := provider.DeployABExperiment(context.Background(), deployment); err != nil {
+		t.Fatal(err)
+	}
+	pods, err := provider.ListABExperimentPods(context.Background(), deployment.ClusterID, deployment.Namespace, deployment.ProjectID, deployment.ExperimentID)
+	if err != nil || len(pods) != 4 {
+		t.Fatalf("initial A/B pods = %d, %v", len(pods), err)
+	}
+	variants := map[string]int{}
+	for _, pod := range pods {
+		variants[pod.Labels[abVariantLabel]]++
+	}
+	if variants["a"] != 2 || variants["b"] != 2 {
+		t.Fatalf("initial variant distribution = %#v", variants)
+	}
+	metrics, err := provider.GetABExperimentMetrics(context.Background(), deployment.ClusterID, deployment.Namespace, deployment.ProjectID, deployment.ExperimentID)
+	if err != nil || !metrics.A.MetricsAvailable || !metrics.B.MetricsAvailable || metrics.A.RequestRateRPS <= metrics.B.RequestRateRPS {
+		t.Fatalf("unexpected A/B metrics = %#v, %v", metrics, err)
+	}
+
+	if err := provider.UpdateABExperimentTraffic(context.Background(), deployment.ClusterID, deployment.Namespace, deployment.ProjectID, deployment.ExperimentID, 80, 20); err != nil {
+		t.Fatal(err)
+	}
+	pods, err = provider.ListABExperimentPods(context.Background(), deployment.ClusterID, deployment.Namespace, deployment.ProjectID, deployment.ExperimentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pod := range pods {
+		want := "80"
+		if pod.Labels[abVariantLabel] == "b" {
+			want = "20"
+		}
+		if pod.Labels[abTrafficLabel] != want {
+			t.Fatalf("pod %s traffic = %q, want %q", pod.Name, pod.Labels[abTrafficLabel], want)
+		}
+	}
+
+	if err := provider.StopABExperiment(context.Background(), deployment.ClusterID, deployment.Namespace, deployment.ProjectID, deployment.ExperimentID, "b"); err != nil {
+		t.Fatal(err)
+	}
+	pods, err = provider.ListABExperimentPods(context.Background(), deployment.ClusterID, deployment.Namespace, deployment.ProjectID, deployment.ExperimentID)
+	if err != nil || len(pods) != 2 {
+		t.Fatalf("pods after keeping B = %d, %v", len(pods), err)
+	}
+	for _, pod := range pods {
+		if pod.Labels[abVariantLabel] != "b" || pod.Labels[abTrafficLabel] != "100" {
+			t.Fatalf("kept B pod has wrong state: %#v", pod.Labels)
+		}
+	}
+
+	deployment.ExperimentID = "ab-checkout-cleanup"
+	if err := provider.DeployABExperiment(context.Background(), deployment); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.CleanupABExperiment(context.Background(), deployment.ClusterID, deployment.Namespace, deployment.ProjectID, deployment.ExperimentID); err != nil {
+		t.Fatal(err)
+	}
+	pods, err = provider.ListABExperimentPods(context.Background(), deployment.ClusterID, deployment.Namespace, deployment.ProjectID, deployment.ExperimentID)
+	if err != nil || len(pods) != 0 {
+		t.Fatalf("pods after cleanup = %d, %v", len(pods), err)
+	}
+}

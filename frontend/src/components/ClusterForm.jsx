@@ -33,7 +33,7 @@ export default function ClusterForm({ open, cluster, onCancel, onSubmit, loading
     confirmLoading={loading}
     okText="保存并测试"
     cancelText="取消"
-    destroyOnClose
+    destroyOnHidden
     width={600}
   >
     <Form form={form} layout="vertical" onFinish={onSubmit} className="cluster-form">
@@ -68,7 +68,7 @@ export default function ClusterForm({ open, cluster, onCancel, onSubmit, loading
         >
           <Input placeholder="例如：/etc/cicd/kubeconfigs/test.config" />
         </Form.Item>
-        <Form.Item label="Context（可选）" name="kube_context" extra="留空时使用 kubeconfig 的 current-context。">
+        <Form.Item label="Context" name="kube_context" extra="留空时使用 kubeconfig 的 current-context。">
           <Input placeholder="例如：test-cluster-admin@k8s" />
         </Form.Item>
       </>}

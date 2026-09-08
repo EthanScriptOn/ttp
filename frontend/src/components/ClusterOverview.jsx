@@ -1,17 +1,9 @@
-import { Alert, Button, Card, Col, Empty, Row, Space, Tag, Typography, message } from 'antd'
+import { Alert, Button, Card, Col, Empty, Pagination, Row, Space, Tag, Typography, message } from 'antd'
 import { AppstoreOutlined, ClusterOutlined, DeploymentUnitOutlined, EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
 import { createCluster, getClusterMetrics, getClusters, getProjects, testCluster, updateCluster } from '../services/api'
 import ClusterForm from './ClusterForm'
 import MonitorDashboard from './MonitorDashboard'
-
-function valueOrDash(value, suffix = '') {
-  return value === null || value === undefined ? '--' : `${value}${suffix}`
-}
-
-function metricValue(value, suffix, metricsAvailable) {
-  return metricsAvailable === false ? '暂无' : valueOrDash(value, suffix)
-}
 
 function statusLabel(value) {
   return ({ active: '正常', ready: '正常', healthy: '正常', draining: '迁移中', offline: '离线' })[value] || '未知'
@@ -26,6 +18,8 @@ export default function ClusterOverview({ onOpenProjects, canManageClusters = tr
   const [projects, setProjects] = useState([])
   const [metrics, setMetrics] = useState({})
   const [selectedClusterID, setSelectedClusterID] = useState('')
+  const [clusterPage, setClusterPage] = useState(1)
+  const [clusterPageSize, setClusterPageSize] = useState(10)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [formOpen, setFormOpen] = useState(false)
@@ -122,16 +116,21 @@ export default function ClusterOverview({ onOpenProjects, canManageClusters = tr
   }
 
   const totalPods = clusters.reduce((total, cluster) => total + (metrics[cluster.id]?.pod_count || 0), 0)
-  const visiblePodCount = Object.keys(metrics).length ? totalPods : '--'
+  const visiblePodCount = Object.keys(metrics).length ? totalPods : '—'
   const selectedCluster = clusters.find((cluster) => cluster.id === selectedClusterID) || clusters[0]
   const selectedMetrics = selectedCluster ? metrics[selectedCluster.id] : null
+  const visibleClusters = clusters.slice((clusterPage - 1) * clusterPageSize, clusterPage * clusterPageSize)
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(clusters.length / clusterPageSize))
+    setClusterPage((current) => Math.min(current, maxPage))
+  }, [clusters.length, clusterPageSize])
 
   return <div className="page-wrap">
     <div className="page-heading">
       <div>
         <Typography.Text className="page-kicker">工作空间 · 基础设施</Typography.Text>
         <Typography.Title level={2}>集群管理</Typography.Title>
-        <Typography.Paragraph type="secondary">先在这里登记 Kubernetes 集群，再把项目发布到对应集群。</Typography.Paragraph>
       </div>
       <Space>
         {canManageClusters && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>添加集群</Button>}
@@ -144,28 +143,30 @@ export default function ClusterOverview({ onOpenProjects, canManageClusters = tr
       <Col xs={24} sm={8}><SummaryCard label="运行中 Pod" value={visiblePodCount} icon={<DeploymentUnitOutlined />} tone="green" /></Col>
       <Col xs={24} sm={8}><SummaryCard label="空间项目" value={projects.length} icon={<AppstoreOutlined />} tone="orange" /></Col>
     </Row>
-    {!loading && !clusters.length && <Card bordered={false} className="empty-panel"><Empty description="当前空间还没有连接集群" /></Card>}
+    {!loading && !clusters.length && <Card variant="borderless" className="empty-panel"><Empty description="当前空间还没有连接集群" /></Card>}
     <div className="cluster-list">
-      {clusters.map((cluster) => {
-        const item = metrics[cluster.id]
+      {visibleClusters.map((cluster) => {
         const clusterProjects = projects.filter((project) => project.cluster_id === cluster.id)
-        return <Card key={cluster.id} bordered={false} className="cluster-list-card">
+        const isSelected = cluster.id === selectedCluster?.id
+        return <Card key={cluster.id} variant="borderless" className={`cluster-list-card${isSelected ? ' is-selected' : ''}`} aria-current={isSelected ? 'true' : undefined} onClick={(event) => {
+          if (event.target.closest('button, a, input, select, textarea')) return
+          setSelectedClusterID(cluster.id)
+        }}>
           <div className="cluster-row">
             <div className="cluster-symbol"><ClusterOutlined /></div>
             <div className="cluster-info"><Typography.Title level={4}>{cluster.name}</Typography.Title><Typography.Text type="secondary">{cluster.id} · {cluster.type === 'kubernetes' ? 'Kubernetes' : (cluster.type || 'Kubernetes')}</Typography.Text><Typography.Text type="secondary" className="cluster-endpoint"><LinkOutlined /> {cluster.api_endpoint || 'API 地址未填写，使用 kubeconfig 地址'}</Typography.Text><Typography.Text type="secondary" className="cluster-connection">{cluster.connection_mode === 'in_cluster' ? '集群内身份' : cluster.kubeconfig_configured ? 'kubeconfig 已配置' : '等待 kubeconfig'}</Typography.Text></div>
             <Tag color={statusColor(cluster.status)}>{statusLabel(cluster.status)}</Tag>
-            <div className="cluster-stat"><span>CPU</span><strong>{metricValue(item?.cpu_used_percent, '%', item?.metrics_available)}</strong></div>
-            <div className="cluster-stat"><span>内存</span><strong>{metricValue(item?.memory_used_percent, '%', item?.metrics_available)}</strong></div>
-            <div className="cluster-row-actions"><Button type="link" onClick={() => setSelectedClusterID(cluster.id)}>查看监控</Button>{canManageClusters && <><Button type="link" icon={<EditOutlined />} onClick={() => openEdit(cluster)}>编辑配置</Button><Button type="link" loading={testingClusterID === cluster.id} onClick={() => checkCluster(cluster)}>测试连接</Button></>}<Button type="link" onClick={onOpenProjects}>查看 {clusterProjects.length} 个项目 →</Button></div>
+            <div className="cluster-row-actions">{isSelected && <span className="cluster-current-indicator">当前监控</span>}{canManageClusters && <><Button type="link" icon={<EditOutlined />} onClick={() => openEdit(cluster)}>编辑配置</Button><Button type="link" loading={testingClusterID === cluster.id} onClick={() => checkCluster(cluster)}>测试连接</Button></>}<Button type="link" onClick={onOpenProjects}>查看 {clusterProjects.length} 个项目 →</Button></div>
           </div>
         </Card>
       })}
     </div>
+    {clusters.length > 10 && <Pagination className="cluster-pagination" current={clusterPage} pageSize={clusterPageSize} total={clusters.length} showSizeChanger pageSizeOptions={['10', '20', '50']} showTotal={(total, range) => `${range[0]}-${range[1]} / 共 ${total} 个集群`} onChange={(page, pageSize) => { setClusterPage(page); setClusterPageSize(pageSize) }} />}
     {selectedCluster && <div className="cluster-monitor-wrap"><MonitorDashboard scope="cluster" cluster={selectedCluster} metrics={selectedMetrics} onRefresh={load} /></div>}
     {canManageClusters && <ClusterForm open={formOpen} cluster={editingCluster} onCancel={() => { setFormOpen(false); setEditingCluster(null) }} onSubmit={saveCluster} loading={saving} />}
   </div>
 }
 
 function SummaryCard({ label, value, icon, tone }) {
-  return <Card bordered={false} className={`summary-card tone-${tone}`}><div className="summary-icon">{icon}</div><div><Typography.Text type="secondary">{label}</Typography.Text><Typography.Title level={3}>{value}</Typography.Title></div></Card>
+  return <Card variant="borderless" className={`summary-card tone-${tone}`}><div className="summary-icon">{icon}</div><div><Typography.Text type="secondary">{label}</Typography.Text><Typography.Title level={3}>{value}</Typography.Title></div></Card>
 }

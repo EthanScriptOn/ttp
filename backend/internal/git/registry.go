@@ -2,6 +2,8 @@ package git
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -18,11 +20,20 @@ type RepositoryRegistrar interface {
 	RegisterRepository(repositoryID, repositoryURL string) error
 }
 
+// RepositoryUnregistrar removes a repository that is no longer referenced by
+// a project. It is optional so existing providers remain source-compatible.
+type RepositoryUnregistrar interface {
+	UnregisterRepository(repositoryID, repositoryURL string) error
+}
+
 // RegistryConfig controls the read-only GitHub/GitLab providers created by a
 // RegistryProvider. Tokens remain private to the provider and are never part
 // of repository IDs, URLs, or errors.
 type RegistryConfig struct {
-	Provider       string
+	Provider string
+	// Token and ServiceAccount are retained for package-level compatibility
+	// with isolated tests. Production startup does not populate them; project
+	// credentials are configured through ConfigureRepositoryCredential.
 	Token          string
 	APIBaseURL     string
 	AllowedHosts   []string
@@ -42,15 +53,18 @@ type RegistryProvider struct {
 }
 
 type registryEntry struct {
-	provider  Provider
-	backendID string
+	provider              Provider
+	backendID             string
+	credentialFingerprint string
 }
 
 var _ Provider = (*RegistryProvider)(nil)
 var _ RepositoryRegistrar = (*RegistryProvider)(nil)
+var _ RepositoryUnregistrar = (*RegistryProvider)(nil)
 var _ TagProvider = (*RegistryProvider)(nil)
 var _ ServiceAccountProvider = (*RegistryProvider)(nil)
 var _ AccessChecker = (*RegistryProvider)(nil)
+var _ RepositoryCredentialRegistry = (*RegistryProvider)(nil)
 
 func NewRegistry(config RegistryConfig) (*RegistryProvider, error) {
 	kind := normalizeProviderKind(config.Provider)
@@ -122,26 +136,10 @@ func (r *RegistryProvider) RegisterRepository(repositoryID, repositoryURL string
 	if r.config.HTTPClient != nil {
 		options = append(options, WithHTTPClient(r.config.HTTPClient))
 	}
-	options = append(options, WithServiceAccount(r.config.ServiceAccount))
-
-	var provider Provider
-	switch kind {
-	case "github":
-		provider, err = NewGitHubProvider(repositoryURL, r.config.Token, options...)
-	case "gitlab":
-		provider, err = NewGitLabProvider(repositoryURL, r.config.Token, options...)
-	}
+	legacyCredential := RepositoryCredential{Provider: kind, Username: r.config.ServiceAccount.Username, Token: r.config.Token}
+	provider, backendID, fingerprint, err := r.newRepositoryProvider(repositoryID, repositoryURL, legacyCredential, options...)
 	if err != nil {
 		return err
-	}
-	parsedRepository, parseErr := parseRepositoryRef(parsed, repositoryURL, func() remoteKind {
-		if kind == "github" {
-			return remoteGitHub
-		}
-		return remoteGitLab
-	}())
-	if parseErr != nil {
-		return parseErr
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -151,9 +149,156 @@ func (r *RegistryProvider) RegisterRepository(repositoryID, repositoryURL string
 		}
 		return fmt.Errorf("%w: repository ID %q is already bound to another URL", ErrRepositoryConflict, repositoryID)
 	}
-	r.providers[repositoryID] = registryEntry{provider: provider, backendID: parsedRepository.canonicalURL}
+	r.providers[repositoryID] = registryEntry{provider: provider, backendID: backendID, credentialFingerprint: fingerprint}
 	r.urls[repositoryID] = repositoryURL
 	return nil
+}
+
+func (r *RegistryProvider) UnregisterRepository(repositoryID, repositoryURL string) error {
+	if r == nil {
+		return fmt.Errorf("%w: provider is not initialized", ErrInvalidProviderConfig)
+	}
+	repositoryID = strings.TrimSpace(repositoryID)
+	repositoryURL = strings.TrimSpace(repositoryURL)
+	if repositoryID == "" || repositoryURL == "" {
+		return fmt.Errorf("%w: repository ID and URL are required", ErrInvalidProviderConfig)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	registeredURL, registered := r.urls[repositoryID]
+	if !registered {
+		return nil
+	}
+	if registeredURL != repositoryURL {
+		return fmt.Errorf("%w: repository ID %q is bound to another URL", ErrRepositoryConflict, repositoryID)
+	}
+	delete(r.providers, repositoryID)
+	delete(r.urls, repositoryID)
+	return nil
+}
+
+// ConfigureRepositoryCredential replaces the provider bound to one project's
+// repository. The repository ID is project-specific, so two projects may use
+// different machine accounts for the same Git URL.
+func (r *RegistryProvider) ConfigureRepositoryCredential(repositoryID, repositoryURL string, credential RepositoryCredential) error {
+	provider, backendID, fingerprint, err := r.newRepositoryProvider(repositoryID, repositoryURL, credential)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if registeredURL, registered := r.urls[repositoryID]; registered && registeredURL != strings.TrimSpace(repositoryURL) {
+		return fmt.Errorf("%w: repository ID %q is already bound to another URL", ErrRepositoryConflict, repositoryID)
+	}
+	if entry, ok := r.providers[repositoryID]; ok && entry.credentialFingerprint == fingerprint {
+		return nil
+	}
+	r.providers[repositoryID] = registryEntry{provider: provider, backendID: backendID, credentialFingerprint: fingerprint}
+	r.urls[repositoryID] = strings.TrimSpace(repositoryURL)
+	return nil
+}
+
+// CheckRepositoryCredential verifies a credential before it is persisted.
+// Failed credentials never replace the currently active provider.
+func (r *RegistryProvider) CheckRepositoryCredential(ctx context.Context, repositoryID, repositoryURL string, credential RepositoryCredential) (RepositoryAccess, error) {
+	provider, backendID, _, err := r.newRepositoryProvider(repositoryID, repositoryURL, credential)
+	if err != nil {
+		return RepositoryAccess{}, err
+	}
+	checker, ok := provider.(AccessChecker)
+	if !ok {
+		return RepositoryAccess{RepositoryID: repositoryID, RepositoryURL: repositoryURL, Supported: false, Message: "当前 Git 连接不支持验证仓库机器人", CheckedAt: time.Now().UTC()}, nil
+	}
+	report, err := checker.CheckRepositoryAccess(ctx, backendID)
+	report.RepositoryID = repositoryID
+	if report.RepositoryURL == "" {
+		report.RepositoryURL = strings.TrimSpace(repositoryURL)
+	}
+	return report, err
+}
+
+func (r *RegistryProvider) ClearRepositoryCredential(repositoryID, repositoryURL string) error {
+	provider, backendID, fingerprint, err := r.newRepositoryProvider(repositoryID, repositoryURL, RepositoryCredential{Provider: "auto"})
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if registeredURL, registered := r.urls[repositoryID]; registered && registeredURL != strings.TrimSpace(repositoryURL) {
+		return fmt.Errorf("%w: repository ID %q is already bound to another URL", ErrRepositoryConflict, repositoryID)
+	}
+	r.providers[repositoryID] = registryEntry{provider: provider, backendID: backendID, credentialFingerprint: fingerprint}
+	r.urls[repositoryID] = strings.TrimSpace(repositoryURL)
+	return nil
+}
+
+func (r *RegistryProvider) newRepositoryProvider(repositoryID, repositoryURL string, credential RepositoryCredential, extra ...ProviderOption) (Provider, string, string, error) {
+	if strings.TrimSpace(repositoryID) == "" || strings.TrimSpace(repositoryURL) == "" {
+		return nil, "", "", fmt.Errorf("%w: repository ID and URL are required", ErrInvalidProviderConfig)
+	}
+	parsed, err := parseHTTPURL(repositoryURL)
+	if err != nil {
+		return nil, "", "", err
+	}
+	kind, err := r.kindForCredentialURL(parsed, credential.Provider)
+	if err != nil {
+		return nil, "", "", err
+	}
+	options := make([]ProviderOption, 0, len(extra)+4)
+	options = append(options, extra...)
+	if r.config.APIBaseURL != "" {
+		options = append(options, WithAPIBaseURL(r.config.APIBaseURL))
+	}
+	if len(r.config.AllowedHosts) > 0 {
+		options = append(options, WithAllowedHosts(r.config.AllowedHosts...))
+	}
+	if r.config.Timeout != 0 {
+		options = append(options, WithTimeout(r.config.Timeout))
+	}
+	if r.config.HTTPClient != nil {
+		options = append(options, WithHTTPClient(r.config.HTTPClient))
+	}
+	if strings.TrimSpace(credential.Username) != "" {
+		options = append(options, WithServiceAccount(ServiceAccount{Username: credential.Username, Provider: kind, AuthMethod: "token"}))
+	}
+	var provider Provider
+	switch kind {
+	case "github":
+		provider, err = NewGitHubProvider(repositoryURL, credential.Token, options...)
+	case "gitlab":
+		provider, err = NewGitLabProvider(repositoryURL, credential.Token, options...)
+	default:
+		err = fmt.Errorf("%w: provider must be auto, github, or gitlab", ErrInvalidProviderConfig)
+	}
+	if err != nil {
+		return nil, "", "", err
+	}
+	parsedRepository, err := parseRepositoryRef(parsed, repositoryURL, func() remoteKind {
+		if kind == "github" {
+			return remoteGitHub
+		}
+		return remoteGitLab
+	}())
+	if err != nil {
+		return nil, "", "", err
+	}
+	return provider, parsedRepository.canonicalURL, credentialFingerprint(repositoryURL, credential), nil
+}
+
+func (r *RegistryProvider) kindForCredentialURL(repositoryURL *url.URL, requested string) (string, error) {
+	requested = normalizeProviderKind(requested)
+	if requested != "auto" && requested != "github" && requested != "gitlab" {
+		return "", fmt.Errorf("%w: provider must be auto, github, or gitlab", ErrInvalidProviderConfig)
+	}
+	if requested != "auto" {
+		return requested, nil
+	}
+	return r.kindForURL(repositoryURL)
+}
+
+func credentialFingerprint(repositoryURL string, credential RepositoryCredential) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{strings.TrimSpace(repositoryURL), strings.ToLower(strings.TrimSpace(credential.Provider)), strings.TrimSpace(credential.Username), credential.Token}, "\x00")))
+	return hex.EncodeToString(sum[:])
 }
 
 func (r *RegistryProvider) kindForURL(repositoryURL *url.URL) (string, error) {
@@ -264,7 +409,7 @@ func (r *RegistryProvider) CheckRepositoryAccess(ctx context.Context, repository
 			RepositoryURL: r.repositoryURL(repositoryID),
 			Account:       r.ServiceAccount(),
 			Supported:     false,
-			Message:       "当前 Git 连接不支持验证平台服务账号，发布操作已被阻止。",
+			Message:       "当前 Git 连接不支持验证项目仓库机器人，发布操作已被阻止。",
 			CheckedAt:     time.Now().UTC(),
 		}
 		return report, nil

@@ -98,8 +98,6 @@ CREATE TABLE IF NOT EXISTS project_deployment_targets (
     project_id VARCHAR(64) NOT NULL,
     name VARCHAR(120) NOT NULL,
     environment VARCHAR(64) NOT NULL,
-    stage VARCHAR(16) NOT NULL DEFAULT 'custom',
-    sort_order INT UNSIGNED NOT NULL DEFAULT 1,
     cluster_id VARCHAR(64) NOT NULL,
     namespace VARCHAR(120) NOT NULL,
     replicas INT UNSIGNED NOT NULL DEFAULT 1,
@@ -115,15 +113,12 @@ CREATE TABLE IF NOT EXISTS project_deployment_targets (
     UNIQUE KEY uk_deployment_targets_project_name (space_id, project_id, name),
     UNIQUE KEY uk_deployment_targets_project_environment (space_id, project_id, environment),
     KEY idx_deployment_targets_project (space_id, project_id, is_default, enabled),
-    KEY idx_deployment_targets_project_order (space_id, project_id, sort_order, enabled),
     KEY idx_deployment_targets_cluster (space_id, cluster_id, namespace),
     CONSTRAINT fk_deployment_targets_project_same_space FOREIGN KEY (space_id, project_id)
         REFERENCES projects (space_id, id) ON DELETE CASCADE,
     CONSTRAINT fk_deployment_targets_cluster_same_space FOREIGN KEY (space_id, cluster_id)
         REFERENCES clusters (space_id, id) ON DELETE RESTRICT,
     CONSTRAINT chk_deployment_targets_strategy CHECK (deploy_strategy IN ('rolling', 'canary', 'blue_green')),
-    CONSTRAINT chk_deployment_targets_stage CHECK (stage IN ('dev', 'uat', 'pre', 'prod', 'custom')),
-    CONSTRAINT chk_deployment_targets_sort_order CHECK (sort_order > 0),
     CONSTRAINT chk_deployment_targets_replicas CHECK (replicas > 0),
     CONSTRAINT chk_deployment_targets_container_port CHECK (container_port BETWEEN 1 AND 65535),
     CONSTRAINT chk_deployment_targets_status CHECK (status IN ('active', 'draining', 'offline'))
@@ -165,7 +160,6 @@ CREATE TABLE IF NOT EXISTS project_releases (
     status VARCHAR(32) NOT NULL DEFAULT 'draft',
     created_by BIGINT UNSIGNED NULL,
     published_at DATETIME(3) NULL,
-    state_json LONGTEXT NOT NULL,
     created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     PRIMARY KEY (id),
@@ -211,19 +205,6 @@ CREATE TABLE IF NOT EXISTS release_commits (
         (is_removed = 0 AND removed_at IS NULL)
         OR (is_removed = 1 AND removed_at IS NOT NULL)
     )
-) ENGINE = InnoDB;
-
-CREATE TABLE IF NOT EXISTS release_batch_state (
-    id VARCHAR(64) NOT NULL,
-    space_id VARCHAR(64) NOT NULL,
-    project_id VARCHAR(64) NOT NULL,
-    state LONGTEXT NOT NULL,
-    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-    PRIMARY KEY (id),
-    KEY idx_release_batch_state_space_project (space_id, project_id, created_at),
-    CONSTRAINT fk_release_batch_state_project_same_space FOREIGN KEY (space_id, project_id)
-        REFERENCES projects (space_id, id) ON DELETE CASCADE
 ) ENGINE = InnoDB;
 
 CREATE TABLE IF NOT EXISTS audit_logs (

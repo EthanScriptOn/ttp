@@ -14,6 +14,7 @@ export const PERMISSIONS = Object.freeze({
   RELEASE_PUBLISH: 'release:publish',
   RUNTIME_READ: 'runtime:read',
   RUNTIME_CONFIG: 'runtime:config',
+  RUNTIME_TERMINAL: 'runtime:terminal',
   AUDIT_READ: 'audit:read',
 })
 
@@ -49,6 +50,7 @@ const ROLE_PERMISSIONS = Object.freeze({
     PERMISSIONS.RELEASE_PUBLISH,
     PERMISSIONS.RUNTIME_READ,
     PERMISSIONS.RUNTIME_CONFIG,
+    PERMISSIONS.RUNTIME_TERMINAL,
     PERMISSIONS.AUDIT_READ,
   ],
   viewer: [

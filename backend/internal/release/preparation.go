@@ -75,23 +75,19 @@ type Preparation struct {
 }
 
 // A non-positive limit asks the Provider for its available/default history.
-// The concrete demo provider returns all commits for this value, while remote
-// providers may apply their own documented safety cap. We remain conservative
+// Providers may apply their own documented safety cap. We remain conservative
 // when the returned histories do not prove that the base is included.
 const preparationHistoryLimit = 0
 
 // PrepareMerge asks an optional write-capable provider to create an isolated
-// temporary merge workspace after the read-only release-version check. The
-// protected base branch is never changed by this operation.
+// temporary merge workspace after the read-only baseline check. The protected
+// base branch is never changed by this operation.
 func (s *Service) PrepareMerge(ctx context.Context, input CreateInput, baseBranch, selectedSHA, temporaryBranch string) (Preparation, error) {
 	result, err := s.Prepare(ctx, input, baseBranch, selectedSHA)
 	if err != nil {
 		return Preparation{}, err
 	}
-	// The normal Prepare path no longer blocks a release because the source
-	// branch is behind base. Keep this explicit operation available for callers
-	// that intentionally open the legacy online merge editor.
-	if result.BaseIncluded {
+	if result.Status != PreparationNeedsMerge {
 		return result, nil
 	}
 	operator, ok := s.provider.(git.MergeOperator)
@@ -145,14 +141,13 @@ func (s *Service) ResolveMerge(ctx context.Context, input CreateInput, baseBranc
 	return mergePreparationResult(result, mergeResult), nil
 }
 
-// Prepare performs a read-only release-version check.
+// Prepare performs a read-only branch baseline analysis for a release.
 //
 // The source branch is input.Branch. The method validates both branch names
-// through ListBranches, verifies selectedSHA through GetCommit, and confirms
-// that the selected commit belongs to the source branch. The source/base
-// history counts are retained as informational API fields for compatibility;
-// they never prevent publishing. Batch integration is the point at which
-// conflicts with other release items are checked.
+// through ListBranches, verifies selectedSHA through GetCommit, and compares
+// the commit histories returned by ListCommits. No Git write operation is
+// available or attempted here, so a needs_merge result must be resolved by a
+// later workflow before publishing.
 func (s *Service) Prepare(ctx context.Context, input CreateInput, baseBranch, selectedSHA string) (Preparation, error) {
 	result := Preparation{
 		ProjectID:                  strings.TrimSpace(input.ProjectID),
@@ -244,12 +239,20 @@ func (s *Service) Prepare(ctx context.Context, input CreateInput, baseBranch, se
 	result.BaseHeadSHA = branchHeadSHA(baseBranchInfo, baseCommits)
 
 	result.BaseIncluded = result.SourceBranch == result.BaseBranch || commitSetContainsAll(sourceSet, baseSet)
-	result.Status = PreparationReady
-	result.CanPublish = true
-	result.RequiresMerge = false
-	result.ReleaseBranch = result.SourceBranch
-	result.ReleaseSHA = result.SelectedSHA
-	result.Message = "代码版本可以发布。发布时会自动加入当前开放批次；如果和批次中的其他代码发生代码冲突，平台会在发布时拦截。"
+	result.Status = PreparationNeedsMerge
+	result.CanPublish = false
+	result.RequiresMerge = true
+	result.Message = fmt.Sprintf("源分支 %q 尚未包含基准分支 %q 的全部提交，需要先合并后再发布；本次分析仅读取 Git，不会创建或修改分支，也不会自动合并。", result.SourceBranch, result.BaseBranch)
+	if result.BaseIncluded {
+		result.Status = PreparationReady
+		result.CanPublish = true
+		result.RequiresMerge = false
+		result.ReleaseBranch = result.SourceBranch
+		result.ReleaseSHA = result.SelectedSHA
+		result.Message = fmt.Sprintf("基准分支 %q 的提交已包含在源分支 %q 历史中，可以直接发布；本次分析仅读取 Git，不会创建或修改分支。", result.BaseBranch, result.SourceBranch)
+	} else {
+		result.TemporaryBranch = preparationBranchName(s.nowValue(), result.SelectedSHA, selectedCommit.ShortSHA)
+	}
 
 	return result, nil
 }

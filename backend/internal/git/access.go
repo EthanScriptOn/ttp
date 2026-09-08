@@ -120,8 +120,7 @@ func ServiceAccountFor(provider Provider) ServiceAccount {
 		return normalizeServiceAccount(accountProvider.ServiceAccount(), "")
 	}
 	return ServiceAccount{
-		Username:    "cicd-bot",
-		DisplayName: "CI/CD 发布机器人",
+		DisplayName: "项目仓库机器人",
 		Provider:    "unknown",
 		AuthMethod:  "unknown",
 		Configured:  false,
@@ -142,7 +141,7 @@ func CheckRepositoryAccess(ctx context.Context, provider Provider, repositoryID 
 			RepositoryID: repositoryID,
 			Account:      ServiceAccountFor(provider),
 			Supported:    false,
-			Message:      "当前 Git 连接不支持验证平台服务账号，发布操作已被阻止。",
+			Message:      "当前 Git 连接不支持验证项目仓库机器人，发布操作已被阻止。",
 			CheckedAt:    time.Now().UTC(),
 		}
 		return report, nil
@@ -171,7 +170,7 @@ func RequireRepositoryWriteAccess(ctx context.Context, provider Provider, reposi
 	}
 	reason := strings.TrimSpace(report.Message)
 	if reason == "" {
-		reason = "平台 Git 服务账号没有目标仓库的写权限"
+		reason = "项目仓库机器人没有目标仓库的写权限"
 	}
 	return &AccessDeniedError{Report: report, Reason: reason}
 }
@@ -191,28 +190,28 @@ func RequireRepositoryMergeAccess(ctx context.Context, provider Provider, reposi
 	reason := strings.TrimSpace(report.Message)
 	switch {
 	case !report.Supported:
-		reason = "当前 Git 连接不支持验证平台服务账号的合并权限"
+		reason = "当前 Git 连接不支持验证项目仓库机器人的合并权限"
 	case !report.Authenticated:
-		reason = "平台 Git 服务账号认证未通过，无法执行合并"
+		reason = "项目仓库机器人认证未通过，无法执行合并"
 	case !report.RepositoryFound:
-		reason = "平台 Git 服务账号无法访问目标仓库，无法执行合并"
+		reason = "项目仓库机器人无法访问目标仓库，无法执行合并"
 	case !report.AccountMatches:
-		reason = "当前 Token 与平台指定 Git 服务账号不一致，无法执行合并"
+		reason = "当前 Token 与填写的项目仓库机器人不一致，无法执行合并"
 	case !report.CanWrite:
-		reason = "平台 Git 服务账号没有目标仓库的写权限，无法执行合并"
+		reason = "项目仓库机器人没有目标仓库的写权限，无法执行合并"
 	case !report.CanCreateTemporaryBranch:
-		reason = "平台 Git 服务账号没有创建临时发布分支的权限，无法执行合并"
+		reason = "项目仓库机器人没有创建临时发布分支的权限，无法执行合并"
 	case !report.CanMerge:
 		required := strings.TrimSpace(report.RequiredMergePermission)
 		if required == "" {
 			required = "目标仓库要求的合并权限"
 		}
-		reason = fmt.Sprintf("平台 Git 服务账号没有合并权限，至少需要 %s", required)
+		reason = fmt.Sprintf("项目仓库机器人没有合并权限，至少需要 %s", required)
 	default:
 		return nil
 	}
 	if reason == "" {
-		reason = "平台 Git 服务账号不满足合并发布要求"
+		reason = "项目仓库机器人不满足合并发布要求"
 	}
 	return &AccessDeniedError{Report: report, Reason: reason}
 }
@@ -223,8 +222,7 @@ func defaultServiceAccount(kind remoteKind) ServiceAccount {
 		provider = "gitlab"
 	}
 	return ServiceAccount{
-		Username:    "cicd-bot",
-		DisplayName: "CI/CD 发布机器人",
+		DisplayName: "项目仓库机器人",
 		Provider:    provider,
 		AuthMethod:  "token",
 		Configured:  false,
@@ -233,12 +231,9 @@ func defaultServiceAccount(kind remoteKind) ServiceAccount {
 
 func normalizeServiceAccount(account ServiceAccount, provider string) ServiceAccount {
 	account.Username = strings.TrimSpace(account.Username)
-	if account.Username == "" {
-		account.Username = "cicd-bot"
-	}
 	account.DisplayName = strings.TrimSpace(account.DisplayName)
 	if account.DisplayName == "" {
-		account.DisplayName = "CI/CD 发布机器人"
+		account.DisplayName = "项目仓库机器人"
 	}
 	account.Email = strings.TrimSpace(account.Email)
 	if strings.TrimSpace(provider) != "" {
@@ -254,7 +249,7 @@ func normalizeServiceAccount(account ServiceAccount, provider string) ServiceAcc
 }
 
 func newRepositoryAccess(remote *remoteProvider, provider string) RepositoryAccess {
-	account := ServiceAccount{Username: "cicd-bot", DisplayName: "CI/CD 发布机器人", Provider: provider, AuthMethod: "token"}
+	account := ServiceAccount{DisplayName: "项目仓库机器人", Provider: provider, AuthMethod: "token"}
 	if remote != nil {
 		account = normalizeServiceAccount(remote.serviceAccount, provider)
 		account.Configured = strings.TrimSpace(remote.token) != ""

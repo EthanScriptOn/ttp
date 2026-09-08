@@ -234,7 +234,7 @@ func (p *GitHubProvider) GetCommit(ctx context.Context, repositoryID, sha string
 	segments := append(gitHubRepositorySegments(p.remote.repository), "commits", sha)
 	_, err := p.remote.getJSON(ctx, "get GitHub commit", p.remote.apiURL(segments...), &payload)
 	if err != nil {
-		return Commit{}, mapNotFound(err, ErrCommitNotFound)
+		return Commit{}, mapCommitNotFound(err)
 	}
 	commit, err := payload.toCommit()
 	if err != nil {

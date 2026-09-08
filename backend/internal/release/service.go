@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,15 +14,15 @@ import (
 )
 
 var (
-	ErrInvalidRelease    = errors.New("invalid release")
-	ErrReleaseNotFound   = errors.New("release not found")
-	ErrInvalidStatus     = errors.New("invalid release status")
-	ErrInvalidStatusFlow = errors.New("invalid release status transition")
-	ErrReleaseImmutable  = errors.New("release is immutable in its current status")
-	ErrLastCommit        = errors.New("a release must contain at least one commit")
-	ErrInvalidProgress   = errors.New("invalid release progress")
-	ErrTargetRetry       = errors.New("target retry is not allowed")
-	ErrTargetNotReady    = errors.New("target is waiting for a prerequisite environment")
+	ErrProviderNotConfigured = errors.New("git provider is not configured")
+	ErrInvalidRelease        = errors.New("invalid release")
+	ErrReleaseNotFound       = errors.New("release not found")
+	ErrInvalidStatus         = errors.New("invalid release status")
+	ErrInvalidStatusFlow     = errors.New("invalid release status transition")
+	ErrReleaseImmutable      = errors.New("release is immutable in its current status")
+	ErrLastCommit            = errors.New("a release must contain at least one commit")
+	ErrInvalidProgress       = errors.New("invalid release progress")
+	ErrTargetRetry           = errors.New("target retry is not allowed")
 )
 
 type Status string
@@ -59,12 +60,22 @@ type TargetStatus string
 
 const (
 	TargetPending   TargetStatus = "pending"
-	TargetWaiting   TargetStatus = "waiting"
 	TargetRunning   TargetStatus = "running"
 	TargetSucceeded TargetStatus = "succeeded"
 	TargetFailed    TargetStatus = "failed"
 	TargetCancelled TargetStatus = "cancelled"
 )
+
+// ExecutionLog is one raw line emitted by a release executor. The line is
+// intentionally kept separate from the human-facing release status message.
+type ExecutionLog struct {
+	ID        string    `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	Source    string    `json:"source"`
+	Stream    string    `json:"stream"`
+	Level     string    `json:"level"`
+	Line      string    `json:"line"`
+}
 
 // TargetInput is a snapshot of the environment selected for a release. The
 // snapshot makes a historical release auditable even if a target is renamed or
@@ -84,60 +95,54 @@ type TargetInput struct {
 
 type ReleaseTarget struct {
 	TargetInput
-	Status     TargetStatus `json:"status"`
-	Progress   int          `json:"progress"`
-	Stage      string       `json:"stage,omitempty"`
-	Message    string       `json:"message,omitempty"`
-	Error      string       `json:"error,omitempty"`
-	StartedAt  *time.Time   `json:"started_at,omitempty"`
-	FinishedAt *time.Time   `json:"finished_at,omitempty"`
+	Status     TargetStatus   `json:"status"`
+	Progress   int            `json:"progress"`
+	Stage      string         `json:"stage,omitempty"`
+	Message    string         `json:"message,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	StartedAt  *time.Time     `json:"started_at,omitempty"`
+	FinishedAt *time.Time     `json:"finished_at,omitempty"`
+	Logs       []ExecutionLog `json:"logs,omitempty"`
+}
+
+// Artifact is the immutable image produced for one execution of a release.
+// A re-publish clears it and creates a fresh build of the same saved source
+// revision; every environment within one execution reuses this digest.
+type Artifact struct {
+	Image     string    `json:"image"`
+	Digest    string    `json:"digest"`
+	CommitSHA string    `json:"commit_sha"`
+	BuiltAt   time.Time `json:"built_at"`
 }
 
 type Release struct {
-	ID                    string          `json:"id"`
-	SpaceID               string          `json:"space_id,omitempty"`
-	ProjectID             string          `json:"project_id"`
-	RepositoryID          string          `json:"repository_id"`
-	Branch                string          `json:"branch"`
-	SourceBranch          string          `json:"source_branch,omitempty"`
-	BaseBranch            string          `json:"base_branch,omitempty"`
-	Name                  string          `json:"name,omitempty"`
-	OwnerID               uint64          `json:"owner_id,omitempty"`
-	OwnerName             string          `json:"owner_name,omitempty"`
-	Commits               []git.Commit    `json:"commits"`
-	Targets               []ReleaseTarget `json:"targets,omitempty"`
-	Plan                  RolloutPlan     `json:"plan"`
-	Status                Status          `json:"status"`
-	Progress              int             `json:"progress,omitempty"`
-	Stage                 string          `json:"stage,omitempty"`
-	Message               string          `json:"message,omitempty"`
-	Error                 string          `json:"error,omitempty"`
-	StartedAt             *time.Time      `json:"started_at,omitempty"`
-	FinishedAt            *time.Time      `json:"finished_at,omitempty"`
-	BatchID               string          `json:"batch_id,omitempty"`
-	BatchBranch           string          `json:"batch_branch,omitempty"`
-	BatchBaseSHA          string          `json:"batch_base_sha,omitempty"`
-	BatchHeadSHA          string          `json:"batch_head_sha,omitempty"`
-	BatchSnapshotSHA      string          `json:"batch_snapshot_sha,omitempty"`
-	BatchSnapshotRevision int             `json:"batch_snapshot_revision,omitempty"`
-	BatchRevision         int             `json:"batch_revision,omitempty"`
-	MainMergeStatus       MainMergeStatus `json:"main_merge_status"`
-	MainMergeSHA          string          `json:"main_merge_sha,omitempty"`
-	MainMergedAt          *time.Time      `json:"main_merged_at,omitempty"`
-	CreatedAt             time.Time       `json:"created_at"`
-	UpdatedAt             time.Time       `json:"updated_at"`
+	ID           string          `json:"id"`
+	SpaceID      string          `json:"space_id,omitempty"`
+	ProjectID    string          `json:"project_id"`
+	RepositoryID string          `json:"repository_id"`
+	Branch       string          `json:"branch"`
+	Name         string          `json:"name,omitempty"`
+	Commits      []git.Commit    `json:"commits"`
+	Targets      []ReleaseTarget `json:"targets,omitempty"`
+	Artifact     *Artifact       `json:"artifact,omitempty"`
+	Plan         RolloutPlan     `json:"plan"`
+	Status       Status          `json:"status"`
+	Progress     int             `json:"progress,omitempty"`
+	Stage        string          `json:"stage,omitempty"`
+	Message      string          `json:"message,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	StartedAt    *time.Time      `json:"started_at,omitempty"`
+	FinishedAt   *time.Time      `json:"finished_at,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
 type CreateInput struct {
-	SpaceID      string        `json:"space_id"`
+	SpaceID      string        `json:"space_id,omitempty"`
 	ProjectID    string        `json:"project_id"`
 	RepositoryID string        `json:"repository_id"`
 	Branch       string        `json:"branch"`
-	SourceBranch string        `json:"source_branch"`
-	BaseBranch   string        `json:"base_branch"`
 	Name         string        `json:"name"`
-	OwnerID      uint64        `json:"owner_id"`
-	OwnerName    string        `json:"owner_name"`
 	CommitSHAs   []string      `json:"commit_shas"`
 	Strategy     Strategy      `json:"strategy"`
 	Traffic      TrafficSplit  `json:"traffic"`
@@ -145,113 +150,54 @@ type CreateInput struct {
 }
 
 type Service struct {
-	mu sync.RWMutex
-	// Main merges are serialized so two release items cannot both pass the
-	// service-side head check before either provider call finishes. The Git
-	// provider still has to enforce CurrentMainSHA atomically against the real
-	// remote branch.
-	mergeMu     sync.Mutex
-	provider    git.Provider
-	persistence Persistence
-	now         func() time.Time
-	nextID      uint64
-	nextBatchID uint64
-	releases    map[string]Release
-	batches     map[string]Batch
-	duplicates  map[string]string
+	mu         sync.RWMutex
+	provider   git.Provider
+	repository Repository
+	now        func() time.Time
+	nextID     uint64
+	releases   map[string]Release
+	duplicates map[string]string
+}
+
+// Repository persists the complete release snapshot. The service keeps a
+// cache for the synchronous release API, while production startup loads this
+// snapshot from durable storage so release state and executor logs survive a
+// restart. Tests can omit the repository and use the volatile implementation.
+type Repository interface {
+	LoadReleases(ctx context.Context) ([]Release, error)
+	SaveRelease(ctx context.Context, item Release) error
 }
 
 func NewService(provider git.Provider) *Service {
-	return newService(provider, nil)
+	return &Service{
+		provider:   provider,
+		now:        func() time.Time { return time.Now().UTC() },
+		releases:   make(map[string]Release),
+		duplicates: make(map[string]string),
+	}
 }
 
-// NewPersistentService restores durable release state before serving requests.
-// NewService remains available for unit tests and explicit in-memory usage.
-func NewPersistentService(provider git.Provider, persistence Persistence) (*Service, error) {
-	service := newService(provider, persistence)
-	if persistence == nil {
-		return service, nil
+func NewPersistentService(ctx context.Context, provider git.Provider, repository Repository) (*Service, error) {
+	if repository == nil {
+		return nil, fmt.Errorf("release repository is required")
 	}
-	if err := service.restore(context.Background()); err != nil {
+	service := NewService(provider)
+	service.repository = repository
+	items, err := repository.LoadReleases(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return service, nil
-}
-
-func newService(provider git.Provider, persistence Persistence) *Service {
-	if provider == nil {
-		provider = git.NewDemoProvider()
-	}
-	return &Service{
-		provider:    provider,
-		persistence: persistence,
-		now:         func() time.Time { return time.Now().UTC() },
-		releases:    make(map[string]Release),
-		batches:     make(map[string]Batch),
-		duplicates:  make(map[string]string),
-	}
-}
-
-// Persistence stores complete release and batch snapshots. Keeping the
-// snapshot here makes state transitions atomic from the service's point of
-// view while the database adapter remains outside the release domain package.
-type Persistence interface {
-	Load(ctx context.Context) ([]Release, []Batch, error)
-	Replace(ctx context.Context, releases []Release, batches []Batch) error
-}
-
-func (s *Service) restore(ctx context.Context) error {
-	releases, batches, err := s.persistence.Load(ctx)
-	if err != nil {
-		return err
-	}
-	for _, item := range releases {
+	for _, item := range items {
 		if strings.TrimSpace(item.ID) == "" {
 			continue
 		}
-		s.releases[item.ID] = cloneRelease(item)
-		if value := numericSuffix(item.ID, "rel-"); value > s.nextID {
-			s.nextID = value
-		}
-		s.duplicates[releaseDuplicateKey(item)] = item.ID
-	}
-	for _, batch := range batches {
-		if strings.TrimSpace(batch.ID) == "" {
-			continue
-		}
-		s.batches[batch.ID] = cloneBatch(batch)
-		if value := numericSuffix(batch.ID, "batch-"); value > s.nextBatchID {
-			s.nextBatchID = value
+		service.releases[item.ID] = cloneRelease(item)
+		service.duplicates[releaseDuplicateKey(item)] = item.ID
+		if parsed, parseErr := strconv.ParseUint(strings.TrimPrefix(item.ID, "rel-"), 10, 64); parseErr == nil && parsed > service.nextID {
+			service.nextID = parsed
 		}
 	}
-	return nil
-}
-
-func numericSuffix(value, prefix string) uint64 {
-	value = strings.TrimPrefix(strings.TrimSpace(value), prefix)
-	var result uint64
-	for _, char := range value {
-		if char < '0' || char > '9' {
-			return 0
-		}
-		result = result*10 + uint64(char-'0')
-	}
-	return result
-}
-
-func (s *Service) persistLocked() error {
-	if s.persistence == nil {
-		return nil
-	}
-	releases := make([]Release, 0, len(s.releases))
-	for _, item := range s.releases {
-		releases = append(releases, cloneRelease(item))
-	}
-	batches := make([]Batch, 0, len(s.batches))
-	for _, batch := range s.batches {
-		batches = append(batches, cloneBatch(batch))
-	}
-	return s.persistence.Replace(context.Background(), releases, batches)
+	return service, nil
 }
 
 // SetClock is useful to deterministic callers and tests. It should be called
@@ -270,6 +216,21 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Release, bool,
 	if err != nil {
 		return Release{}, false, err
 	}
+	// An explicit SHA identifies an immutable release snapshot. Check the
+	// in-memory index before contacting the provider so a repeated request is
+	// still idempotent when the remote Git service is temporarily unavailable.
+	// The first request still resolves every SHA below, so this shortcut cannot
+	// make an unvalidated commit publishable.
+	if shas := normalizeSHAs(input.CommitSHAs); len(shas) > 0 {
+		key := duplicateKey(input, commitsForSHAs(shas), plan)
+		s.mu.RLock()
+		if existingID, ok := s.duplicates[key]; ok {
+			existing := cloneRelease(s.releases[existingID])
+			s.mu.RUnlock()
+			return existing, true, nil
+		}
+		s.mu.RUnlock()
+	}
 	commits, err := s.resolveCommits(ctx, input)
 	if err != nil {
 		return Release{}, false, err
@@ -284,21 +245,27 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Release, bool,
 	now := s.now().UTC()
 	s.nextID++
 	id := fmt.Sprintf("rel-%06d", s.nextID)
-	sourceBranch := strings.TrimSpace(input.SourceBranch)
-	if sourceBranch == "" {
-		sourceBranch = strings.TrimSpace(input.Branch)
-	}
-	baseBranch := strings.TrimSpace(input.BaseBranch)
-	result := Release{ID: id, SpaceID: strings.TrimSpace(input.SpaceID), ProjectID: input.ProjectID, RepositoryID: input.RepositoryID, Branch: input.Branch, SourceBranch: sourceBranch, BaseBranch: baseBranch, Name: strings.TrimSpace(input.Name), OwnerID: input.OwnerID, OwnerName: strings.TrimSpace(input.OwnerName), Commits: append([]git.Commit(nil), commits...), Targets: newReleaseTargets(input.Targets), Plan: plan, Status: StatusDraft, MainMergeStatus: MainMergePending, CreatedAt: now, UpdatedAt: now}
-	s.releases[id] = result
-	s.duplicates[key] = id
-	if err := s.persistLocked(); err != nil {
+	result := Release{ID: id, SpaceID: strings.TrimSpace(input.SpaceID), ProjectID: input.ProjectID, RepositoryID: input.RepositoryID, Branch: input.Branch, Name: strings.TrimSpace(input.Name), Commits: append([]git.Commit(nil), commits...), Targets: newReleaseTargets(input.Targets), Plan: plan, Status: StatusDraft, CreatedAt: now, UpdatedAt: now}
+	if err := s.persist(ctx, result); err != nil {
 		return Release{}, false, err
 	}
+	s.releases[id] = result
+	s.duplicates[key] = id
 	return cloneRelease(result), false, nil
 }
 
+func commitsForSHAs(shas []string) []git.Commit {
+	commits := make([]git.Commit, 0, len(shas))
+	for _, sha := range shas {
+		commits = append(commits, git.Commit{SHA: sha})
+	}
+	return commits
+}
+
 func (s *Service) resolveCommits(ctx context.Context, input CreateInput) ([]git.Commit, error) {
+	if s == nil || s.provider == nil {
+		return nil, ErrProviderNotConfigured
+	}
 	shas := normalizeSHAs(input.CommitSHAs)
 	if len(shas) == 0 {
 		commits, err := s.provider.ListCommits(ctx, input.RepositoryID, input.Branch, 1)
@@ -334,6 +301,13 @@ func (s *Service) Get(id string) (Release, error) {
 	return cloneRelease(release), nil
 }
 
+func (s *Service) persist(ctx context.Context, item Release) error {
+	if s == nil || s.repository == nil {
+		return nil
+	}
+	return s.repository.SaveRelease(ctx, cloneRelease(item))
+}
+
 func (s *Service) List(projectID string) []Release {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -358,7 +332,7 @@ func (s *Service) RemoveCommit(id, sha string) (Release, error) {
 	if !ok {
 		return Release{}, ErrReleaseNotFound
 	}
-	if release.Status != StatusDraft || release.BatchID != "" {
+	if release.Status != StatusDraft {
 		return Release{}, ErrReleaseImmutable
 	}
 	index := -1
@@ -376,6 +350,9 @@ func (s *Service) RemoveCommit(id, sha string) (Release, error) {
 	}
 	release.Commits = append(release.Commits[:index], release.Commits[index+1:]...)
 	release.UpdatedAt = s.now().UTC()
+	if err := s.persist(context.Background(), release); err != nil {
+		return Release{}, err
+	}
 	s.releases[id] = release
 	for key, releaseID := range s.duplicates {
 		if releaseID == id {
@@ -383,9 +360,6 @@ func (s *Service) RemoveCommit(id, sha string) (Release, error) {
 		}
 	}
 	s.duplicates[releaseDuplicateKey(release)] = id
-	if err := s.persistLocked(); err != nil {
-		return Release{}, err
-	}
 	return cloneRelease(release), nil
 }
 
@@ -399,9 +373,6 @@ func (s *Service) Transition(id string, target Status) (Release, error) {
 	if !ok {
 		return Release{}, ErrReleaseNotFound
 	}
-	if target == StatusSucceeded && len(release.Targets) > 0 && !releaseTargetsSucceeded(release.Targets) {
-		return Release{}, fmt.Errorf("%w: all deployment targets must succeed before the release can complete", ErrInvalidStatusFlow)
-	}
 	if !canTransition(release.Status, target) {
 		return Release{}, fmt.Errorf("%w: %s -> %s", ErrInvalidStatusFlow, release.Status, target)
 	}
@@ -410,11 +381,10 @@ func (s *Service) Transition(id string, target Status) (Release, error) {
 	now := s.now().UTC()
 	applyTransitionMetadata(&release, previous, target, now)
 	release.UpdatedAt = now
-	s.releases[id] = release
-	s.syncBatchLocked(release, now)
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
 }
 
@@ -438,11 +408,50 @@ func (s *Service) UpdateProgress(id string, progress int, stage, message string)
 	release.Stage = strings.TrimSpace(stage)
 	release.Message = strings.TrimSpace(message)
 	release.UpdatedAt = s.now().UTC()
-	s.releases[id] = release
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
+}
+
+// SetArtifact records the image used by the active execution. The artifact is
+// immutable for the duration of a run so every selected environment receives
+// the exact same digest.
+func (s *Service) SetArtifact(id string, artifact Artifact) (Release, error) {
+	artifact.Image = strings.TrimSpace(artifact.Image)
+	artifact.Digest = strings.ToLower(strings.TrimSpace(artifact.Digest))
+	artifact.CommitSHA = strings.TrimSpace(artifact.CommitSHA)
+	if artifact.Image == "" || artifact.Digest == "" || !strings.Contains(artifact.Image, "@"+artifact.Digest) || !strings.HasPrefix(artifact.Digest, "sha256:") || len(artifact.Digest) != len("sha256:")+64 || artifact.CommitSHA == "" {
+		return Release{}, fmt.Errorf("%w: invalid release artifact", ErrInvalidRelease)
+	}
+	if artifact.BuiltAt.IsZero() {
+		artifact.BuiltAt = s.now().UTC()
+	} else {
+		artifact.BuiltAt = artifact.BuiltAt.UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.releases[id]
+	if !ok {
+		return Release{}, ErrReleaseNotFound
+	}
+	if item.Status != StatusQueued && item.Status != StatusRunning {
+		return Release{}, ErrReleaseImmutable
+	}
+	if item.Artifact != nil {
+		if item.Artifact.Image != artifact.Image || item.Artifact.Digest != artifact.Digest || item.Artifact.CommitSHA != artifact.CommitSHA {
+			return Release{}, fmt.Errorf("%w: release artifact is already fixed", ErrReleaseImmutable)
+		}
+		return cloneRelease(item), nil
+	}
+	item.Artifact = &artifact
+	item.UpdatedAt = s.now().UTC()
+	if err := s.persist(context.Background(), item); err != nil {
+		return Release{}, err
+	}
+	s.releases[id] = item
+	return cloneRelease(item), nil
 }
 
 // SetTargets attaches the selected environments to a legacy release the first
@@ -457,126 +466,12 @@ func (s *Service) SetTargets(id string, inputs []TargetInput) (Release, error) {
 	if len(release.Targets) == 0 {
 		release.Targets = newReleaseTargets(inputs)
 		release.UpdatedAt = s.now().UTC()
-		s.releases[id] = release
-		if err := s.persistLocked(); err != nil {
+		if err := s.persist(context.Background(), release); err != nil {
 			return Release{}, err
 		}
+		s.releases[id] = release
 	}
 	return cloneRelease(release), nil
-}
-
-// StartTarget claims the next environment in a release's ordered rollout.
-// Only one target can be active at a time; later targets remain waiting until
-// the current target is completed. The boolean is false when the target was
-// already running, which lets HTTP callers safely make duplicate requests
-// without starting a second executor.
-func (s *Service) StartTarget(id, targetID string) (Release, bool, error) {
-	targetID = strings.TrimSpace(targetID)
-	if targetID == "" {
-		return Release{}, false, fmt.Errorf("%w: target id is required", ErrInvalidRelease)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	release, ok := s.releases[id]
-	if !ok {
-		return Release{}, false, ErrReleaseNotFound
-	}
-	if err := s.ensureOpenBatchLocked(release); err != nil {
-		return Release{}, false, err
-	}
-	if len(release.Targets) == 0 {
-		return Release{}, false, fmt.Errorf("%w: release has no deployment targets", ErrInvalidRelease)
-	}
-	index := findReleaseTarget(release.Targets, targetID)
-	if index < 0 {
-		return Release{}, false, fmt.Errorf("%w: target %s", ErrInvalidRelease, targetID)
-	}
-
-	// A terminal release is a version record that may be published again. Work
-	// on a cloned value so a rejected request cannot partially reset the stored
-	// target state.
-	release = cloneRelease(release)
-	if release.Status == StatusFailed || release.Status == StatusSucceeded || release.Status == StatusCancelled {
-		resetTargetStatuses(release.Targets)
-		release.Status = StatusRunning
-		release.Progress = aggregateTargetProgress(release.Targets)
-		release.Stage = ""
-		release.Message = ""
-		release.Error = ""
-		release.StartedAt = nil
-		release.FinishedAt = nil
-		release.MainMergeStatus = MainMergePending
-		release.MainMergeSHA = ""
-		release.MainMergedAt = nil
-	}
-
-	target := &release.Targets[index]
-	if target.Status == TargetSucceeded {
-		return Release{}, false, fmt.Errorf("%w: target %s has already succeeded", ErrReleaseImmutable, targetID)
-	}
-	if target.Status == TargetFailed || target.Status == TargetCancelled {
-		return Release{}, false, fmt.Errorf("%w: target %s must be retried first", ErrTargetRetry, targetID)
-	}
-	if target.Status == TargetRunning {
-		if release.Status == StatusDraft || release.Status == StatusQueued {
-			now := s.now().UTC()
-			previous := release.Status
-			release.Status = StatusRunning
-			applyTransitionMetadata(&release, previous, StatusRunning, now)
-			release.UpdatedAt = now
-			s.releases[id] = release
-			if err := s.persistLocked(); err != nil {
-				return Release{}, false, err
-			}
-		}
-		return cloneRelease(release), false, nil
-	}
-
-	nextIndex := nextTargetIndex(release.Targets)
-	if nextIndex < 0 {
-		return Release{}, false, fmt.Errorf("%w: all deployment targets have completed", ErrTargetNotReady)
-	}
-	if nextIndex != index {
-		return Release{}, false, targetNotReadyError(release.Targets[nextIndex], *target)
-	}
-	if target.Status == TargetWaiting {
-		// The target is now the first unfinished stage. Promote it before
-		// claiming it so the externally visible state is unambiguous.
-		target.Status = TargetPending
-	}
-	if target.Status != TargetPending {
-		return Release{}, false, fmt.Errorf("%w: target %s is %s", ErrTargetNotReady, targetID, target.Status)
-	}
-	if release.Status == StatusFailed {
-		return Release{}, false, fmt.Errorf("%w: target %s must be retried first", ErrTargetRetry, targetID)
-	}
-	if release.Status != StatusDraft && release.Status != StatusQueued && release.Status != StatusRunning {
-		return Release{}, false, fmt.Errorf("%w: cannot start target while release is %s", ErrInvalidStatusFlow, release.Status)
-	}
-
-	now := s.now().UTC()
-	previous := release.Status
-	release.Status = StatusRunning
-	applyTransitionMetadata(&release, previous, StatusRunning, now)
-	target.Status = TargetRunning
-	target.Progress = 0
-	target.Stage = "preparing"
-	target.Message = "正在准备环境发布"
-	target.Error = ""
-	if target.StartedAt == nil {
-		target.StartedAt = timestamp(now)
-	}
-	release.Progress = aggregateTargetProgress(release.Targets)
-	release.Stage = "preparing"
-	release.Message = "正在准备发布：" + targetDisplayName(*target)
-	release.UpdatedAt = now
-	s.releases[id] = release
-	s.syncBatchLocked(release, now)
-	if err := s.persistLocked(); err != nil {
-		return Release{}, false, err
-	}
-	return cloneRelease(release), true, nil
 }
 
 func (s *Service) UpdateTargetProgress(id, targetID string, progress int, stage, message string) (Release, error) {
@@ -594,14 +489,8 @@ func (s *Service) UpdateTargetProgress(id, targetID string, progress int, stage,
 		return Release{}, fmt.Errorf("%w: target %s", ErrInvalidRelease, targetID)
 	}
 	target := &release.Targets[index]
-	if target.Status == TargetWaiting {
-		return Release{}, targetNotReadyErrorForTarget(*target)
-	}
 	if target.Status != TargetPending && target.Status != TargetRunning {
 		return Release{}, ErrReleaseImmutable
-	}
-	if err := ensureTargetIsNext(release.Targets, index); err != nil {
-		return Release{}, err
 	}
 	target.Status = TargetRunning
 	target.Progress = progress
@@ -615,12 +504,74 @@ func (s *Service) UpdateTargetProgress(id, targetID string, progress int, stage,
 	release.Stage = target.Stage
 	release.Message = target.Message
 	release.UpdatedAt = s.now().UTC()
-	s.releases[id] = release
-	s.syncBatchLocked(release, release.UpdatedAt)
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
+}
+
+// AppendTargetLog stores executor output without changing the target's
+// lifecycle status. This lets a failed or cancelled run retain its final
+// stderr line as well as the successful output before it.
+func (s *Service) AppendTargetLog(id, targetID, source, stream, level, line string) (Release, error) {
+	line = strings.TrimRight(line, "\r\n")
+	if line == "" {
+		return Release{}, fmt.Errorf("%w: execution log line is required", ErrInvalidRelease)
+	}
+	if strings.TrimSpace(source) == "" {
+		source = "executor"
+	}
+	if strings.TrimSpace(stream) == "" {
+		stream = "stdout"
+	}
+	if strings.TrimSpace(level) == "" {
+		level = "INFO"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	release, ok := s.releases[id]
+	if !ok {
+		return Release{}, ErrReleaseNotFound
+	}
+	index := findReleaseTarget(release.Targets, targetID)
+	if index < 0 {
+		return Release{}, fmt.Errorf("%w: target %s", ErrInvalidRelease, targetID)
+	}
+	target := &release.Targets[index]
+	now := s.now().UTC()
+	target.Logs = append(target.Logs, ExecutionLog{
+		ID:        fmt.Sprintf("%s-%d", targetID, now.UnixNano()),
+		Timestamp: now,
+		Source:    strings.TrimSpace(source),
+		Stream:    strings.TrimSpace(stream),
+		Level:     strings.ToUpper(strings.TrimSpace(level)),
+		Line:      line,
+	})
+	release.UpdatedAt = now
+	if err := s.persist(context.Background(), release); err != nil {
+		return Release{}, err
+	}
+	s.releases[id] = release
+	return cloneRelease(release), nil
+}
+
+func (s *Service) TargetLogs(id, targetID string) ([]ExecutionLog, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	release, ok := s.releases[id]
+	if !ok {
+		return nil, ErrReleaseNotFound
+	}
+	index := findReleaseTarget(release.Targets, targetID)
+	if index < 0 {
+		return nil, fmt.Errorf("%w: target %s", ErrInvalidRelease, targetID)
+	}
+	logs := release.Targets[index].Logs
+	if logs == nil {
+		return []ExecutionLog{}, nil
+	}
+	return append([]ExecutionLog{}, logs...), nil
 }
 
 func (s *Service) CompleteTarget(id, targetID string) (Release, error) {
@@ -635,38 +586,21 @@ func (s *Service) CompleteTarget(id, targetID string) (Release, error) {
 		return Release{}, fmt.Errorf("%w: target %s", ErrInvalidRelease, targetID)
 	}
 	target := &release.Targets[index]
-	if target.Status == TargetWaiting {
-		return Release{}, targetNotReadyErrorForTarget(*target)
-	}
 	if target.Status != TargetRunning && target.Status != TargetPending {
 		return Release{}, ErrReleaseImmutable
 	}
-	if err := ensureTargetIsNext(release.Targets, index); err != nil {
-		return Release{}, err
-	}
 	now := s.now().UTC()
-	if target.StartedAt == nil {
-		target.StartedAt = timestamp(now)
-	}
 	target.Status = TargetSucceeded
 	target.Progress = 100
 	target.Stage = "succeeded"
 	target.Message = "环境发布完成"
 	target.FinishedAt = &now
 	release.Progress = aggregateTargetProgress(release.Targets)
-	if nextIndex := promoteNextTarget(release.Targets); nextIndex >= 0 {
-		release.Stage = "waiting"
-		release.Message = "等待推进环境：" + targetDisplayName(release.Targets[nextIndex])
-	} else {
-		release.Stage = "checking"
-		release.Message = "所有环境发布完成，等待汇总"
-	}
 	release.UpdatedAt = now
-	s.releases[id] = release
-	s.syncBatchLocked(release, now)
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
 }
 
@@ -687,31 +621,19 @@ func (s *Service) FailTarget(id, targetID, errorMessage string) (Release, error)
 	}
 	now := s.now().UTC()
 	target := &release.Targets[index]
-	if target.Status == TargetWaiting {
-		return Release{}, targetNotReadyErrorForTarget(*target)
-	}
-	if target.Status != TargetPending && target.Status != TargetRunning {
-		return Release{}, ErrReleaseImmutable
-	}
-	if err := ensureTargetIsNext(release.Targets, index); err != nil {
-		return Release{}, err
-	}
 	target.Status = TargetFailed
 	target.Progress = 0
 	target.Stage = "failed"
 	target.Message = "环境发布失败"
 	target.Error = errorMessage
 	target.FinishedAt = &now
-	release.Progress = aggregateTargetProgress(release.Targets)
 	release.Stage = "failed"
 	release.Message = "环境发布失败：" + target.Name
-	release.Error = errorMessage
 	release.UpdatedAt = now
-	s.releases[id] = release
-	s.syncBatchLocked(release, now)
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
 }
 
@@ -732,7 +654,7 @@ func (s *Service) CancelPendingTargets(id, message string) (Release, error) {
 	now := s.now().UTC()
 	for index := range release.Targets {
 		target := &release.Targets[index]
-		if target.Status != TargetPending && target.Status != TargetWaiting && target.Status != TargetRunning {
+		if target.Status != TargetPending && target.Status != TargetRunning {
 			continue
 		}
 		target.Status = TargetCancelled
@@ -741,11 +663,10 @@ func (s *Service) CancelPendingTargets(id, message string) (Release, error) {
 		target.FinishedAt = &now
 	}
 	release.UpdatedAt = now
-	s.releases[id] = release
-	s.syncBatchLocked(release, now)
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
 }
 
@@ -764,9 +685,6 @@ func (s *Service) RetryTarget(id, targetID string) (Release, error) {
 	if !ok {
 		return Release{}, ErrReleaseNotFound
 	}
-	if err := s.ensureOpenBatchLocked(release); err != nil {
-		return Release{}, err
-	}
 	if release.Status != StatusFailed {
 		return Release{}, fmt.Errorf("%w: release must be failed", ErrTargetRetry)
 	}
@@ -778,11 +696,6 @@ func (s *Service) RetryTarget(id, targetID string) (Release, error) {
 	if target.Status != TargetFailed && target.Status != TargetCancelled {
 		return Release{}, fmt.Errorf("%w: target %s is %s", ErrTargetRetry, targetID, target.Status)
 	}
-	if err := ensureTargetIsNext(release.Targets, index); err != nil {
-		return Release{}, fmt.Errorf("%w: %v", ErrTargetRetry, err)
-	}
-	release = cloneRelease(release)
-	target = &release.Targets[index]
 	now := s.now().UTC()
 	target.Status = TargetPending
 	target.Progress = 0
@@ -799,11 +712,10 @@ func (s *Service) RetryTarget(id, targetID string) (Release, error) {
 	release.StartedAt = timestamp(now)
 	release.FinishedAt = nil
 	release.UpdatedAt = now
-	s.releases[id] = release
-	s.syncBatchLocked(release, now)
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
 }
 
@@ -830,7 +742,7 @@ func (s *Service) FinalizeTargets(id string) (Release, error) {
 	for _, target := range release.Targets {
 		switch target.Status {
 		case TargetSucceeded:
-		case TargetPending, TargetWaiting, TargetRunning:
+		case TargetPending, TargetRunning:
 			active = true
 			allSucceeded = false
 		case TargetFailed, TargetCancelled:
@@ -842,17 +754,6 @@ func (s *Service) FinalizeTargets(id string) (Release, error) {
 		}
 	}
 	if active {
-		if nextIndex := nextTargetIndex(release.Targets); nextIndex >= 0 && release.Targets[nextIndex].Status == TargetWaiting {
-			release.Targets[nextIndex].Status = TargetPending
-			release.Stage = "waiting"
-			release.Message = "等待推进环境：" + targetDisplayName(release.Targets[nextIndex])
-			release.UpdatedAt = s.now().UTC()
-			s.releases[id] = release
-			s.syncBatchLocked(release, release.UpdatedAt)
-			if err := s.persistLocked(); err != nil {
-				return Release{}, err
-			}
-		}
 		return cloneRelease(release), nil
 	}
 	now := s.now().UTC()
@@ -870,27 +771,11 @@ func (s *Service) FinalizeTargets(id string) (Release, error) {
 		release.FinishedAt = timestamp(now)
 	}
 	release.UpdatedAt = now
-	s.releases[id] = release
-	s.syncBatchLocked(release, now)
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
-}
-
-func (s *Service) ensureOpenBatchLocked(release Release) error {
-	batchID := strings.TrimSpace(release.BatchID)
-	if batchID == "" {
-		return nil
-	}
-	batch, ok := s.batches[batchID]
-	if !ok {
-		return ErrBatchNotFound
-	}
-	if batch.Status != BatchOpen {
-		return ErrBatchClosed
-	}
-	return nil
 }
 
 // Fail marks an active release as failed and keeps the executor's error for
@@ -917,11 +802,10 @@ func (s *Service) Fail(id, errorMessage string) (Release, error) {
 	release.Message = "发布失败"
 	release.FinishedAt = timestamp(now)
 	release.UpdatedAt = now
-	s.releases[id] = release
-	s.syncBatchLocked(release, now)
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
 }
 
@@ -942,10 +826,9 @@ func (s *Service) Cancel(id, message string) (Release, error) {
 	release.Stage = "cancelled"
 	release.Message = strings.TrimSpace(message)
 	release.FinishedAt = timestamp(now)
-	release.MainMergeStatus = MainMergeCancelled
 	for index := range release.Targets {
 		target := &release.Targets[index]
-		if target.Status == TargetPending || target.Status == TargetWaiting || target.Status == TargetRunning {
+		if target.Status == TargetPending || target.Status == TargetRunning {
 			target.Status = TargetCancelled
 			target.Stage = "cancelled"
 			target.Message = "环境发布已取消"
@@ -953,11 +836,10 @@ func (s *Service) Cancel(id, message string) (Release, error) {
 		}
 	}
 	release.UpdatedAt = now
-	s.releases[id] = release
-	s.syncBatchLocked(release, now)
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(context.Background(), release); err != nil {
 		return Release{}, err
 	}
+	s.releases[id] = release
 	return cloneRelease(release), nil
 }
 
@@ -968,16 +850,22 @@ func applyTransitionMetadata(release *Release, previous, target Status, now time
 		// Its immutable version data stays intact while execution metadata starts
 		// a fresh run.
 		if previous == StatusFailed || previous == StatusSucceeded || previous == StatusCancelled {
+			release.Artifact = nil
 			release.Progress = 0
 			release.Stage = ""
 			release.Message = ""
 			release.Error = ""
 			release.StartedAt = nil
 			release.FinishedAt = nil
-			release.MainMergeStatus = MainMergePending
-			release.MainMergeSHA = ""
-			release.MainMergedAt = nil
-			resetTargetStatuses(release.Targets)
+			for index := range release.Targets {
+				release.Targets[index].Status = TargetPending
+				release.Targets[index].Progress = 0
+				release.Targets[index].Stage = ""
+				release.Targets[index].Message = ""
+				release.Targets[index].Error = ""
+				release.Targets[index].StartedAt = nil
+				release.Targets[index].FinishedAt = nil
+			}
 		}
 	case StatusRunning:
 		if release.StartedAt == nil {
@@ -985,9 +873,6 @@ func applyTransitionMetadata(release *Release, previous, target Status, now time
 		}
 		release.FinishedAt = nil
 		release.Error = ""
-		if nextIndex := nextTargetIndex(release.Targets); nextIndex >= 0 && release.Targets[nextIndex].Status == TargetWaiting {
-			release.Targets[nextIndex].Status = TargetPending
-		}
 	case StatusSucceeded:
 		release.Progress = 100
 		release.Stage = "succeeded"
@@ -1146,11 +1031,12 @@ func cloneRelease(release Release) Release {
 		finishedAt := *release.FinishedAt
 		release.FinishedAt = &finishedAt
 	}
-	if release.MainMergedAt != nil {
-		mergedAt := *release.MainMergedAt
-		release.MainMergedAt = &mergedAt
+	if release.Artifact != nil {
+		artifact := *release.Artifact
+		release.Artifact = &artifact
 	}
 	for index := range release.Targets {
+		release.Targets[index].Logs = append([]ExecutionLog(nil), release.Targets[index].Logs...)
 		if release.Targets[index].StartedAt != nil {
 			startedAt := *release.Targets[index].StartedAt
 			release.Targets[index].StartedAt = &startedAt
@@ -1181,136 +1067,9 @@ func newReleaseTargets(inputs []TargetInput) []ReleaseTarget {
 		result = append(result, ReleaseTarget{TargetInput: input, Status: TargetPending})
 	}
 	sort.SliceStable(result, func(i, j int) bool {
-		left, right := targetStageRank(result[i]), targetStageRank(result[j])
-		if left == right {
-			return targetDisplayName(result[i]) < targetDisplayName(result[j])
-		}
-		return left < right
+		return result[i].SortOrder < result[j].SortOrder
 	})
-	resetTargetStatuses(result)
 	return result
-}
-
-const unknownTargetStage = 4
-
-// targetStageRank defines the only order in which environments may advance.
-// New releases use the persisted numeric order. Name inference remains only
-// for release snapshots created before explicit environment stages existed.
-func targetStageRank(target ReleaseTarget) int {
-	if target.SortOrder > 0 {
-		return target.SortOrder
-	}
-	if stage := strings.ToLower(strings.TrimSpace(target.EnvironmentStage)); stage != "" {
-		switch stage {
-		case "dev":
-			return 1
-		case "uat":
-			return 2
-		case "pre":
-			return 3
-		case "prod":
-			return 4
-		}
-	}
-	environment := strings.ToLower(strings.TrimSpace(target.Environment))
-	switch environment {
-	case "dev", "develop", "development":
-		return 1
-	case "uat", "qa", "test", "testing":
-		return 2
-	case "pre", "preprod", "pre-production", "stage", "staging":
-		return 3
-	case "prod", "pro", "production":
-		return 4
-	}
-	if environment != "" {
-		return unknownTargetStage + 1
-	}
-
-	value := strings.ToLower(strings.Join([]string{target.ID, target.Name}, " "))
-	switch {
-	case strings.Contains(value, "开发") || strings.Contains(value, "dev"):
-		return 1
-	case strings.Contains(value, "测试") || strings.Contains(value, "uat") || strings.Contains(value, "qa"):
-		return 2
-	case strings.Contains(value, "预发布") || strings.Contains(value, "staging") || strings.Contains(value, "stage") || strings.Contains(value, "pre"):
-		return 3
-	case strings.Contains(value, "生产") || strings.Contains(value, "prod"):
-		return 4
-	default:
-		return unknownTargetStage + 1
-	}
-}
-
-func targetDisplayName(target ReleaseTarget) string {
-	return firstNonEmpty(target.Name, target.Environment, target.ID)
-}
-
-func orderedTargetIndexes(targets []ReleaseTarget) []int {
-	indexes := make([]int, len(targets))
-	for index := range targets {
-		indexes[index] = index
-	}
-	sort.SliceStable(indexes, func(i, j int) bool {
-		return targetStageRank(targets[indexes[i]]) < targetStageRank(targets[indexes[j]])
-	})
-	return indexes
-}
-
-func nextTargetIndex(targets []ReleaseTarget) int {
-	for _, index := range orderedTargetIndexes(targets) {
-		if targets[index].Status == TargetSucceeded {
-			continue
-		}
-		return index
-	}
-	return -1
-}
-
-func ensureTargetIsNext(targets []ReleaseTarget, index int) error {
-	nextIndex := nextTargetIndex(targets)
-	if nextIndex < 0 {
-		return fmt.Errorf("%w: all deployment targets have completed", ErrTargetNotReady)
-	}
-	if nextIndex != index {
-		return targetNotReadyError(targets[nextIndex], targets[index])
-	}
-	return nil
-}
-
-func targetNotReadyError(blocking, requested ReleaseTarget) error {
-	return fmt.Errorf("%w: 请先完成环境 %s，不能推进环境 %s", ErrTargetNotReady, targetDisplayName(blocking), targetDisplayName(requested))
-}
-
-func targetNotReadyErrorForTarget(target ReleaseTarget) error {
-	return fmt.Errorf("%w: 环境 %s 尚未轮到发布", ErrTargetNotReady, targetDisplayName(target))
-}
-
-func resetTargetStatuses(targets []ReleaseTarget) {
-	ordered := orderedTargetIndexes(targets)
-	readyAssigned := false
-	for _, index := range ordered {
-		target := &targets[index]
-		target.Status = TargetWaiting
-		if !readyAssigned {
-			target.Status = TargetPending
-			readyAssigned = true
-		}
-		target.Progress = 0
-		target.Stage = ""
-		target.Message = ""
-		target.Error = ""
-		target.StartedAt = nil
-		target.FinishedAt = nil
-	}
-}
-
-func promoteNextTarget(targets []ReleaseTarget) int {
-	index := nextTargetIndex(targets)
-	if index >= 0 && targets[index].Status == TargetWaiting {
-		targets[index].Status = TargetPending
-	}
-	return index
 }
 
 func findReleaseTarget(targets []ReleaseTarget, targetID string) int {

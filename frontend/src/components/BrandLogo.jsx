@@ -2,15 +2,15 @@ export default function BrandLogo({ tone = 'light', compact = false, className =
   const classes = ['brand-lockup', `brand-lockup-${tone}`, compact ? 'is-compact' : '', className].filter(Boolean).join(' ')
 
   return (
-    <div className={classes} role="img" aria-label="TTP · The Turbocharged Platform">
-      <svg className="brand-symbol" viewBox="0 0 48 48" aria-hidden="true">
-        <path className="brand-symbol-plate" d="M14 4h20c6.6 0 10 3.4 10 10v20c0 6.6-3.4 10-10 10H14C7.4 44 4 40.6 4 34V14C4 7.4 7.4 4 14 4Z" />
-        <path className="brand-symbol-t" d="M11 11.5h23.5v6h-8.5v19h-6.5v-19H11Z" />
-        <path className="brand-symbol-arrow" d="M29 25h7.2l-3.1-3.1 2.4-2.4 7.2 7.2-7.2 7.2-2.4-2.4 3.1-3.1H29Z" />
+    <div className={classes} role="img" aria-label="TTP">
+      <svg className="brand-symbol" viewBox="0 0 64 64" aria-hidden="true">
+        <circle className="brand-symbol-disc" cx="32" cy="32" r="30" />
+        <path className="brand-symbol-t" d="M10 12h35v10H34v31H22V22H10z" />
+        <path className="brand-symbol-p" d="M33 12h11.5C53.5 12 59 16.3 59 23.5S53.5 35 44.5 35H43v18H33V12z" />
+        <path className="brand-symbol-p-counter" d="M43 21h1.5c2.9 0 4.5 1.3 4.5 3.5S47.4 28 44.5 28H43z" />
       </svg>
       <span className="brand-wordmark">
         <strong>TTP</strong>
-        {!compact && <span className="brand-full-name">The Turbocharged Platform</span>}
       </span>
     </div>
   )

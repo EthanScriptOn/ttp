@@ -60,7 +60,7 @@ func TestPrepareWhenBaseHistoryIsIncludedIsReady(t *testing.T) {
 	}
 }
 
-func TestPrepareDivergedBranchesCanPublishWithoutMergingMain(t *testing.T) {
+func TestPrepareDivergedBranchesNeedMergeWithoutWritingGit(t *testing.T) {
 	service := newPreparationService(t, map[string][]git.Commit{
 		"main":    {preparationCommit("base-2"), preparationCommit("common")},
 		"release": {preparationCommit("release-2"), preparationCommit("common")},
@@ -73,20 +73,20 @@ func TestPrepareDivergedBranchesCanPublishWithoutMergingMain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != PreparationReady || !result.CanPublish || result.RequiresMerge {
-		t.Fatalf("diverged branches should still be publishable: %#v", result)
+	if result.Status != PreparationNeedsMerge || result.CanPublish || !result.RequiresMerge {
+		t.Fatalf("diverged branches should need merge: %#v", result)
 	}
 	if result.SourceAhead != 1 || result.BaseAhead != 1 || result.BaseIncluded {
 		t.Fatalf("unexpected diverged counts: %#v", result)
 	}
-	if result.TemporaryBranch != "" || result.ReleaseBranch != "release" || result.ReleaseSHA != "release-2" {
-		t.Fatalf("release should use the selected source version directly: %#v", result)
+	if result.TemporaryBranch != "release-prep-20260826-060506-release" {
+		t.Fatalf("unexpected suggested temporary branch: %q", result.TemporaryBranch)
 	}
 	if len(result.ConflictFiles) != 0 || result.SupportsConflictResolution || result.Capabilities.CanWriteGit || result.Capabilities.CanCreateTemporaryBranch || result.Capabilities.CanDetectConflicts {
 		t.Fatalf("preparation claimed unsupported Git operations: %#v", result)
 	}
-	if !strings.Contains(result.Message, "加入当前开放批次") || !strings.Contains(result.Message, "代码冲突") {
-		t.Fatalf("message does not explain batch behavior: %q", result.Message)
+	if !strings.Contains(result.Message, "不会创建或修改") || !strings.Contains(result.Message, "不会自动合并") {
+		t.Fatalf("message does not explain read-only behavior: %q", result.Message)
 	}
 }
 

@@ -6,10 +6,10 @@ import {
   normalizeCommit,
   normalizeDeploymentConfig,
   normalizeDeploymentTarget,
-  normalizeBatch,
+  normalizeGitCredential,
   normalizeGitAccess,
-  normalizeGitServiceAccount,
   normalizeAuditLog,
+  normalizeABExperiment,
   normalizeMetrics,
   normalizePreparation,
   normalizePod,
@@ -32,7 +32,7 @@ import {
   segment,
 } from './api-helpers'
 
-export { ApiError, normalizePreparation, normalizeRelease, normalizeBatch }
+export { ApiError, normalizePreparation, normalizeRelease }
 
 export async function login(username, password) {
   const result = await request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
@@ -202,14 +202,30 @@ export async function getBranches(projectId) {
   return responseItems(result).map(normalizeBranch).filter((item) => item.name)
 }
 
-export async function getGitServiceAccount() {
-  const result = await request('/git/service-account')
-  return normalizeGitServiceAccount(result)
-}
-
 export async function getGitAccess(projectId) {
   const result = await request(`/projects/${segment(projectId)}/git/access`)
   return normalizeGitAccess(result)
+}
+
+export async function getProjectGitCredential(projectId) {
+  return normalizeGitCredential(await request(`/projects/${segment(projectId)}/git/credential`))
+}
+
+export async function saveProjectGitCredential(projectId, payload = {}) {
+  const body = {
+    provider: asString(payload.provider, 'auto'),
+    username: asString(payload.username),
+    token: asString(payload.token),
+  }
+  const result = await request(`/projects/${segment(projectId)}/git/credential`, { method: 'PUT', body: JSON.stringify(body) })
+  return {
+    credential: normalizeGitCredential(result),
+    access: normalizeGitAccess(result),
+  }
+}
+
+export async function deleteProjectGitCredential(projectId) {
+  return normalizeGitCredential(await request(`/projects/${segment(projectId)}/git/credential`, { method: 'DELETE' }))
 }
 
 export async function prepareRelease(projectId, payload = {}) {
@@ -231,9 +247,34 @@ export async function getReleases(projectId) {
   return responseItems(result).map(normalizeRelease).filter((item) => item.id)
 }
 
-export async function getReleaseBatches(projectId) {
-  const result = await request(`/projects/${segment(projectId)}/release-batches`)
-  return responseItems(result).map(normalizeBatch).filter((item) => item.id)
+export async function getABExperiments(projectId) {
+  const result = await request(`/projects/${segment(projectId)}/ab-experiments`)
+  return responseItems(result).map(normalizeABExperiment).filter((item) => item.id)
+}
+
+export async function getABExperiment(projectId, experimentId) {
+  return normalizeABExperiment(await request(`/projects/${segment(projectId)}/ab-experiments/${segment(experimentId)}`))
+}
+
+export async function createABExperiment(projectId, payload = {}) {
+  return normalizeABExperiment(await request(`/projects/${segment(projectId)}/ab-experiments`, { method: 'POST', body: JSON.stringify(payload) }))
+}
+
+export async function updateABExperimentTraffic(projectId, experimentId, payload = {}) {
+  return normalizeABExperiment(await request(`/projects/${segment(projectId)}/ab-experiments/${segment(experimentId)}/traffic`, { method: 'PATCH', body: JSON.stringify(payload) }))
+}
+
+export async function stopABExperiment(projectId, experimentId) {
+  return normalizeABExperiment(await request(`/projects/${segment(projectId)}/ab-experiments/${segment(experimentId)}/stop`, { method: 'POST' }))
+}
+
+export async function finishABExperiment(projectId, experimentId, result) {
+  return normalizeABExperiment(await request(`/projects/${segment(projectId)}/ab-experiments/${segment(experimentId)}/finish`, { method: 'POST', body: JSON.stringify({ result }) }))
+}
+
+export async function getReleaseTargetLogs(projectId, releaseId, targetId) {
+  const result = await request(`/projects/${segment(projectId)}/releases/${segment(releaseId)}/targets/${segment(targetId)}/logs`)
+  return responseItems(result.logs || result)
 }
 
 export async function createRelease(projectId, payload) {
@@ -247,22 +288,6 @@ export async function createRelease(projectId, payload) {
 
 export async function publishRelease(projectId, releaseId) {
   return releaseResponse(await request(`/projects/${segment(projectId)}/releases/${segment(releaseId)}/publish`, { method: 'POST' }))
-}
-
-export async function publishReleaseTarget(projectId, releaseId, targetId) {
-  return releaseResponse(await request(`/projects/${segment(projectId)}/releases/${segment(releaseId)}/targets/${segment(targetId)}/publish`, { method: 'POST' }))
-}
-
-export async function mergeReleaseToMain(projectId, releaseId) {
-  const result = await request(`/projects/${segment(projectId)}/releases/${segment(releaseId)}/merge-main`, { method: 'POST' })
-  return {
-    release: normalizeRelease(result?.release || result?.data?.release || result),
-    batch: normalizeBatch(result?.batch || result?.data?.batch || {}),
-  }
-}
-
-export async function closeReleaseBatch(projectId, batchId) {
-  return normalizeBatch((await request(`/projects/${segment(projectId)}/release-batches/${segment(batchId)}/close`, { method: 'POST' }))?.batch)
 }
 
 export async function retryReleaseTarget(projectId, releaseId, targetId) {
@@ -289,7 +314,7 @@ export async function getPods(projectId, targetId = '') {
 
 export async function getPod(projectId, podName, targetId = '') {
   const query = targetId ? `?target_id=${encodeURIComponent(asString(targetId))}` : ''
-  return request(`/projects/${segment(projectId)}/pods/${segment(podName)}${query}`).then(normalizePodDetail)
+  return normalizePodDetail(await request(`/projects/${segment(projectId)}/pods/${segment(podName)}${query}`))
 }
 
 export async function getPodLogs(projectId, podName, container, targetId = '') {
@@ -305,6 +330,11 @@ export async function getPodLogs(projectId, podName, container, targetId = '') {
 export async function updatePodConfig(projectId, podName, payload, targetId = '') {
   const query = targetId ? `?target_id=${encodeURIComponent(asString(targetId))}` : ''
   return normalizePodDetail(await request(`/projects/${segment(projectId)}/pods/${segment(podName)}/config${query}`, { method: 'PATCH', body: JSON.stringify(payload) }))
+}
+
+export async function execPodCommand(projectId, podName, payload, targetId = '') {
+  const query = targetId ? `?target_id=${encodeURIComponent(asString(targetId))}` : ''
+  return request(`/projects/${segment(projectId)}/pods/${segment(podName)}/exec${query}`, { method: 'POST', body: JSON.stringify(payload) })
 }
 
 export async function getMetrics(projectId, targetId = '') {

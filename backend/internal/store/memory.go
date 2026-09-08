@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -30,28 +29,41 @@ type Memory struct {
 	memberships       map[string]membership
 	clusters          map[string]Cluster
 	projects          map[string]domain.Project
+	gitCredentials    map[string]ProjectGitCredential
 	deploymentTargets map[string]domain.DeploymentTarget
 	deploymentConfigs map[string]domain.DeploymentConfig
+	abExperiments     map[string]domain.ABExperiment
 	auditLogs         []domain.AuditLog
 	nextAuditID       uint64
 }
 
+// NewMemory returns an empty volatile store. It is intended for isolated unit
+// tests only; production startup always uses MySQL.
 func NewMemory() *Memory {
-	return NewMemoryWithAdminPassword(os.Getenv("CICD_DEMO_ADMIN_PASSWORD"))
+	return &Memory{
+		users:             make(map[uint64]domain.User),
+		spaces:            make(map[string]domain.Space),
+		memberships:       make(map[string]membership),
+		clusters:          make(map[string]Cluster),
+		projects:          make(map[string]domain.Project),
+		gitCredentials:    make(map[string]ProjectGitCredential),
+		deploymentTargets: make(map[string]domain.DeploymentTarget),
+		deploymentConfigs: make(map[string]domain.DeploymentConfig),
+		abExperiments:     make(map[string]domain.ABExperiment),
+	}
 }
 
-func NewMemoryWithAdminPassword(adminPassword string) *Memory {
-	if strings.TrimSpace(adminPassword) == "" {
-		adminPassword = uuid.NewString()
-	}
-	password, _ := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.DefaultCost)
+// NewMemoryWithFixtures is an explicit test fixture. It is never reachable
+// from the server startup path.
+func NewMemoryWithFixtures() *Memory {
+	password, _ := bcrypt.GenerateFromPassword([]byte(defaultAdminPassword), bcrypt.DefaultCost)
 	now := time.Now().UTC()
 	space := domain.Space{ID: "space-lab", Name: "实验室空间", Slug: "lab", Description: "本地演示空间", CreatedAt: now}
-	cluster := Cluster{ID: demoClusterIDForSpace(space.ID), SpaceID: space.ID, Name: "演示集群", Provider: "kubernetes", ConnectionMode: ClusterConnectionKubeconfig, Status: "active", CreatedAt: now, UpdatedAt: now}
+	cluster := Cluster{ID: "demo-cluster", SpaceID: space.ID, Name: "测试集群", Provider: "kubernetes", ConnectionMode: ClusterConnectionKubeconfig, Status: "active", CreatedAt: now, UpdatedAt: now}
 	uatCluster := Cluster{ID: "demo-cluster-uat", SpaceID: space.ID, Name: "测试集群", Provider: "kubernetes", ConnectionMode: ClusterConnectionKubeconfig, Status: "active", CreatedAt: now, UpdatedAt: now}
 	project := domain.Project{
-		ID: "reverse-lab", SpaceID: space.ID, Name: "Reverse Lab API", Description: "用于验证从 commit 到 Pod 的完整流程",
-		RepositoryID: "demo-repo", RepositoryURL: "https://example.invalid/android-reverse-lab", DefaultBranch: "main",
+		ID: "reverse-lab", SpaceID: space.ID, Name: "测试项目", Description: "单元测试项目",
+		RepositoryID: "demo-repo", RepositoryURL: "https://github.com/acme/test-repository", DefaultBranch: "main",
 		ClusterID: "demo-cluster", Namespace: "lab", DeployStrategy: "rolling", Replicas: 2, ContainerPort: 8080,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -67,28 +79,16 @@ func NewMemoryWithAdminPassword(adminPassword string) *Memory {
 		Replicas: 2, ContainerPort: project.ContainerPort, DeployStrategy: project.DeployStrategy,
 		Stage: DeploymentStageUAT, SortOrder: 2, Enabled: true, Status: "active", Health: "unknown", CreatedAt: now, UpdatedAt: now,
 	}
-	preTarget := domain.DeploymentTarget{
-		ID: "target-reverse-lab-pre", ProjectID: project.ID, SpaceID: space.ID,
-		Name: "预发布环境", Environment: "pre", ClusterID: uatCluster.ID, Namespace: "pre",
-		Replicas: 2, ContainerPort: project.ContainerPort, DeployStrategy: project.DeployStrategy,
-		Stage: DeploymentStagePre, SortOrder: 3, Enabled: true, Status: "active", Health: "unknown", CreatedAt: now, UpdatedAt: now,
-	}
-	prodTarget := domain.DeploymentTarget{
-		ID: "target-reverse-lab-prod", ProjectID: project.ID, SpaceID: space.ID,
-		Name: "生产环境", Environment: "prod", ClusterID: cluster.ID, Namespace: "prod",
-		Replicas: 2, ContainerPort: project.ContainerPort, DeployStrategy: project.DeployStrategy,
-		Stage: DeploymentStageProd, SortOrder: 4, Enabled: true, Status: "active", Health: "unknown", CreatedAt: now, UpdatedAt: now,
-	}
 	return &Memory{
-		users:       map[uint64]domain.User{1: {ID: 1, Username: "admin", DisplayName: "平台管理员", PasswordHash: string(password), IsSuperAdmin: true}},
-		spaces:      map[string]domain.Space{space.ID: space},
-		memberships: map[string]membership{"1\x00" + space.ID: {UserID: 1, SpaceID: space.ID, Role: "owner", JoinedAt: now}},
-		clusters:    map[string]Cluster{cluster.ID: cluster, uatCluster.ID: uatCluster},
-		projects:    map[string]domain.Project{project.ID: project},
-		deploymentTargets: map[string]domain.DeploymentTarget{
-			target.ID: target, uatTarget.ID: uatTarget, preTarget.ID: preTarget, prodTarget.ID: prodTarget,
-		},
+		users:             map[uint64]domain.User{1: {ID: 1, Username: "admin", DisplayName: "平台管理员", PasswordHash: string(password), IsSuperAdmin: true}},
+		spaces:            map[string]domain.Space{space.ID: space},
+		memberships:       map[string]membership{"1\x00" + space.ID: {UserID: 1, SpaceID: space.ID, Role: "owner", JoinedAt: now}},
+		clusters:          map[string]Cluster{cluster.ID: cluster, uatCluster.ID: uatCluster},
+		projects:          map[string]domain.Project{project.ID: project},
+		gitCredentials:    make(map[string]ProjectGitCredential),
+		deploymentTargets: map[string]domain.DeploymentTarget{target.ID: target, uatTarget.ID: uatTarget},
 		deploymentConfigs: make(map[string]domain.DeploymentConfig),
+		abExperiments:     make(map[string]domain.ABExperiment),
 	}
 }
 
@@ -218,10 +218,8 @@ func (m *Memory) CreateSpace(ctx context.Context, userID uint64, input CreateSpa
 	}
 	now := time.Now().UTC()
 	space := domain.Space{ID: "space-" + uuid.NewString(), Name: name, Slug: slug, Description: strings.TrimSpace(input.Description), Role: "owner", CreatedAt: now}
-	cluster := Cluster{ID: demoClusterIDForSpace(space.ID), SpaceID: space.ID, Name: "演示集群", Provider: "kubernetes", ConnectionMode: ClusterConnectionKubeconfig, Status: "active", CreatedAt: now, UpdatedAt: now}
 	m.spaces[space.ID] = space
 	m.memberships[memberKey(userID, space.ID)] = membership{UserID: userID, SpaceID: space.ID, Role: "owner", JoinedAt: now}
-	m.clusters[cluster.ID] = cluster
 	return space, nil
 }
 
@@ -349,38 +347,31 @@ func (m *Memory) CreateProject(ctx context.Context, spaceID string, input Create
 	if err := ctx.Err(); err != nil {
 		return domain.Project{}, err
 	}
-	name := strings.TrimSpace(input.Name)
-	repo := strings.TrimSpace(input.RepositoryURL)
-	if name == "" || repo == "" {
-		return domain.Project{}, fmt.Errorf("%w: name and repository_url are required", ErrInvalidInput)
+	input, err := normalizeCreateProjectInput(input)
+	if err != nil {
+		return domain.Project{}, err
 	}
-	branch := strings.TrimSpace(input.DefaultBranch)
-	if branch == "" {
-		branch = "main"
-	}
+	name := input.Name
+	repo := input.RepositoryURL
+	branch := input.DefaultBranch
 	cluster := normalizeClusterID(spaceID, input.ClusterID)
-	namespace := strings.TrimSpace(input.Namespace)
-	if namespace == "" {
-		namespace = "lab"
+	if cluster == "" {
+		return domain.Project{}, fmt.Errorf("%w: cluster_id is required", ErrInvalidInput)
 	}
-	strategy := strings.TrimSpace(input.DeployStrategy)
-	if strategy == "" {
-		strategy = "rolling"
-	}
+	namespace := input.Namespace
+	strategy := input.DeployStrategy
 	replicas := input.Replicas
-	if replicas <= 0 {
-		replicas = 1
-	}
 	port := input.ContainerPort
-	if port <= 0 {
-		port = 8080
-	}
 	repositoryID := strings.TrimSpace(input.RepositoryID)
 	if repositoryID == "" {
-		repositoryID = "demo-repo"
+		repositoryID = "repo-" + uuid.NewString()
 	}
 	now := time.Now().UTC()
-	project := domain.Project{ID: uuid.NewString(), SpaceID: spaceID, Name: name, Description: strings.TrimSpace(input.Description), RepositoryID: repositoryID, RepositoryURL: repo, DefaultBranch: branch, ClusterID: cluster, Namespace: namespace, DeployStrategy: strategy, Replicas: replicas, ContainerPort: port, CreatedAt: now, UpdatedAt: now}
+	projectID := strings.TrimSpace(input.ID)
+	if projectID == "" {
+		projectID = uuid.NewString()
+	}
+	project := domain.Project{ID: projectID, SpaceID: spaceID, Name: name, Description: strings.TrimSpace(input.Description), RepositoryID: repositoryID, RepositoryURL: repo, DefaultBranch: branch, ClusterID: cluster, Namespace: namespace, DeployStrategy: strategy, Replicas: replicas, ContainerPort: port, ImageRepository: strings.TrimSpace(input.ImageRepository), CreatedAt: now, UpdatedAt: now}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.spaces[spaceID]; !ok {
@@ -411,6 +402,9 @@ func (m *Memory) UpdateProject(ctx context.Context, spaceID, projectID string, i
 	if err := ctx.Err(); err != nil {
 		return domain.Project{}, err
 	}
+	if err := validateProjectUpdateInput(input); err != nil {
+		return domain.Project{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	project, ok := m.projects[projectID]
@@ -430,28 +424,77 @@ func (m *Memory) UpdateProject(ctx context.Context, spaceID, projectID string, i
 	if input.Description != nil {
 		project.Description = strings.TrimSpace(*input.Description)
 	}
-	if input.DefaultBranch != nil && strings.TrimSpace(*input.DefaultBranch) != "" {
+	if input.DefaultBranch != nil {
 		project.DefaultBranch = strings.TrimSpace(*input.DefaultBranch)
 	}
-	if input.ClusterID != nil && strings.TrimSpace(*input.ClusterID) != "" {
+	if input.ClusterID != nil {
 		clusterID := normalizeClusterID(spaceID, *input.ClusterID)
 		if selected, ok := m.clusters[clusterID]; !ok || selected.SpaceID != spaceID {
 			return domain.Project{}, ErrNotFound
 		}
 		project.ClusterID = clusterID
 	}
-	if input.Namespace != nil && strings.TrimSpace(*input.Namespace) != "" {
+	if input.Namespace != nil {
 		project.Namespace = strings.TrimSpace(*input.Namespace)
 	}
-	if input.Replicas != nil && *input.Replicas > 0 {
+	if input.Replicas != nil {
 		project.Replicas = *input.Replicas
 	}
-	if input.ContainerPort != nil && *input.ContainerPort > 0 {
+	if input.ContainerPort != nil {
 		project.ContainerPort = *input.ContainerPort
+	}
+	if input.ImageRepository != nil {
+		project.ImageRepository = strings.TrimSpace(*input.ImageRepository)
 	}
 	project.UpdatedAt = time.Now().UTC()
 	m.projects[projectID] = project
 	return project, nil
+}
+
+func (m *Memory) GetProjectGitCredential(ctx context.Context, spaceID, projectID string) (ProjectGitCredential, error) {
+	if err := ctx.Err(); err != nil {
+		return ProjectGitCredential{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	credential, ok := m.gitCredentials[projectID]
+	if !ok || credential.SpaceID != spaceID {
+		return ProjectGitCredential{}, ErrNotFound
+	}
+	return credential, nil
+}
+
+func (m *Memory) SaveProjectGitCredential(ctx context.Context, spaceID, projectID string, input SaveProjectGitCredentialInput) (ProjectGitCredential, error) {
+	if err := ctx.Err(); err != nil {
+		return ProjectGitCredential{}, err
+	}
+	if strings.TrimSpace(input.Provider) == "" || strings.TrimSpace(input.Username) == "" || strings.TrimSpace(input.TokenCiphertext) == "" {
+		return ProjectGitCredential{}, fmt.Errorf("%w: git credential fields are required", ErrInvalidInput)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	project, ok := m.projects[projectID]
+	if !ok || project.SpaceID != spaceID {
+		return ProjectGitCredential{}, ErrNotFound
+	}
+	now := time.Now().UTC()
+	credential := ProjectGitCredential{ProjectID: projectID, SpaceID: spaceID, Provider: strings.ToLower(strings.TrimSpace(input.Provider)), Username: strings.TrimSpace(input.Username), TokenCiphertext: input.TokenCiphertext, Configured: true, UpdatedAt: now}
+	m.gitCredentials[projectID] = credential
+	return credential, nil
+}
+
+func (m *Memory) DeleteProjectGitCredential(ctx context.Context, spaceID, projectID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	credential, ok := m.gitCredentials[projectID]
+	if !ok || credential.SpaceID != spaceID {
+		return nil
+	}
+	delete(m.gitCredentials, projectID)
+	return nil
 }
 
 func (m *Memory) ListDeploymentTargets(ctx context.Context, spaceID, projectID string) ([]domain.DeploymentTarget, error) {
@@ -460,8 +503,7 @@ func (m *Memory) ListDeploymentTargets(ctx context.Context, spaceID, projectID s
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	project, ok := m.projects[projectID]
-	if !ok || project.SpaceID != spaceID {
+	if project, ok := m.projects[projectID]; !ok || project.SpaceID != spaceID {
 		return nil, ErrNotFound
 	}
 	result := make([]domain.DeploymentTarget, 0)
@@ -469,9 +511,6 @@ func (m *Memory) ListDeploymentTargets(ctx context.Context, spaceID, projectID s
 		if target.ProjectID == projectID && target.SpaceID == spaceID {
 			result = append(result, cloneDeploymentTarget(target))
 		}
-	}
-	if len(result) == 0 {
-		result = append(result, LegacyDeploymentTarget(project))
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].SortOrder == result[j].SortOrder {
@@ -510,13 +549,10 @@ func (m *Memory) GetDeploymentTarget(ctx context.Context, spaceID, projectID, ta
 		if first != nil {
 			return cloneDeploymentTarget(*first), nil
 		}
-		return LegacyDeploymentTarget(project), nil
+		return domain.DeploymentTarget{}, ErrNotFound
 	}
 	target, ok := m.deploymentTargets[targetID]
 	if !ok || target.ProjectID != projectID || target.SpaceID != spaceID {
-		if targetID == "legacy-"+projectID && !m.hasProjectTargetsLocked(spaceID, projectID) {
-			return LegacyDeploymentTarget(project), nil
-		}
 		return domain.DeploymentTarget{}, ErrNotFound
 	}
 	return cloneDeploymentTarget(target), nil
@@ -565,6 +601,9 @@ func (m *Memory) CreateDeploymentTarget(ctx context.Context, spaceID, projectID 
 		}
 		if strings.EqualFold(existing.Name, target.Name) || strings.EqualFold(existing.Environment, target.Environment) {
 			return domain.DeploymentTarget{}, ErrConflict
+		}
+		if existing.Stage == DeploymentStageDev && target.Stage == DeploymentStageDev {
+			return domain.DeploymentTarget{}, fmt.Errorf("%w: 一个项目只能有一个 DEV 环境", ErrConflict)
 		}
 	}
 	m.deploymentTargets[target.ID] = target
@@ -647,15 +686,6 @@ func (m *Memory) DeleteDeploymentTarget(ctx context.Context, spaceID, projectID,
 func (m *Memory) hasOtherStageLocked(projectID, excludedID, stage string) bool {
 	for id, target := range m.deploymentTargets {
 		if id != excludedID && target.ProjectID == projectID && target.Stage == stage {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *Memory) hasProjectTargetsLocked(spaceID, projectID string) bool {
-	for _, target := range m.deploymentTargets {
-		if target.SpaceID == spaceID && target.ProjectID == projectID {
 			return true
 		}
 	}

@@ -36,9 +36,9 @@ func TestPrepareReleaseReturnsBaselineCheck(t *testing.T) {
 		t.Fatalf("unexpected ready preparation: %#v", readyBody.Preparation)
 	}
 
-	releasePreparation := doRequest(t, server.Router(), http.MethodPost, "/api/projects/reverse-lab/release-preparation", token, `{"source_branch":"release/2026.01","base_branch":"main","selected_sha":"112233445566"}`)
-	if releasePreparation.Code != http.StatusOK {
-		t.Fatalf("diverged preparation: expected 200, got %d: %s", releasePreparation.Code, releasePreparation.Body.String())
+	needsMerge := doRequest(t, server.Router(), http.MethodPost, "/api/projects/reverse-lab/release-preparation", token, `{"source_branch":"release/2026.01","base_branch":"main","selected_sha":"112233445566"}`)
+	if needsMerge.Code != http.StatusOK {
+		t.Fatalf("diverged preparation: expected 200, got %d: %s", needsMerge.Code, needsMerge.Body.String())
 	}
 	var mergeBody struct {
 		Preparation struct {
@@ -48,16 +48,14 @@ func TestPrepareReleaseReturnsBaselineCheck(t *testing.T) {
 			TemporaryBranch string `json:"temporary_branch"`
 		} `json:"preparation"`
 	}
-	if err := json.Unmarshal(releasePreparation.Body.Bytes(), &mergeBody); err != nil {
+	if err := json.Unmarshal(needsMerge.Body.Bytes(), &mergeBody); err != nil {
 		t.Fatal(err)
 	}
-	if mergeBody.Preparation.Status != "ready" || !mergeBody.Preparation.CanPublish || mergeBody.Preparation.RequiresMerge || mergeBody.Preparation.TemporaryBranch != "" {
-		t.Fatalf("unexpected release preparation: %#v", mergeBody.Preparation)
+	if mergeBody.Preparation.Status != "needs_merge" || mergeBody.Preparation.CanPublish || !mergeBody.Preparation.RequiresMerge || mergeBody.Preparation.TemporaryBranch == "" {
+		t.Fatalf("unexpected merge preparation: %#v", mergeBody.Preparation)
 	}
 
-	// The normal check is ready. The merge endpoint remains an explicit,
-	// opt-in compatibility path for opening the online conflict editor.
-	temporaryBranch := "release-prep-test"
+	temporaryBranch := mergeBody.Preparation.TemporaryBranch
 	open := doRequest(t, server.Router(), http.MethodPost, "/api/projects/reverse-lab/release-preparation", token, `{"action":"merge","source_branch":"release/2026.01","base_branch":"main","selected_sha":"112233445566","temporary_branch":"`+temporaryBranch+`"}`)
 	if open.Code != http.StatusOK {
 		t.Fatalf("open merge workspace: expected 200, got %d: %s", open.Code, open.Body.String())
@@ -108,12 +106,12 @@ func TestPrepareMergeRequiresMergeAccess(t *testing.T) {
 	base := git.NewDemoProvider()
 	provider := mergePermissionProvider{Provider: base}
 	server := New(Dependencies{
-		Config:  config.Config{DemoMode: true, JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
-		Store:   store.NewMemoryWithAdminPassword("test-password"),
+		Config:  config.Config{JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
 		Auth:    auth.NewManager("test-secret", 60),
 		Git:     provider,
 		Release: release.NewService(provider),
-		Runtime: runtime.NewService(nil),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
 	})
 	token := loginForTest(t, server.Router())
 
@@ -123,6 +121,38 @@ func TestPrepareMergeRequiresMergeAccess(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"code":"git_write_access_denied"`) {
 		t.Fatalf("unexpected merge denial: %s", response.Body.String())
+	}
+}
+
+func TestPrepareMergeReadyBaselineDoesNotRequireMergeAccess(t *testing.T) {
+	base := git.NewDemoProvider()
+	provider := mergePermissionProvider{Provider: base}
+	server := New(Dependencies{
+		Config:  config.Config{JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
+		Auth:    auth.NewManager("test-secret", 60),
+		Git:     provider,
+		Release: release.NewService(provider),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
+	})
+	token := loginForTest(t, server.Router())
+
+	response := doRequest(t, server.Router(), http.MethodPost, "/api/projects/reverse-lab/release-preparation", token, `{"action":"merge","source_branch":"main","base_branch":"main","selected_sha":"a1b2c3d4e5f6"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("ready merge preparation: expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Preparation struct {
+			Status        string `json:"status"`
+			CanPublish    bool   `json:"can_publish"`
+			RequiresMerge bool   `json:"requires_merge"`
+		} `json:"preparation"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Preparation.Status != "ready" || !body.Preparation.CanPublish || body.Preparation.RequiresMerge {
+		t.Fatalf("unexpected ready merge preparation: %#v", body.Preparation)
 	}
 }
 

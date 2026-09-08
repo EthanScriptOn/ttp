@@ -558,6 +558,17 @@ func mapNotFound(err error, notFound error) error {
 	return err
 }
 
+// GitHub uses 422 for an otherwise valid commit endpoint when the SHA cannot
+// be resolved. Treat it like the 404 returned by GitLab so callers get one
+// provider-neutral not-found contract.
+func mapCommitNotFound(err error) error {
+	var statusErr *ProviderHTTPError
+	if errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusUnprocessableEntity) {
+		return ErrCommitNotFound
+	}
+	return err
+}
+
 func normalizeCommitLimit(limit int) int {
 	if limit <= 0 {
 		return defaultCommitLimit

@@ -33,7 +33,7 @@ func (s *Server) registerRuntimeCluster(ctx context.Context, cluster store.Clust
 	}
 	if !strings.EqualFold(cluster.ConnectionMode, store.ClusterConnectionInCluster) && strings.TrimSpace(cluster.KubeconfigPath) == "" {
 		// An empty path is the supported form for a cluster registered from
-		// process configuration (or for the demo provider).
+		// process configuration.
 		return nil
 	}
 

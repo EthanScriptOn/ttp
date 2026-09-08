@@ -10,6 +10,7 @@ import (
 	"github.com/yuebuy/cicd-platform/backend/internal/auth"
 	"github.com/yuebuy/cicd-platform/backend/internal/config"
 	"github.com/yuebuy/cicd-platform/backend/internal/git"
+	"github.com/yuebuy/cicd-platform/backend/internal/imagebuild"
 	"github.com/yuebuy/cicd-platform/backend/internal/permissions"
 	"github.com/yuebuy/cicd-platform/backend/internal/release"
 	"github.com/yuebuy/cicd-platform/backend/internal/runtime"
@@ -17,25 +18,25 @@ import (
 )
 
 type Dependencies struct {
-	Config  config.Config
-	Store   store.Store
-	Auth    *auth.Manager
-	Git     git.Provider
-	Release *release.Service
-	Runtime *runtime.Service
+	Config        config.Config
+	Store         store.Store
+	Auth          *auth.Manager
+	Git           git.Provider
+	Release       *release.Service
+	Runtime       *runtime.Service
+	ImageBuilder  imagebuild.Builder
+	CredentialKey string
 }
 
 type Server struct {
-	deps   Dependencies
-	router *gin.Engine
+	deps             Dependencies
+	router           *gin.Engine
+	credentialCipher *credentialCipher
 }
 
 func New(deps Dependencies) *Server {
 	if deps.Auth == nil {
 		deps.Auth = auth.NewManager(deps.Config.JWTSecret, deps.Config.JWTMinutes)
-	}
-	if deps.Git == nil {
-		deps.Git = git.NewDemoProvider()
 	}
 	if deps.Release == nil {
 		deps.Release = release.NewService(deps.Git)
@@ -45,7 +46,7 @@ func New(deps Dependencies) *Server {
 	}
 	router := gin.New()
 	router.Use(gin.Recovery(), cors(deps.Config.AllowedOrigin))
-	server := &Server{deps: deps, router: router}
+	server := &Server{deps: deps, router: router, credentialCipher: newCredentialCipher(deps.CredentialKey, deps.Config.JWTSecret)}
 	server.routes()
 	return server
 }
@@ -54,7 +55,7 @@ func (s *Server) Router() http.Handler { return s.router }
 
 func (s *Server) routes() {
 	api := s.router.Group("/api")
-	api.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok", "demo": s.deps.Config.DemoMode}) })
+	api.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	api.POST("/auth/login", s.login)
 
 	protected := api.Group("")
@@ -71,7 +72,6 @@ func (s *Server) routes() {
 	protected.DELETE("/space/members/:userID", requirePermission(s.deps.Store, permissions.MemberManage), s.removeSpaceMember)
 	protected.GET("/space/permissions", requirePermission(s.deps.Store, permissions.MemberRead), s.getSpacePermissions)
 
-	protected.GET("/git/service-account", requirePermission(s.deps.Store, permissions.ProjectRead), s.gitServiceAccount)
 	protected.GET("/clusters", requirePermission(s.deps.Store, permissions.ClusterRead), s.listClusters)
 	protected.GET("/clusters/:clusterID", requirePermission(s.deps.Store, permissions.ClusterRead), s.getCluster)
 	protected.POST("/clusters", requirePermission(s.deps.Store, permissions.ClusterManage), s.createCluster)
@@ -91,6 +91,9 @@ func (s *Server) routes() {
 	protected.GET("/projects/:projectID/git/commits", requirePermission(s.deps.Store, permissions.ReleaseRead), s.listCommits)
 	protected.GET("/projects/:projectID/git/tags", requirePermission(s.deps.Store, permissions.ReleaseRead), s.listTags)
 	protected.GET("/projects/:projectID/git/access", requirePermission(s.deps.Store, permissions.ReleaseRead), s.gitRepositoryAccess)
+	protected.GET("/projects/:projectID/git/credential", requirePermission(s.deps.Store, permissions.ProjectRead), s.getProjectGitCredential)
+	protected.PUT("/projects/:projectID/git/credential", requirePermission(s.deps.Store, permissions.ProjectUpdate), s.saveProjectGitCredential)
+	protected.DELETE("/projects/:projectID/git/credential", requirePermission(s.deps.Store, permissions.ProjectUpdate), s.deleteProjectGitCredential)
 	protected.POST("/projects/:projectID/release-preparation", requirePermission(s.deps.Store, permissions.ReleaseCreate), s.prepareRelease)
 	protected.GET("/projects/:projectID/deployment-config", requirePermission(s.deps.Store, permissions.ProjectRead), s.getDeploymentConfig)
 	protected.PUT("/projects/:projectID/deployment-config", requirePermission(s.deps.Store, permissions.ProjectUpdate), s.saveDeploymentConfig)
@@ -98,22 +101,26 @@ func (s *Server) routes() {
 	protected.POST("/projects/:projectID/deployment-config/convert", requirePermission(s.deps.Store, permissions.ProjectRead), s.convertDeploymentConfig)
 
 	protected.GET("/projects/:projectID/releases", requirePermission(s.deps.Store, permissions.ReleaseRead), s.listReleases)
-	protected.GET("/projects/:projectID/release-batches", requirePermission(s.deps.Store, permissions.ReleaseRead), s.listReleaseBatches)
 	protected.POST("/projects/:projectID/releases", requirePermission(s.deps.Store, permissions.ReleaseCreate), s.createRelease)
 	protected.GET("/projects/:projectID/releases/:releaseID", requirePermission(s.deps.Store, permissions.ReleaseRead), s.getRelease)
+	protected.GET("/projects/:projectID/releases/:releaseID/targets/:targetID/logs", requirePermission(s.deps.Store, permissions.ReleaseRead), s.getReleaseTargetLogs)
 	protected.POST("/projects/:projectID/releases/:releaseID/publish", requirePermission(s.deps.Store, permissions.ReleasePublish), s.publishRelease)
-	protected.POST("/projects/:projectID/releases/:releaseID/targets/:targetID/publish", requirePermission(s.deps.Store, permissions.ReleasePublish), s.publishReleaseTarget)
-	protected.POST("/projects/:projectID/releases/:releaseID/merge-main", requirePermission(s.deps.Store, permissions.ReleasePublish), s.mergeReleaseToMain)
 	protected.POST("/projects/:projectID/releases/:releaseID/targets/:targetID/retry", requirePermission(s.deps.Store, permissions.ReleasePublish), s.retryReleaseTarget)
 	protected.PATCH("/projects/:projectID/releases/:releaseID/progress", requirePermission(s.deps.Store, permissions.ReleasePublish), s.updateReleaseProgress)
 	protected.POST("/projects/:projectID/releases/:releaseID/cancel", requirePermission(s.deps.Store, permissions.ReleasePublish), s.cancelRelease)
 	protected.POST("/projects/:projectID/releases/:releaseID/fail", requirePermission(s.deps.Store, permissions.ReleasePublish), s.failRelease)
 	protected.DELETE("/projects/:projectID/releases/:releaseID/commits/:sha", requirePermission(s.deps.Store, permissions.ReleaseUpdate), s.removeReleaseCommit)
-	protected.POST("/projects/:projectID/release-batches/:batchID/close", requirePermission(s.deps.Store, permissions.ReleasePublish), s.closeReleaseBatch)
+	protected.GET("/projects/:projectID/ab-experiments", requirePermission(s.deps.Store, permissions.ReleaseRead), s.listABExperiments)
+	protected.POST("/projects/:projectID/ab-experiments", requirePermission(s.deps.Store, permissions.ReleaseCreate), s.createABExperiment)
+	protected.GET("/projects/:projectID/ab-experiments/:experimentID", requirePermission(s.deps.Store, permissions.ReleaseRead), s.getABExperiment)
+	protected.PATCH("/projects/:projectID/ab-experiments/:experimentID/traffic", requirePermission(s.deps.Store, permissions.ReleasePublish), s.updateABExperimentTraffic)
+	protected.POST("/projects/:projectID/ab-experiments/:experimentID/stop", requirePermission(s.deps.Store, permissions.ReleasePublish), s.stopABExperiment)
+	protected.POST("/projects/:projectID/ab-experiments/:experimentID/finish", requirePermission(s.deps.Store, permissions.ReleasePublish), s.finishABExperiment)
 
 	protected.GET("/projects/:projectID/pods", requirePermission(s.deps.Store, permissions.RuntimeRead), s.listPods)
 	protected.GET("/projects/:projectID/pods/:podName", requirePermission(s.deps.Store, permissions.RuntimeRead), s.getPod)
 	protected.GET("/projects/:projectID/pods/:podName/logs", requirePermission(s.deps.Store, permissions.RuntimeRead), s.getPodLogs)
+	protected.POST("/projects/:projectID/pods/:podName/exec", requirePermission(s.deps.Store, permissions.RuntimeTerminal), s.execPodCommand)
 	protected.PATCH("/projects/:projectID/pods/:podName/config", requirePermission(s.deps.Store, permissions.RuntimeConfig), s.updatePodConfig)
 	protected.GET("/projects/:projectID/metrics", requirePermission(s.deps.Store, permissions.RuntimeRead), s.projectMetrics)
 	protected.GET("/clusters/:clusterID/metrics", requirePermission(s.deps.Store, permissions.ClusterRead), s.clusterMetrics)

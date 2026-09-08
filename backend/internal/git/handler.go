@@ -13,9 +13,6 @@ import (
 // NewHandler returns a standalone handler. It can be mounted at /git by a
 // main service or served directly in a small development process.
 func NewHandler(provider Provider) http.Handler {
-	if provider == nil {
-		provider = NewDemoProvider()
-	}
 	return &handler{provider: provider}
 }
 
@@ -29,6 +26,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	if h.provider == nil {
+		h.writeProviderError(w, ErrProviderNotConfigured)
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && len(parts) == 1 && parts[0] == "repositories":
 		items, err := h.provider.ListRepositories(ctx)
@@ -82,6 +83,8 @@ func (h *handler) writeProviderError(w http.ResponseWriter, err error) {
 	code := "provider_error"
 	message := "git provider request failed"
 	switch {
+	case errors.Is(err, ErrProviderNotConfigured):
+		status, code, message = http.StatusServiceUnavailable, "provider_not_configured", "git provider is not configured"
 	case errors.Is(err, ErrRepositoryNotFound), errors.Is(err, ErrBranchNotFound), errors.Is(err, ErrCommitNotFound):
 		status, code, message = http.StatusNotFound, "not_found", err.Error()
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):

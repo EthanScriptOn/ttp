@@ -1,232 +1,227 @@
-import { DatePicker, Select } from 'antd'
-import { DataZoomComponent, GridComponent, LegendComponent, ToolboxComponent, TooltipComponent } from 'echarts/components'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CanvasRenderer } from 'echarts/renderers'
-import { LineChart } from 'echarts/charts'
-import * as echarts from 'echarts/core'
-
-echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, ToolboxComponent, CanvasRenderer])
+import uPlot from 'uplot'
+import 'uplot/dist/uPlot.min.css'
 
 function finiteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
-function timeText(value) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '--'
-  return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+function numberText(value, precision = 1) {
+  if (!finiteNumber(value)) return '--'
+  return value.toLocaleString('zh-CN', { maximumFractionDigits: precision, minimumFractionDigits: precision })
 }
 
-export default function MetricChart({ title, description, series = [], lines = [], height = 300, emptyText = '刷新后开始记录' }) {
-  const chartElementRef = useRef(null)
-  const chartInstanceRef = useRef(null)
-  const [selectedKeys, setSelectedKeys] = useState(() => lines.slice(0, 2).map((line) => line.key))
-  const [timeRange, setTimeRange] = useState('1h')
-  const [customRange, setCustomRange] = useState(null)
-  const points = useMemo(() => (Array.isArray(series) ? series.filter((point) => point?.timestamp) : []), [series])
-  const visiblePoints = useMemo(() => {
-    if (timeRange === 'custom') {
-      const start = customRange?.[0]?.valueOf()
-      const end = customRange?.[1]?.valueOf()
-      if (!start || !end) return []
-      return points.filter((point) => {
-        const timestamp = new Date(point.timestamp).getTime()
-        return timestamp >= start && timestamp <= end
-      })
-    }
-    const duration = ({ '15m': 15, '1h': 60, '6h': 360, '24h': 1440 })[timeRange] || 60
-    const start = Date.now() - duration * 60 * 1000
-    return points.filter((point) => new Date(point.timestamp).getTime() >= start)
-  }, [customRange, points, timeRange])
-  const availableLines = useMemo(() => lines.filter((line) => points.some((point) => finiteNumber(point[line.key]))), [lines, points])
-  const selectedLines = useMemo(() => availableLines.filter((line) => selectedKeys.includes(line.key)), [availableLines, selectedKeys])
+function valueText(value, line) {
+  if (!finiteNumber(value)) return '暂无'
+  if (typeof line.format === 'function') return line.format(value)
+  return `${numberText(value, line.precision ?? 1)}${line.unit || ''}`
+}
+
+function timeText(value, detailed = false) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '--'
+  return date.toLocaleString('zh-CN', detailed
+    ? { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }
+    : { hour: '2-digit', minute: '2-digit' })
+}
+
+function niceMaximum(value) {
+  if (!finiteNumber(value) || value <= 0) return 1
+  const padded = value * 1.12
+  const magnitude = 10 ** Math.floor(Math.log10(padded))
+  const normalized = padded / magnitude
+  const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10
+  return step * magnitude
+}
+
+function validTimestamp(value) {
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function zoomAroundPointer(plot, event) {
+  const scale = plot.scales.x
+  const domain = plot.__metricChartDomain
+  if (!scale || !domain || !finiteNumber(scale.min) || !finiteNumber(scale.max) || scale.max <= scale.min) return
+
+  const rect = plot.over.getBoundingClientRect()
+  const pointer = Math.max(0, Math.min(plot.width, event.clientX - rect.left))
+  const value = plot.posToVal(pointer, 'x')
+  const factor = event.deltaY < 0 ? 0.8 : 1.25
+  const min = value - (value - scale.min) * factor
+  const max = value + (scale.max - value) * factor
+  plot.setScale('x', {
+    min: Math.max(domain.min, min),
+    max: Math.min(domain.max, max),
+  })
+}
+
+export default function MetricChart({ title, description, series = [], lines = [], min = 0, max, height = 224, emptyText = '暂无历史数据' }) {
+  const chartRef = useRef(null)
+  const chartInstance = useRef(null)
+  const [hiddenKeys, setHiddenKeys] = useState(() => new Set())
+  const [hoverIndex, setHoverIndex] = useState(null)
+
+  const points = useMemo(() => (Array.isArray(series) ? series
+    .map((point) => ({ point, timestamp: validTimestamp(point?.timestamp) }))
+    .filter((item) => item.point && item.timestamp !== null) : []), [series])
+
+  const availableLines = useMemo(() => lines.filter((line) => points.some(({ point }) => finiteNumber(point[line.key]))), [lines, points])
+  const available = availableLines.length > 0
+  const chartHeight = Math.max(260, height + 42)
 
   useEffect(() => {
-    setSelectedKeys((current) => {
-      const valid = current.filter((key) => lines.some((line) => line.key === key))
-      if (valid.length) return valid
-      return lines.slice(0, 2).map((line) => line.key)
+    setHiddenKeys((current) => {
+      const allowed = new Set(lines.map((line) => line.key))
+      const next = new Set([...current].filter((key) => allowed.has(key)))
+      return next.size === current.size ? current : next
     })
   }, [lines])
 
+  const chartModel = useMemo(() => {
+    if (!available) return null
+
+    const timestamps = points.map(({ timestamp }) => timestamp / 1000)
+    const values = []
+    points.forEach(({ point }) => availableLines.forEach((line) => {
+      if (finiteNumber(point[line.key])) values.push(point[line.key])
+    }))
+    const low = finiteNumber(min) ? min : 0
+    const high = finiteNumber(max) ? max : niceMaximum(Math.max(...values, low + 1))
+    const xMin = timestamps[0]
+    const xMax = timestamps[timestamps.length - 1] > xMin ? timestamps[timestamps.length - 1] : xMin + 1
+    const yValues = availableLines.map((line) => points.map(({ point }) => finiteNumber(point[line.key]) ? point[line.key] : null))
+
+    return {
+      data: [timestamps, ...yValues],
+      domain: { min: xMin, max: xMax },
+      options: {
+        width: 0,
+        height: chartHeight,
+        padding: [8, 12, 0, 0],
+        scales: {
+          x: { time: true, min: xMin, max: xMax },
+          y: { auto: false, min: low, max: high },
+        },
+        axes: [
+          {
+            stroke: '#9aa7ba',
+            grid: { show: false },
+            ticks: { show: false },
+            size: 30,
+            gap: 8,
+            font: '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+            values: (plot, values) => values.map((value) => timeText(value * 1000)),
+          },
+          {
+            stroke: '#9aa7ba',
+            grid: { stroke: '#edf0f5', width: 1 },
+            ticks: { show: false },
+            size: 42,
+            gap: 6,
+            font: '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+            values: (plot, values) => values.map((value) => numberText(value, value >= 10 ? 0 : 1)),
+          },
+        ],
+        series: [
+          {},
+          ...availableLines.map((line, index) => ({
+            class: '',
+            label: line.label,
+            show: !hiddenKeys.has(line.key),
+            stroke: line.color,
+            width: index === 0 ? 2.2 : 1.7,
+            cap: 'round',
+            points: { show: false, size: 7, width: 2, stroke: line.color, fill: '#fff' },
+            value: (plot, value) => valueText(value, line),
+          })),
+        ],
+        legend: { show: false },
+        cursor: {
+          x: true,
+          y: false,
+          drag: { x: true, y: false, setScale: true },
+          points: { show: false },
+        },
+        hooks: {
+          setCursor: [(plot) => setHoverIndex(plot.cursor.idx ?? null)],
+        },
+      },
+    }
+  }, [available, availableLines, chartHeight, hiddenKeys, max, min, points])
+
   useEffect(() => {
-    if (!chartElementRef.current) return undefined
-    const chart = echarts.init(chartElementRef.current, null, { renderer: 'canvas' })
-    chartInstanceRef.current = chart
-    const observer = new ResizeObserver(() => {
-      if (!chart.isDisposed()) chart.resize()
-    })
-    observer.observe(chartElementRef.current)
+    if (!chartModel || !chartRef.current) return undefined
+
+    const host = chartRef.current
+    const width = Math.max(240, host.clientWidth)
+    const plot = new uPlot({ ...chartModel.options, width }, chartModel.data, host)
+    plot.__metricChartDomain = chartModel.domain
+    chartInstance.current = plot
+    setHoverIndex(null)
+
+    const resize = () => {
+      if (!chartRef.current || !chartInstance.current) return
+      chartInstance.current.setSize({ width: Math.max(240, chartRef.current.clientWidth), height: chartHeight })
+    }
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null
+    observer?.observe(host)
+    if (!observer) window.addEventListener('resize', resize)
+
     return () => {
-      observer.disconnect()
-      chart.dispose()
-      chartInstanceRef.current = null
+      observer?.disconnect()
+      window.removeEventListener('resize', resize)
+      plot.destroy()
+      chartInstance.current = null
     }
-  }, [])
+  }, [chartHeight, chartModel])
 
-  useEffect(() => {
-    const chart = chartInstanceRef.current
-    if (!chart || chart.isDisposed()) return
-    const selectedNames = selectedLines.map((line) => line.label)
-    const option = {
-      animation: false,
-      color: selectedLines.map((line) => line.color),
-      grid: { top: 58, right: 20, bottom: 62, left: 48, containLabel: false },
-      legend: {
-        top: 8,
-        left: 12,
-        right: 118,
-        type: 'scroll',
-        itemWidth: 10,
-        itemHeight: 6,
-        itemGap: 13,
-        textStyle: { color: '#657278', fontSize: 11 },
-        data: availableLines.map((line) => line.label),
-        selected: Object.fromEntries(availableLines.map((line) => [line.label, selectedNames.includes(line.label)])),
-        selectedMode: 'multiple',
-      },
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'cross', lineStyle: { color: '#9aaba4', type: 'dashed' } },
-        backgroundColor: 'rgba(255,255,255,.98)',
-        borderColor: '#d8e7df',
-        borderWidth: 1,
-        textStyle: { color: '#1f2a2e', fontSize: 11 },
-        formatter(params) {
-          if (!params?.length) return ''
-          const timestamp = params[0].value?.[0]
-          const rows = params.map((item) => {
-            const line = lines.find((candidate) => candidate.label === item.seriesName)
-            const value = item.value?.[1]
-            const formatted = finiteNumber(value)
-              ? `${value.toLocaleString('zh-CN', { maximumFractionDigits: line?.precision ?? 0 })}${line?.unit || ''}`
-              : '--'
-            return `<div style="display:flex;align-items:center;gap:6px;min-width:150px"><i style="width:7px;height:7px;border-radius:50%;background:${line?.color || '#8a9993'}"></i><span>${item.seriesName}</span><strong style="margin-left:auto">${formatted}</strong></div>`
-          }).join('')
-          return `<div style="margin-bottom:5px;color:#657278">${timeText(timestamp)}</div>${rows}`
-        },
-      },
-      toolbox: {
-        right: 9,
-        top: 3,
-        itemSize: 14,
-        iconStyle: { borderColor: '#7c9188' },
-        emphasis: { iconStyle: { borderColor: '#167c72' } },
-        feature: {
-          dataZoom: { yAxisIndex: 'none', title: { zoom: '框选缩放', back: '还原缩放' } },
-          restore: { title: '还原' },
-          saveAsImage: { title: '导出图片', pixelRatio: 2 },
-        },
-      },
-      xAxis: {
-        type: 'time',
-        boundaryGap: false,
-        axisLine: { lineStyle: { color: '#dfe8e4' } },
-        axisTick: { show: false },
-        axisLabel: { color: '#9aa7a1', fontSize: 10, hideOverlap: true },
-        splitLine: { show: false },
-      },
-      yAxis: {
-        type: 'value',
-        min: 0,
-        minInterval: 1,
-        splitNumber: 4,
-        axisLine: { show: false },
-        axisTick: { show: false },
-        axisLabel: { color: '#9aa7a1', fontSize: 10 },
-        splitLine: { lineStyle: { color: '#edf1ef' } },
-      },
-      dataZoom: [
-        { type: 'inside', xAxisIndex: 0, filterMode: 'none', zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: true },
-        {
-          type: 'slider',
-          xAxisIndex: 0,
-          bottom: 15,
-          height: 15,
-          borderColor: '#e3ece7',
-          backgroundColor: '#f5f8f6',
-          fillerColor: 'rgba(47,143,104,.18)',
-          handleStyle: { color: '#5db08a', borderColor: '#5db08a' },
-          moveHandleStyle: { color: '#9bd5b9' },
-          textStyle: { color: '#9aa7a1', fontSize: 9 },
-          dataBackground: { lineStyle: { color: '#b9daca' }, areaStyle: { color: '#e8f4ee' } },
-        },
-      ],
-      series: availableLines.map((line) => ({
-        name: line.label,
-        type: 'line',
-        smooth: true,
-        showSymbol: points.length < 20,
-        symbol: 'circle',
-        symbolSize: 6,
-        connectNulls: false,
-        emphasis: { focus: 'series' },
-        lineStyle: { width: 2, color: line.color },
-        itemStyle: { color: line.color, borderColor: '#fff', borderWidth: 1 },
-        data: visiblePoints.map((point) => {
-          const time = new Date(point.timestamp).getTime()
-          return [time, finiteNumber(point[line.key]) ? point[line.key] : null]
-        }),
-      })),
-    }
-    chart.setOption(option, true)
-  }, [availableLines, description, height, lines, selectedLines, visiblePoints])
+  const activePoint = hoverIndex === null ? null : points[hoverIndex]
 
-  const handleLegendChange = (event) => {
-    const line = lines.find((candidate) => candidate.label === event.name)
-    if (!line) return
-    setSelectedKeys((current) => event.selected[event.name]
-      ? [...new Set([...current, line.key])]
-      : current.filter((key) => key !== line.key))
+  function toggleLine(key) {
+    setHiddenKeys((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else if (next.size < availableLines.length - 1) next.add(key)
+      return next
+    })
   }
 
-  useEffect(() => {
-    const chart = chartInstanceRef.current
-    if (!chart || chart.isDisposed()) return undefined
-    chart.on('legendselectchanged', handleLegendChange)
-    return () => {
-      if (!chart.isDisposed()) chart.off('legendselectchanged', handleLegendChange)
-    }
-  })
+  function resetZoom() {
+    const plot = chartInstance.current
+    const domain = chartModel?.domain
+    if (plot && domain) plot.setScale('x', domain)
+  }
+
+  function handleWheel(event) {
+    if (!chartInstance.current || !chartModel?.domain || points.length < 2) return
+    event.preventDefault()
+    zoomAroundPointer(chartInstance.current, event.nativeEvent)
+  }
 
   return <section className="metric-chart">
     <div className="metric-chart-header">
       <div className="metric-chart-title"><strong>{title}</strong>{description && <span>{description}</span>}</div>
-      <div className="metric-chart-filters">
-        <Select
-          className="metric-chart-range-select"
-          size="small"
-          value={timeRange}
-          options={[{ value: '15m', label: '近15分钟' }, { value: '1h', label: '近1小时' }, { value: '6h', label: '近6小时' }, { value: '24h', label: '近24小时' }, { value: 'custom', label: '自定义时间' }]}
-          onChange={(value) => { setTimeRange(value); if (value !== 'custom') setCustomRange(null) }}
-          aria-label="时间范围"
-        />
-        {timeRange === 'custom' && <DatePicker.RangePicker
-          className="metric-chart-custom-range"
-          size="small"
-          showTime={{ format: 'HH:mm' }}
-          format="MM-DD HH:mm"
-          value={customRange}
-          onChange={setCustomRange}
-          placeholder={['开始时间', '结束时间']}
-          aria-label="自定义时间范围"
-        />}
-        <Select
-          className="metric-chart-select"
-          mode="multiple"
-          size="small"
-          value={selectedKeys}
-          options={lines.map((line) => ({ value: line.key, label: line.label }))}
-          onChange={setSelectedKeys}
-          maxTagCount={2}
-          placeholder="选择指标"
-          aria-label="选择指标"
-        />
-      </div>
+      {available && <button type="button" className="metric-chart-reset" onClick={resetZoom}>重置缩放</button>}
     </div>
-    <div className="metric-chart-stage">
-      <div ref={chartElementRef} className="metric-chart-canvas" style={{ height }} role="img" aria-label={`${title}折线图`} />
-      {(!visiblePoints.length || !availableLines.length || !selectedLines.length) && <div className="metric-chart-empty">{!selectedLines.length && availableLines.length ? '至少选择一个指标' : timeRange === 'custom' && !customRange ? '请选择起止时间' : emptyText}</div>}
-    </div>
+    {!available
+      ? <div className="metric-chart-empty">{emptyText}</div>
+      : <>
+        <div className="metric-chart-legend" aria-label={`${title}指标`}>
+          {availableLines.map((line) => {
+            const value = activePoint ? activePoint.point[line.key] : null
+            const hidden = hiddenKeys.has(line.key)
+            return <button type="button" className={`metric-chart-legend-item${hidden ? ' is-hidden' : ''}`} key={line.key} onClick={() => toggleLine(line.key)} aria-pressed={!hidden}>
+              <span className="metric-chart-legend-dot" style={{ backgroundColor: line.color }} />
+              <span>{line.label}</span>
+              {activePoint && <strong>{valueText(value, line)}</strong>}
+            </button>
+          })}
+          {activePoint && <time dateTime={new Date(activePoint.timestamp).toISOString()}>{timeText(activePoint.timestamp, true)}</time>}
+        </div>
+        <div className="metric-chart-canvas" style={{ height: `${chartHeight}px` }} onWheel={handleWheel} onDoubleClick={resetZoom}>
+          <div ref={chartRef} role="img" aria-label={`${title}折线图`} />
+        </div>
+      </>}
   </section>
 }

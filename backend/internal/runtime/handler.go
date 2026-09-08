@@ -60,6 +60,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[0] == "clusters" && parts[2] == "pods" && parts[5] == "exec":
+		var request PodExecRequest
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		request.PodRef = PodRef{ClusterID: parts[1], Namespace: parts[3], Name: parts[4]}
+		result, err := h.service.ExecPodCommand(ctx, request)
+		if err != nil {
+			h.writeProviderError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 	case (r.Method == http.MethodPatch || r.Method == http.MethodPut) && len(parts) == 6 && parts[0] == "clusters" && parts[2] == "pods" && parts[5] == "config":
 		var update PodConfigUpdate
 		if !decodeJSON(w, r, &update) {

@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -19,10 +18,6 @@ func TestRegisterKubeconfigWithContextSelectsRequestedContext(t *testing.T) {
 		name := podName
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			selected <- name
-			if r.URL.Path == "/apis/metrics.k8s.io/v1beta1/namespaces/lab/pods" {
-				writeKubernetesJSON(t, w, map[string]any{"apiVersion": "metrics.k8s.io/v1beta1", "kind": "PodMetricsList", "items": []any{}})
-				return
-			}
 			if r.URL.Path != "/api/v1/namespaces/lab/pods" {
 				t.Errorf("unexpected Kubernetes path: %s", r.URL.Path)
 			}
@@ -82,10 +77,6 @@ users:
 
 func TestRegisterKubeconfigKeepsCurrentContextCompatibility(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/apis/metrics.k8s.io/") {
-			writeKubernetesJSON(t, w, map[string]any{"apiVersion": "metrics.k8s.io/v1beta1", "kind": "PodMetricsList", "items": []any{}})
-			return
-		}
 		writeKubernetesJSON(t, w, map[string]any{"apiVersion": "v1", "kind": "PodList", "items": []any{}})
 	}))
 	defer server.Close()

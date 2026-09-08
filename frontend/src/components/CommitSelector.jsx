@@ -43,14 +43,11 @@ function commitTimestamp(value) {
 export default function CommitSelector({
   commits = [],
   tags = [],
-  branch = '',
-  branches = [],
   selected = [],
   onChoose,
   onChooseMany,
   loading = false,
   branchLoading = false,
-  onBranchChange,
   readOnly = false,
 }) {
   const [keyword, setKeyword] = useState('')
@@ -71,14 +68,6 @@ export default function CommitSelector({
     .sort((left, right) => left.localeCompare(right, 'zh-CN'))
     .map((value) => ({ value, label: value })), [decoratedCommits])
 
-  const branchOptions = useMemo(() => {
-    const values = branches.length ? branches : (branch ? [{ name: branch }] : [])
-    return values.map((item) => {
-      const value = typeof item === 'string' ? item : item?.name || item?.branch || item?.ref
-      return value ? { value, label: value } : null
-    }).filter(Boolean)
-  }, [branch, branches])
-
   const filteredCommits = useMemo(() => {
     const query = lower(keyword)
     const selectedAuthor = lower(author)
@@ -87,7 +76,7 @@ export default function CommitSelector({
     const end = dateRange?.[1]?.endOf?.('day')?.valueOf?.() ?? null
 
     return decoratedCommits.filter((commit) => {
-      const searchable = [commit.sha, commit.short_sha, commit.message].map(lower).join(' ')
+      const searchable = [commit.sha, commit.short_sha, commit.message, commit.author, ...commit.tags].map(lower).join(' ')
       if (query && !searchable.includes(query)) return false
       if (selectedAuthor && lower(commit.author) !== selectedAuthor) return false
       if (selectedTag && !commit.tags.some((item) => lower(item) === selectedTag)) return false
@@ -160,21 +149,11 @@ export default function CommitSelector({
     <div className="commit-selector">
       <div className="commit-filter-bar">
         <div className="commit-filter-controls">
-          <Select
-            showSearch
-            value={branch || undefined}
-            loading={branchLoading}
-            options={branchOptions}
-            placeholder="选择分支"
-            aria-label="选择发布分支"
-            onChange={onBranchChange}
-            optionFilterProp="label"
-          />
           <Input
             allowClear
             value={keyword}
             prefix={<SearchOutlined />}
-            placeholder="搜索 SHA 或描述"
+            placeholder="搜索 SHA、描述、提交人或 Tag"
             onChange={(event) => setKeyword(event.target.value)}
           />
           <Select

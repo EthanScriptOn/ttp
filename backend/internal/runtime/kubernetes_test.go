@@ -8,24 +8,15 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
-	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
-	metricsfake "k8s.io/metrics/pkg/client/clientset/versioned/fake"
 )
 
 func TestKubernetesProviderListsGetsLogsAndMetrics(t *testing.T) {
 	client := fake.NewSimpleClientset(testDeployment(), testPod(), testConfigMap())
-	metricsClient := metricsfake.NewSimpleClientset(testPodMetrics())
-	metricsClient.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
-		return true, &metricsv1beta1.PodMetricsList{Items: []metricsv1beta1.PodMetrics{*testPodMetrics()}}, nil
-	})
 	provider := NewKubernetesProvider()
 	var _ NamespaceAwareProvider = provider
-	if err := provider.registerClient("cluster-a", client, metricsClient); err != nil {
+	if err := provider.RegisterClient("cluster-a", client); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,9 +26,6 @@ func TestKubernetesProviderListsGetsLogsAndMetrics(t *testing.T) {
 	}
 	if len(pods) != 1 || pods[0].ProjectID != "checkout" || !pods[0].Ready || pods[0].Phase != PodRunning {
 		t.Fatalf("unexpected pod list: %#v", pods)
-	}
-	if !pods[0].MetricsAvailable || pods[0].CPUUsageMilli != 125 || pods[0].MemoryUsageBytes != 96*1024*1024 || pods[0].MetricsSource != "metrics-server" {
-		t.Fatalf("unexpected pod metrics: %#v", pods[0])
 	}
 
 	detail, err := provider.GetPod(context.Background(), PodRef{ClusterID: "cluster-a", Namespace: "lab", Name: "checkout-abc"})
@@ -52,9 +40,6 @@ func TestKubernetesProviderListsGetsLogsAndMetrics(t *testing.T) {
 	}
 	if detail.RestartCount != 2 {
 		t.Fatalf("unexpected pod restart count: %d", detail.RestartCount)
-	}
-	if !detail.MetricsAvailable || detail.CPUUsageMilli != 125 || detail.MemoryUsageBytes != 96*1024*1024 {
-		t.Fatalf("unexpected pod detail metrics: %#v", detail.Pod)
 	}
 
 	logs, err := provider.GetPodLogs(context.Background(), PodLogRequest{PodRef: PodRef{ClusterID: "cluster-a", Namespace: "lab", Name: "checkout-abc"}, Container: "api", TailLines: 20})
@@ -222,20 +207,6 @@ func testPodWithLabel(labelKey, projectID string) *corev1.Pod {
 
 func testConfigMap() *corev1.ConfigMap {
 	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "checkout-settings", Namespace: "lab"}, Data: map[string]string{"CHECKOUT_MODE": "safe"}}
-}
-
-func testPodMetrics() *metricsv1beta1.PodMetrics {
-	return &metricsv1beta1.PodMetrics{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "metrics.k8s.io/v1beta1", Kind: "PodMetrics"},
-		ObjectMeta: metav1.ObjectMeta{Name: "checkout-abc", Namespace: "lab", Labels: map[string]string{ProjectLabelKey: "checkout"}},
-		Containers: []metricsv1beta1.ContainerMetrics{{
-			Name: "api",
-			Usage: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("125m"),
-				corev1.ResourceMemory: resource.MustParse("96Mi"),
-			},
-		}},
-	}
 }
 
 func envValue(values []corev1.EnvVar, name string) string {

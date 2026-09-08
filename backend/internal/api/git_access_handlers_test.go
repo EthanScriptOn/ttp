@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -15,22 +16,28 @@ import (
 	"github.com/yuebuy/cicd-platform/backend/internal/store"
 )
 
-func TestGitAccessEndpointsExposeSafeServiceAccount(t *testing.T) {
+func TestGitAccessEndpointsExposeProjectCredentialMetadata(t *testing.T) {
 	server := testServer()
 	token := loginForTest(t, server.Router())
 
-	accountResponse := doRequest(t, server.Router(), http.MethodGet, "/api/git/service-account", token, "")
-	if accountResponse.Code != http.StatusOK {
-		t.Fatalf("service account: expected 200, got %d: %s", accountResponse.Code, accountResponse.Body.String())
+	credentialResponse := doRequest(t, server.Router(), http.MethodGet, "/api/projects/reverse-lab/git/credential", token, "")
+	if credentialResponse.Code != http.StatusOK {
+		t.Fatalf("project credential: expected 200, got %d: %s", credentialResponse.Code, credentialResponse.Body.String())
 	}
-	var accountBody struct {
-		Account git.ServiceAccount `json:"account"`
+	var credentialBody struct {
+		Credential struct {
+			Configured bool   `json:"configured"`
+			Username   string `json:"username"`
+		} `json:"credential"`
 	}
-	if err := json.Unmarshal(accountResponse.Body.Bytes(), &accountBody); err != nil {
+	if err := json.Unmarshal(credentialResponse.Body.Bytes(), &credentialBody); err != nil {
 		t.Fatal(err)
 	}
-	if accountBody.Account.Username != "cicd-bot" || accountBody.Account.Provider != "demo" || !accountBody.Account.Configured {
-		t.Fatalf("unexpected service account: %#v", accountBody.Account)
+	if credentialBody.Credential.Configured || credentialBody.Credential.Username != "" {
+		t.Fatalf("unexpected project credential: %#v", credentialBody.Credential)
+	}
+	if strings.Contains(credentialResponse.Body.String(), "token") || strings.Contains(credentialResponse.Body.String(), "ciphertext") {
+		t.Fatalf("project credential response exposed a secret field: %s", credentialResponse.Body.String())
 	}
 
 	accessResponse := doRequest(t, server.Router(), http.MethodGet, "/api/projects/reverse-lab/git/access", token, "")
@@ -48,16 +55,152 @@ func TestGitAccessEndpointsExposeSafeServiceAccount(t *testing.T) {
 	}
 }
 
+func TestProjectGitCredentialIsVerifiedStoredEncryptedAndBoundToProject(t *testing.T) {
+	provider := &credentialRegistryProvider{Provider: git.NewDemoProvider()}
+	server := New(Dependencies{
+		Config:  config.Config{JWTSecret: "test-secret", GitCredentialKey: "credential-test-key", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
+		Auth:    auth.NewManager("test-secret", 60),
+		Git:     provider,
+		Release: release.NewService(provider),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
+	})
+	token := loginForTest(t, server.Router())
+	const secret = "project-token-secret"
+	saved := doRequest(t, server.Router(), http.MethodPut, "/api/projects/reverse-lab/git/credential", token, `{"provider":"github","username":"release-bot","token":"`+secret+`"}`)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save project credential: expected 200, got %d: %s", saved.Code, saved.Body.String())
+	}
+	if strings.Contains(saved.Body.String(), secret) || strings.Contains(saved.Body.String(), "token_ciphertext") {
+		t.Fatalf("project credential response exposed secret material: %s", saved.Body.String())
+	}
+	stored, err := server.deps.Store.GetProjectGitCredential(context.Background(), "space-lab", "reverse-lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.TokenCiphertext == "" || stored.TokenCiphertext == secret {
+		t.Fatalf("credential was not encrypted: %#v", stored)
+	}
+	if provider.configuredUsername != "release-bot" || provider.configuredToken != secret {
+		t.Fatalf("credential was not bound to the project provider: username=%q token configured=%v", provider.configuredUsername, provider.configuredToken != "")
+	}
+
+	branches := doRequest(t, server.Router(), http.MethodGet, "/api/projects/reverse-lab/git/branches", token, "")
+	if branches.Code != http.StatusOK || provider.configureCalls < 2 {
+		t.Fatalf("project Git request did not reload its credential: status=%d configureCalls=%d", branches.Code, provider.configureCalls)
+	}
+
+	removed := doRequest(t, server.Router(), http.MethodDelete, "/api/projects/reverse-lab/git/credential", token, "")
+	if removed.Code != http.StatusOK || provider.clearCalls != 1 {
+		t.Fatalf("remove project credential: status=%d clearCalls=%d body=%s", removed.Code, provider.clearCalls, removed.Body.String())
+	}
+	if strings.Contains(removed.Body.String(), secret) || strings.Contains(removed.Body.String(), "token_ciphertext") {
+		t.Fatalf("remove response exposed secret material: %s", removed.Body.String())
+	}
+}
+
+func TestChangingProjectRepositoryRemovesCredentialAndOldBinding(t *testing.T) {
+	provider := &trackingRepositoryProvider{Provider: git.NewDemoProvider()}
+	server := New(Dependencies{
+		Config:  config.Config{JWTSecret: "test-secret", GitCredentialKey: "credential-test-key", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
+		Auth:    auth.NewManager("test-secret", 60),
+		Git:     provider,
+		Release: release.NewService(provider),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
+	})
+	token := loginForTest(t, server.Router())
+	newURL := "https://github.com/acme/another-repository"
+	secret := "old-project-token"
+
+	saved := doRequest(t, server.Router(), http.MethodPut, "/api/projects/reverse-lab/git/credential", token, `{"provider":"github","username":"release-bot","token":"`+secret+`"}`)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save project credential: expected 200, got %d: %s", saved.Code, saved.Body.String())
+	}
+	oldID := "demo-repo"
+	newID := repositoryID("reverse-lab", newURL)
+
+	updated := doRequest(t, server.Router(), http.MethodPatch, "/api/projects/reverse-lab", token, `{"repository_url":"`+newURL+`"}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("change repository: expected 200, got %d: %s", updated.Code, updated.Body.String())
+	}
+	if _, err := server.deps.Store.GetProjectGitCredential(context.Background(), "space-lab", "reverse-lab"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("old project credential survived repository change: %v", err)
+	}
+	if !provider.unregistered[oldID] || provider.registeredURL[newID] != newURL {
+		t.Fatalf("repository bindings were not rotated: registered=%#v unregistered=%#v", provider.registeredURL, provider.unregistered)
+	}
+	if provider.configuredToken[newID] != "" || provider.configuredToken[oldID] != "" {
+		t.Fatalf("repository change retained a project token in the provider: %#v", provider.configuredToken)
+	}
+
+	access := doRequest(t, server.Router(), http.MethodGet, "/api/projects/reverse-lab/git/access", token, "")
+	if access.Code != http.StatusOK {
+		t.Fatalf("access check after repository change: expected 200, got %d: %s", access.Code, access.Body.String())
+	}
+	if provider.configuredToken[newID] != "" {
+		t.Fatalf("new repository inherited old project token during access check")
+	}
+}
+
+func TestProjectsUsingSameRepositoryKeepIndependentCredentials(t *testing.T) {
+	provider := &trackingRepositoryProvider{Provider: git.NewDemoProvider()}
+	server := New(Dependencies{
+		Config:  config.Config{JWTSecret: "test-secret", GitCredentialKey: "credential-test-key", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
+		Auth:    auth.NewManager("test-secret", 60),
+		Git:     provider,
+		Release: release.NewService(provider),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
+	})
+	token := loginForTest(t, server.Router())
+	repositoryURL := "https://github.com/acme/shared-repository"
+	projects := make([]struct {
+		ID           string `json:"id"`
+		RepositoryID string `json:"repository_id"`
+	}, 2)
+	for index, name := range []string{"Shared Repository One", "Shared Repository Two"} {
+		created := doRequest(t, server.Router(), http.MethodPost, "/api/projects", token, `{"name":"`+name+`","repository_url":"`+repositoryURL+`","cluster_id":"demo-cluster"}`)
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create project %d: expected 201, got %d: %s", index, created.Code, created.Body.String())
+		}
+		if err := json.Unmarshal(created.Body.Bytes(), &projects[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if projects[0].RepositoryID == projects[1].RepositoryID {
+		t.Fatalf("projects using one repository received the same provider binding: %#v", projects)
+	}
+
+	credentials := []struct {
+		username string
+		token    string
+	}{
+		{username: "project-bot-1", token: "project-token-1"},
+		{username: "project-bot-2", token: "project-token-2"},
+	}
+	for index, item := range projects {
+		body := `{"provider":"github","username":"` + credentials[index].username + `","token":"` + credentials[index].token + `"}`
+		saved := doRequest(t, server.Router(), http.MethodPut, "/api/projects/"+item.ID+"/git/credential", token, body)
+		if saved.Code != http.StatusOK {
+			t.Fatalf("save project %d credential: expected 200, got %d: %s", index, saved.Code, saved.Body.String())
+		}
+	}
+	if provider.configuredToken[projects[0].RepositoryID] != "project-token-1" || provider.configuredToken[projects[1].RepositoryID] != "project-token-2" {
+		t.Fatalf("project credentials were not isolated: %#v", provider.configuredToken)
+	}
+}
+
 func TestPublishIsBlockedWhenProviderCannotVerifyServiceAccount(t *testing.T) {
 	base := git.NewDemoProvider()
 	provider := readOnlyProvider{Provider: base}
 	server := New(Dependencies{
-		Config:  config.Config{DemoMode: true, JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
-		Store:   store.NewMemoryWithAdminPassword("test-password"),
+		Config:  config.Config{JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
 		Auth:    auth.NewManager("test-secret", 60),
 		Git:     provider,
 		Release: release.NewService(provider),
-		Runtime: runtime.NewService(nil),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
 	})
 	token := loginForTest(t, server.Router())
 
@@ -86,12 +229,12 @@ func TestGitAccessEndpointReportsTimeoutSeparatelyFromPermissionDenial(t *testin
 	base := git.NewDemoProvider()
 	provider := timeoutAccessProvider{Provider: base}
 	server := New(Dependencies{
-		Config:  config.Config{DemoMode: true, JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
-		Store:   store.NewMemoryWithAdminPassword("test-password"),
+		Config:  config.Config{JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
 		Auth:    auth.NewManager("test-secret", 60),
 		Git:     provider,
 		Release: release.NewService(provider),
-		Runtime: runtime.NewService(nil),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
 	})
 	token := loginForTest(t, server.Router())
 	response := doRequest(t, server.Router(), http.MethodGet, "/api/projects/reverse-lab/git/access", token, "")
@@ -118,4 +261,103 @@ type timeoutAccessProvider struct {
 
 func (timeoutAccessProvider) CheckRepositoryAccess(context.Context, string) (git.RepositoryAccess, error) {
 	return git.RepositoryAccess{}, context.DeadlineExceeded
+}
+
+type credentialRegistryProvider struct {
+	git.Provider
+	configuredUsername string
+	configuredToken    string
+	configureCalls     int
+	clearCalls         int
+}
+
+type trackingRepositoryProvider struct {
+	git.Provider
+	registeredURL   map[string]string
+	configuredToken map[string]string
+	unregistered    map[string]bool
+}
+
+func (p *trackingRepositoryProvider) RegisterRepository(repositoryID, repositoryURL string) error {
+	if p.registeredURL == nil {
+		p.registeredURL = make(map[string]string)
+	}
+	p.registeredURL[repositoryID] = repositoryURL
+	return nil
+}
+
+func (p *trackingRepositoryProvider) UnregisterRepository(repositoryID, _ string) error {
+	if p.unregistered == nil {
+		p.unregistered = make(map[string]bool)
+	}
+	p.unregistered[repositoryID] = true
+	delete(p.registeredURL, repositoryID)
+	delete(p.configuredToken, repositoryID)
+	return nil
+}
+
+func (p *trackingRepositoryProvider) CheckRepositoryCredential(_ context.Context, repositoryID, repositoryURL string, credential git.RepositoryCredential) (git.RepositoryAccess, error) {
+	return git.RepositoryAccess{
+		RepositoryID: repositoryID, RepositoryURL: repositoryURL, Provider: credential.Provider,
+		Supported: true, Authenticated: true, AuthenticatedUsername: credential.Username,
+		RepositoryFound: true, AccountMatches: true, CanRead: true, CanWrite: true,
+		CanCreateTemporaryBranch: true, Usable: true, RequiredPermission: "Write",
+		Message: "授权通过",
+	}, nil
+}
+
+func (p *trackingRepositoryProvider) ConfigureRepositoryCredential(repositoryID, repositoryURL string, credential git.RepositoryCredential) error {
+	if p.configuredToken == nil {
+		p.configuredToken = make(map[string]string)
+	}
+	if p.registeredURL == nil {
+		p.registeredURL = make(map[string]string)
+	}
+	p.registeredURL[repositoryID] = repositoryURL
+	p.configuredToken[repositoryID] = credential.Token
+	return nil
+}
+
+func (p *trackingRepositoryProvider) ClearRepositoryCredential(repositoryID, _ string) error {
+	delete(p.configuredToken, repositoryID)
+	return nil
+}
+
+func (p *trackingRepositoryProvider) CheckRepositoryAccess(_ context.Context, repositoryID string) (git.RepositoryAccess, error) {
+	return git.RepositoryAccess{
+		RepositoryID: repositoryID, Supported: true, Message: "尚未配置项目仓库机器人",
+	}, nil
+}
+
+func (p *credentialRegistryProvider) CheckRepositoryCredential(_ context.Context, _, _ string, credential git.RepositoryCredential) (git.RepositoryAccess, error) {
+	if credential.Username != "release-bot" || credential.Token != "project-token-secret" {
+		return git.RepositoryAccess{Message: "机器人凭证无效"}, nil
+	}
+	return git.RepositoryAccess{
+		Provider:                 credential.Provider,
+		Supported:                true,
+		Authenticated:            true,
+		AuthenticatedUsername:    credential.Username,
+		RepositoryFound:          true,
+		AccountMatches:           true,
+		CanRead:                  true,
+		CanWrite:                 true,
+		CanCreateTemporaryBranch: true,
+		Usable:                   true,
+		Message:                  "授权通过",
+	}, nil
+}
+
+func (p *credentialRegistryProvider) ConfigureRepositoryCredential(_ string, _ string, credential git.RepositoryCredential) error {
+	p.configuredUsername = credential.Username
+	p.configuredToken = credential.Token
+	p.configureCalls++
+	return nil
+}
+
+func (p *credentialRegistryProvider) ClearRepositoryCredential(_, _ string) error {
+	p.clearCalls++
+	p.configuredUsername = ""
+	p.configuredToken = ""
+	return nil
 }

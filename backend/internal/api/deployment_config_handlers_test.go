@@ -8,7 +8,7 @@ import (
 )
 
 func TestDeploymentConfigEndpoints(t *testing.T) {
-	server := testServer()
+	server := testServerWithoutDeploymentConfig()
 	handler := server.Router()
 	token := loginForTest(t, handler)
 
@@ -29,8 +29,8 @@ func TestDeploymentConfigEndpoints(t *testing.T) {
 	if defaultBody.Config.IsDefault || defaultBody.Config.Version != 0 || defaultBody.Config.ResourceCount != 0 {
 		t.Fatalf("unexpected empty deployment config: %#v", defaultBody.Config)
 	}
-	if !strings.Contains(emptyResponse.Body.String(), `"supported_kinds"`) || !strings.Contains(emptyResponse.Body.String(), `"resources":[]`) {
-		t.Fatalf("empty config did not expose empty resource capabilities: %s", emptyResponse.Body.String())
+	if strings.Contains(emptyResponse.Body.String(), "example.invalid") {
+		t.Fatalf("empty config response contains fabricated data: %s", emptyResponse.Body.String())
 	}
 
 	manifest := `apiVersion: apps/v1

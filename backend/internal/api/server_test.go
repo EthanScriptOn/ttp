@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,22 +14,99 @@ import (
 	"github.com/yuebuy/cicd-platform/backend/internal/config"
 	"github.com/yuebuy/cicd-platform/backend/internal/domain"
 	"github.com/yuebuy/cicd-platform/backend/internal/git"
+	"github.com/yuebuy/cicd-platform/backend/internal/imagebuild"
 	"github.com/yuebuy/cicd-platform/backend/internal/release"
 	"github.com/yuebuy/cicd-platform/backend/internal/runtime"
 	"github.com/yuebuy/cicd-platform/backend/internal/store"
 )
 
 func testServer() *Server {
-	data := store.NewMemoryWithAdminPassword("test-password")
+	provider := git.NewDemoProvider()
+	return testServerWithGitProvider(provider)
+}
+
+func testServerWithGitProvider(provider git.Provider) *Server {
+	builder := &testImageBuilder{}
+	server := New(Dependencies{
+		Config:       config.Config{JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:        store.NewMemoryWithFixtures(),
+		Auth:         auth.NewManager("test-secret", 60),
+		Git:          provider,
+		Release:      release.NewService(provider),
+		Runtime:      runtime.NewService(runtime.NewDemoProvider()),
+		ImageBuilder: builder,
+	})
+	seedTestDeploymentConfig(server)
+	return server
+}
+
+const testImageDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+type testImageBuilder struct {
+	mu       sync.Mutex
+	requests []imagebuild.Request
+	err      error
+}
+
+func (b *testImageBuilder) Build(_ context.Context, request imagebuild.Request) (imagebuild.Result, error) {
+	b.mu.Lock()
+	b.requests = append(b.requests, request)
+	err := b.err
+	b.mu.Unlock()
+	if err != nil {
+		return imagebuild.Result{}, err
+	}
+	now := time.Now().UTC()
+	return imagebuild.Result{
+		Image:      "registry.example.com/ttp/project-test@" + testImageDigest,
+		Digest:     testImageDigest,
+		StartedAt:  now,
+		FinishedAt: now,
+	}, nil
+}
+
+func (b *testImageBuilder) callCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.requests)
+}
+
+func testServerWithoutDeploymentConfig() *Server {
 	provider := git.NewDemoProvider()
 	return New(Dependencies{
-		Config:  config.Config{DemoMode: true, JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
-		Store:   data,
+		Config:  config.Config{JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
 		Auth:    auth.NewManager("test-secret", 60),
 		Git:     provider,
 		Release: release.NewService(provider),
-		Runtime: runtime.NewService(nil),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
 	})
+}
+
+func seedTestDeploymentConfig(server *Server) {
+	_, err := server.deps.Store.SaveDeploymentConfig(context.Background(), "space-lab", "reverse-lab", store.SaveDeploymentConfigInput{
+		Manifest: `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reverse-lab
+  namespace: lab
+spec:
+  replicas: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reverse-lab
+  namespace: lab
+spec:
+  selector:
+    app: reverse-lab
+`,
+		Format: "yaml",
+	})
+	if err != nil {
+		panic(err)
+	}
 }
 
 func TestSpaceScopedReleaseAndRuntimeFlow(t *testing.T) {
@@ -174,7 +253,9 @@ func TestCreateReleaseFallsBackToProjectDefaultBranch(t *testing.T) {
 }
 
 func TestReleaseProgressCancelAndSingleReleaseEndpoints(t *testing.T) {
+	blockingRuntime := newBlockingReleaseRuntime()
 	server := testServer()
+	server.deps.Runtime = runtime.NewService(blockingRuntime)
 	handler := server.Router()
 	token := loginForTest(t, handler)
 
@@ -196,6 +277,11 @@ func TestReleaseProgressCancelAndSingleReleaseEndpoints(t *testing.T) {
 	if started.Code != http.StatusAccepted || !strings.Contains(started.Body.String(), `"status":"running"`) {
 		t.Fatalf("publish response should be running: %d %s", started.Code, started.Body.String())
 	}
+	select {
+	case <-blockingRuntime.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("release executor did not enter the controlled runtime")
+	}
 
 	progress := doRequest(t, handler, http.MethodPatch, releasePath+"/progress", token, `{"progress":33,"stage":"testing","message":"正在检查"}`)
 	if progress.Code != http.StatusOK || !strings.Contains(progress.Body.String(), `"progress":33`) {
@@ -212,11 +298,45 @@ func TestReleaseProgressCancelAndSingleReleaseEndpoints(t *testing.T) {
 		t.Fatalf("cancel endpoint: %d %s", cancelled.Code, cancelled.Body.String())
 	}
 
-	// The asynchronous executor must not overwrite an operator cancellation.
-	time.Sleep(800 * time.Millisecond)
+	// Let the controlled runtime finish only after cancellation. The asynchronous
+	// executor must not overwrite the operator-selected terminal state.
+	close(blockingRuntime.allow)
+	select {
+	case <-blockingRuntime.finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("release executor did not finish after the runtime was released")
+	}
 	final := doRequest(t, handler, http.MethodGet, releasePath, token, "")
 	if final.Code != http.StatusOK || !strings.Contains(final.Body.String(), `"status":"cancelled"`) {
 		t.Fatalf("cancelled release was overwritten: %d %s", final.Code, final.Body.String())
+	}
+}
+
+type blockingReleaseRuntime struct {
+	*runtime.DemoProvider
+	started   chan struct{}
+	allow     chan struct{}
+	finished  chan struct{}
+	startOnce sync.Once
+}
+
+func newBlockingReleaseRuntime() *blockingReleaseRuntime {
+	return &blockingReleaseRuntime{
+		DemoProvider: runtime.NewDemoProvider(),
+		started:      make(chan struct{}),
+		allow:        make(chan struct{}),
+		finished:     make(chan struct{}),
+	}
+}
+
+func (p *blockingReleaseRuntime) DeployRelease(ctx context.Context, deployment runtime.ReleaseDeployment) error {
+	p.startOnce.Do(func() { close(p.started) })
+	defer close(p.finished)
+	select {
+	case <-p.allow:
+		return p.DemoProvider.DeployRelease(ctx, deployment)
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -274,16 +394,16 @@ func TestUpdateProjectPersistsRepositoryAndRuntimeSettings(t *testing.T) {
 func TestCreateProjectDerivesRepositoryIDServerSide(t *testing.T) {
 	provider := &recordingRepositoryProvider{Provider: git.NewDemoProvider()}
 	server := New(Dependencies{
-		Config:  config.Config{DemoMode: false, JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
-		Store:   store.NewMemoryWithAdminPassword("test-password"),
+		Config:  config.Config{JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
 		Auth:    auth.NewManager("test-secret", 60),
 		Git:     provider,
 		Release: release.NewService(provider),
-		Runtime: runtime.NewService(nil),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
 	})
 	token := loginForTest(t, server.Router())
 	repositoryURL := "https://github.com/acme/server-owned-id"
-	response := doRequest(t, server.Router(), http.MethodPost, "/api/projects", token, `{"name":"Server Owned Repository","repository_id":"client-supplied-id","repository_url":"https://github.com/acme/server-owned-id","default_branch":"main"}`)
+	response := doRequest(t, server.Router(), http.MethodPost, "/api/projects", token, `{"name":"Server Owned Repository","repository_id":"client-supplied-id","repository_url":"https://github.com/acme/server-owned-id","default_branch":"main","cluster_id":"demo-cluster"}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create project: expected 201, got %d: %s", response.Code, response.Body.String())
 	}
@@ -291,7 +411,7 @@ func TestCreateProjectDerivesRepositoryIDServerSide(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	expectedID := repositoryID(repositoryURL)
+	expectedID := repositoryID(body.ID, repositoryURL)
 	if body.RepositoryID != expectedID || body.RepositoryID == "client-supplied-id" {
 		t.Fatalf("repository ID = %q, want server-derived %q", body.RepositoryID, expectedID)
 	}
@@ -300,13 +420,66 @@ func TestCreateProjectDerivesRepositoryIDServerSide(t *testing.T) {
 	}
 }
 
+func TestCreateProjectRejectsInvalidInputBeforeRepositoryRegistration(t *testing.T) {
+	provider := &recordingRepositoryProvider{Provider: git.NewDemoProvider()}
+	server := New(Dependencies{
+		Config:  config.Config{JWTSecret: "test-secret", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
+		Auth:    auth.NewManager("test-secret", 60),
+		Git:     provider,
+		Release: release.NewService(provider),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
+	})
+	token := loginForTest(t, server.Router())
+
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{name: "unsupported strategy", payload: `{"name":"bad-strategy","repository_url":"https://github.com/acme/bad-strategy","cluster_id":"demo-cluster","deploy_strategy":"bogus"}`},
+		{name: "invalid namespace", payload: `{"name":"bad-namespace","repository_url":"https://github.com/acme/bad-namespace","cluster_id":"demo-cluster","namespace":"Bad_Ns"}`},
+		{name: "invalid replicas", payload: `{"name":"bad-replicas","repository_url":"https://github.com/acme/bad-replicas","cluster_id":"demo-cluster","replicas":101}`},
+		{name: "invalid port", payload: `{"name":"bad-port","repository_url":"https://github.com/acme/bad-port","cluster_id":"demo-cluster","container_port":70000}`},
+		{name: "invalid branch", payload: `{"name":"bad-branch","repository_url":"https://github.com/acme/bad-branch","cluster_id":"demo-cluster","default_branch":"bad..branch"}`},
+		{name: "invalid repository URL", payload: `{"name":"bad-repository","repository_url":"ftp://github.com/acme/bad-repository","cluster_id":"demo-cluster"}`},
+	}
+	for _, testCase := range cases {
+		before := provider.registerCalls
+		response := doRequest(t, server.Router(), http.MethodPost, "/api/projects", token, testCase.payload)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d: %s", testCase.name, response.Code, response.Body.String())
+		}
+		if provider.registerCalls != before {
+			t.Fatalf("%s: repository registration ran before validation", testCase.name)
+		}
+	}
+
+	before := provider.registerCalls
+	invalidUpdate := doRequest(t, server.Router(), http.MethodPatch, "/api/projects/reverse-lab", token, `{"container_port":0}`)
+	if invalidUpdate.Code != http.StatusBadRequest {
+		t.Fatalf("invalid update: expected 400, got %d: %s", invalidUpdate.Code, invalidUpdate.Body.String())
+	}
+	if provider.registerCalls != before {
+		t.Fatal("invalid project update registered a repository")
+	}
+	project, err := server.deps.Store.GetProject(context.Background(), "space-lab", "reverse-lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.ContainerPort != 8080 {
+		t.Fatalf("invalid update changed the project: %#v", project)
+	}
+}
+
 type recordingRepositoryProvider struct {
 	git.Provider
 	registeredID  string
 	registeredURL string
+	registerCalls int
 }
 
 func (p *recordingRepositoryProvider) RegisterRepository(repositoryID, repositoryURL string) error {
+	p.registerCalls++
 	p.registeredID = repositoryID
 	p.registeredURL = repositoryURL
 	return nil
@@ -317,7 +490,7 @@ func TestAuditLogsAreSpaceScopedAndWrittenForMutations(t *testing.T) {
 	handler := server.Router()
 	token := loginForTest(t, handler)
 
-	created := doRequest(t, handler, http.MethodPost, "/api/projects", token, `{"name":"Audit Project","repository_url":"https://github.com/example/audit","default_branch":"main","namespace":"lab"}`)
+	created := doRequest(t, handler, http.MethodPost, "/api/projects", token, `{"name":"Audit Project","repository_url":"https://github.com/example/audit","default_branch":"main","namespace":"lab","cluster_id":"demo-cluster"}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create project: expected 201, got %d: %s", created.Code, created.Body.String())
 	}
@@ -403,7 +576,7 @@ func TestHTTPFlowCoversSpaceProjectGitReleaseAndPodRoutes(t *testing.T) {
 		}
 	}
 
-	created := doRequest(t, handler, http.MethodPost, "/api/projects", token, `{"name":"Smoke Project","repository_url":"https://github.com/example/smoke","default_branch":"main","namespace":"lab"}`)
+	created := doRequest(t, handler, http.MethodPost, "/api/projects", token, `{"name":"Smoke Project","repository_url":"https://github.com/example/smoke","default_branch":"main","namespace":"lab","cluster_id":"demo-cluster"}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create project: expected 201, got %d: %s", created.Code, created.Body.String())
 	}
@@ -435,7 +608,7 @@ func TestHTTPFlowCoversSpaceProjectGitReleaseAndPodRoutes(t *testing.T) {
 }
 
 func loginForTest(t *testing.T, handler http.Handler) string {
-	response := doRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"admin","password":"test-password"}`)
+	response := doRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"admin","password":"ttp"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("login: expected 200, got %d: %s", response.Code, response.Body.String())
 	}

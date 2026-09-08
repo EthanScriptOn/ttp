@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/yuebuy/cicd-platform/backend/internal/domain"
 )
 
 var (
-	ErrClusterNotFound     = errors.New("runtime cluster not found")
-	ErrProjectNotFound     = errors.New("runtime project not found")
-	ErrPodNotFound         = errors.New("runtime pod not found")
-	ErrContainerNotFound   = errors.New("runtime container not found")
-	ErrInvalidRuntimeInput = errors.New("invalid runtime input")
+	ErrClusterNotFound               = errors.New("runtime cluster not found")
+	ErrProjectNotFound               = errors.New("runtime project not found")
+	ErrPodNotFound                   = errors.New("runtime pod not found")
+	ErrContainerNotFound             = errors.New("runtime container not found")
+	ErrInvalidRuntimeInput           = errors.New("invalid runtime input")
+	ErrPodExecUnsupported            = errors.New("runtime provider does not support pod exec")
+	ErrEnvironmentCleanupUnsupported = errors.New("runtime provider does not support environment cleanup")
+	ErrEnvironmentCleanupFailed      = errors.New("runtime environment cleanup failed")
 )
 
 type PodPhase string
@@ -42,18 +47,14 @@ type ContainerStatus struct {
 
 type Pod struct {
 	PodRef
-	ProjectID        string            `json:"project_id"`
-	NodeName         string            `json:"node_name"`
-	PodIP            string            `json:"pod_ip"`
-	Phase            PodPhase          `json:"phase"`
-	Ready            bool              `json:"ready"`
-	RestartCount     int               `json:"restart_count"`
-	CPUUsageMilli    int64             `json:"cpu_millicores"`
-	MemoryUsageBytes int64             `json:"memory_bytes"`
-	MetricsAvailable bool              `json:"metrics_available"`
-	MetricsSource    string            `json:"metrics_source,omitempty"`
-	Labels           map[string]string `json:"labels,omitempty"`
-	StartedAt        time.Time         `json:"started_at"`
+	ProjectID    string            `json:"project_id"`
+	NodeName     string            `json:"node_name"`
+	PodIP        string            `json:"pod_ip"`
+	Phase        PodPhase          `json:"phase"`
+	Ready        bool              `json:"ready"`
+	RestartCount int               `json:"restart_count"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	StartedAt    time.Time         `json:"started_at"`
 }
 
 type PodDetail struct {
@@ -74,6 +75,22 @@ type PodConfigUpdate struct {
 	Environment map[string]string `json:"environment"`
 }
 
+type PodExecRequest struct {
+	PodRef
+	Container string `json:"container"`
+	Command   string `json:"command"`
+}
+
+type PodExecResult struct {
+	Output string `json:"output"`
+}
+
+// ReleaseLogFunc receives one line of executor output. It is deliberately a
+// callback rather than part of the persisted deployment payload so providers
+// can stream their native API/command output without changing the runtime
+// contract used by existing callers.
+type ReleaseLogFunc func(source, stream, level, line string)
+
 // ReleaseDeployment is the small runtime contract used by the release
 // executor. A provider may implement it to apply a built image; providers
 // that only observe a cluster can omit it and remain read-only.
@@ -81,6 +98,7 @@ type ReleaseDeployment struct {
 	ClusterID        string
 	Namespace        string
 	ProjectID        string
+	TargetID         string
 	ReleaseID        string
 	Branch           string
 	CommitSHA        string
@@ -94,13 +112,78 @@ type ReleaseDeployment struct {
 	Manifest         string
 	ManifestFormat   string
 	ManifestVersion  int
+	Log              ReleaseLogFunc `json:"-"`
 }
 
 // ReleaseDeployer is intentionally optional. It keeps the current
-// observation-only Kubernetes provider safe while allowing the local demo
-// provider to show the full commit-to-Pod experience.
+// observation-only Kubernetes provider safe while allowing an explicitly
+// injected release provider to be tested.
 type ReleaseDeployer interface {
 	DeployRelease(ctx context.Context, deployment ReleaseDeployment) error
+}
+
+// EnvironmentCleaner is required before a deployment target can be removed.
+// Implementations must delete only resources owned by the supplied project and
+// target, then return after the Kubernetes API confirms they are gone.
+type EnvironmentCleaner interface {
+	CleanupEnvironment(ctx context.Context, clusterID, namespace, projectID, targetID string) error
+}
+
+// ABExperimentDeployment creates two independently labelled workloads in one
+// environment. It is optional because a provider must understand how to
+// route traffic before it can safely run an A/B experiment.
+type ABExperimentDeployment struct {
+	ClusterID    string
+	Namespace    string
+	ProjectID    string
+	ExperimentID string
+	ABranch      string
+	ACommitSHA   string
+	AReleaseID   string
+	BBranch      string
+	BCommitSHA   string
+	BReleaseID   string
+	AImage       string
+	BImage       string
+	Replicas     int
+	Strategy     string
+	Assignment   string
+	RoutingRule  domain.ABRoutingRule
+	ATraffic     int
+	BTraffic     int
+	Log          ReleaseLogFunc `json:"-"`
+}
+
+type ABExperimentDeployer interface {
+	DeployABExperiment(ctx context.Context, deployment ABExperimentDeployment) error
+	UpdateABExperimentTraffic(ctx context.Context, clusterID, namespace, projectID, experimentID string, aTraffic, bTraffic int) error
+	StopABExperiment(ctx context.Context, clusterID, namespace, projectID, experimentID string, keepVariant string) error
+	ListABExperimentPods(ctx context.Context, clusterID, namespace, projectID, experimentID string) ([]Pod, error)
+}
+
+type ABVariantMetrics struct {
+	MetricsAvailable bool
+	MetricsMessage   string
+	RequestRateRPS   float64
+	ErrorRatePercent float64
+	LatencyP95MS     float64
+}
+
+type ABExperimentMetrics struct {
+	A ABVariantMetrics
+	B ABVariantMetrics
+}
+
+// ABExperimentMetricsProvider is optional because a real Kubernetes runtime
+// needs a metrics backend, such as Prometheus, in addition to the API client.
+type ABExperimentMetricsProvider interface {
+	GetABExperimentMetrics(ctx context.Context, clusterID, namespace, projectID, experimentID string) (ABExperimentMetrics, error)
+}
+
+// ABExperimentCleaner is used when setup fails after the experiment record has
+// been created. It removes every workload belonging to that experiment.
+type ABExperimentCleaner interface {
+	CleanupABExperiment(ctx context.Context, clusterID, namespace, projectID, experimentID string) error
 }
 
 // ClusterConnection is the safe result of a connection check. Authentication
@@ -122,9 +205,8 @@ type ClusterChecker interface {
 }
 
 // MetricPoint is one timestamped sample returned by a runtime provider. The
-// demo provider fills these values so the UI can be exercised before a
-// Prometheus data source is connected; Kubernetes providers may leave the
-// series empty when historical metrics are unavailable.
+// Providers may leave the series empty when a metrics data source is
+// unavailable; the API must not fill missing samples with fabricated values.
 type MetricPoint struct {
 	Timestamp           time.Time `json:"timestamp"`
 	CPUUsedPercent      float64   `json:"cpu_used_percent"`
@@ -248,4 +330,11 @@ type Provider interface {
 	UpdatePodConfig(ctx context.Context, ref PodRef, update PodConfigUpdate) (PodDetail, error)
 	GetClusterMetrics(ctx context.Context, clusterID string) (ClusterMetrics, error)
 	GetProjectMetrics(ctx context.Context, clusterID, projectID string) (ProjectMetrics, error)
+}
+
+// PodExecutor is optional so observation-only providers can remain read-only.
+// Implementations must enforce the PodRef project scope before executing a
+// command in a container.
+type PodExecutor interface {
+	ExecPodCommand(ctx context.Context, request PodExecRequest) (PodExecResult, error)
 }

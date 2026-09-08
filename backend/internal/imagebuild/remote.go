@@ -1,0 +1,133 @@
+package imagebuild
+
+import (
+	"bytes"
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+// RemoteConfig describes the separate ttp-builder process. A remote builder
+// is intentionally opt-in: the TTP API starts without one by default.
+type RemoteConfig struct {
+	URL     string
+	Token   string
+	Timeout time.Duration
+}
+
+type Remote struct {
+	baseURL string
+	token   string
+	client  *http.Client
+}
+
+func NewRemote(config RemoteConfig) (*Remote, error) {
+	baseURL, err := normalizeBuilderURL(config.URL)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(config.Token) == "" {
+		return nil, fmt.Errorf("builder token is required")
+	}
+	timeout := config.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	return &Remote{baseURL: baseURL, token: config.Token, client: &http.Client{Timeout: timeout}}, nil
+}
+
+func (r *Remote) Build(ctx context.Context, request Request) (Result, error) {
+	if r == nil || r.client == nil {
+		return Result{}, ErrNotConfigured
+	}
+	if err := request.Validate(); err != nil {
+		return Result{}, err
+	}
+	body, err := json.Marshal(struct {
+		Request Request `json:"request"`
+	}{Request: request})
+	if err != nil {
+		return Result{}, fmt.Errorf("encode build request: %w", err)
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/v1/builds", bytes.NewReader(body))
+	if err != nil {
+		return Result{}, fmt.Errorf("create builder request: %w", err)
+	}
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Authorization", "Bearer "+r.token)
+	response, err := r.client.Do(httpRequest)
+	if err != nil {
+		return Result{}, fmt.Errorf("call image builder: %w", err)
+	}
+	defer response.Body.Close()
+	limited := io.LimitReader(response.Body, 2<<20)
+	var payload struct {
+		Result Result     `json:"result"`
+		Logs   []LogEntry `json:"logs"`
+		Error  string     `json:"error"`
+	}
+	if err := json.NewDecoder(limited).Decode(&payload); err != nil {
+		return Result{}, fmt.Errorf("decode image builder response: %w", err)
+	}
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return Result{}, ErrUnauthorized
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		message := strings.TrimSpace(payload.Error)
+		if message == "" {
+			message = "image builder rejected the request"
+		}
+		return Result{Logs: payload.Logs}, &Failure{Err: errorsFromBuilder(message), Logs: payload.Logs}
+	}
+	if !IsDigest(payload.Result.Digest) || !strings.Contains(payload.Result.Image, "@"+payload.Result.Digest) {
+		return Result{}, fmt.Errorf("image builder returned no immutable image digest")
+	}
+	return payload.Result, nil
+}
+
+func errorsFromBuilder(message string) error {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "image build failed"
+	}
+	return fmt.Errorf("%s", message)
+}
+
+func normalizeBuilderURL(value string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("builder URL is invalid")
+	}
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+		return "", fmt.Errorf("builder URL must use HTTPS outside loopback")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// ValidBearerToken compares the builder token without leaking timing
+// information. It is exported so the detached HTTP server uses exactly the
+// same verification semantics as any future transport.
+func ValidBearerToken(header, expected string) bool {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) || strings.TrimSpace(expected) == "" {
+		return false
+	}
+	provided := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}

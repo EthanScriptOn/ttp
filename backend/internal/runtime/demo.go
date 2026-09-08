@@ -152,6 +152,62 @@ func (p *DemoProvider) GetPodLogs(ctx context.Context, request PodLogRequest) (s
 	return strings.Join(lines[len(lines)-request.TailLines:], "\n") + "\n", nil
 }
 
+func (p *DemoProvider) ExecPodCommand(ctx context.Context, request PodExecRequest) (PodExecResult, error) {
+	if err := ctx.Err(); err != nil {
+		return PodExecResult{}, err
+	}
+	command := strings.TrimSpace(request.Command)
+	if command == "" || len(command) > 4096 || strings.ContainsAny(command, "\x00\r\n") {
+		return PodExecResult{}, fmt.Errorf("%w: command must be between 1 and 4096 characters", ErrInvalidRuntimeInput)
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	item, err := p.lookup(request.PodRef)
+	if err != nil {
+		return PodExecResult{}, err
+	}
+	container := strings.TrimSpace(request.Container)
+	if container == "" {
+		if len(item.detail.Containers) != 1 {
+			return PodExecResult{}, ErrContainerNotFound
+		}
+		for name := range item.detail.Containers {
+			container = name
+		}
+	}
+	if _, ok := item.detail.Containers[container]; !ok {
+		return PodExecResult{}, ErrContainerNotFound
+	}
+
+	var output string
+	switch {
+	case command == "pwd":
+		output = "/app\n"
+	case command == "whoami":
+		output = "app\n"
+	case command == "hostname":
+		output = item.detail.Name + "\n"
+	case command == "date":
+		output = p.now().Format(time.RFC3339) + "\n"
+	case command == "env":
+		keys := make([]string, 0, len(item.detail.Environment))
+		for key := range item.detail.Environment {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			output += fmt.Sprintf("%s=%s\n", key, item.detail.Environment[key])
+		}
+	case command == "ls" || command == "ls -la":
+		output = "drwxr-xr-x  1 app app 4096 .\ndrwxr-xr-x  1 app app 4096 ..\n-rwxr-xr-x  1 app app 8192 app\n"
+	case strings.HasPrefix(command, "echo "):
+		output = strings.TrimSpace(strings.TrimPrefix(command, "echo ")) + "\n"
+	default:
+		output = fmt.Sprintf("/bin/sh: %s: command not found\n", command)
+	}
+	return PodExecResult{Output: output}, nil
+}
+
 func (p *DemoProvider) UpdatePodConfig(ctx context.Context, ref PodRef, update PodConfigUpdate) (PodDetail, error) {
 	if err := ctx.Err(); err != nil {
 		return PodDetail{}, err
@@ -182,7 +238,13 @@ func (p *DemoProvider) UpdatePodConfig(ctx context.Context, ref PodRef, update P
 // DeployRelease updates the in-memory workload so a local release can be
 // followed all the way from a selected commit to healthy Pods. It is only a
 // demo provider operation; no Kubernetes API or external registry is touched.
-func (p *DemoProvider) DeployRelease(ctx context.Context, deployment ReleaseDeployment) error {
+func (p *DemoProvider) DeployRelease(ctx context.Context, deployment ReleaseDeployment) (err error) {
+	log := deployment.Log
+	defer func() {
+		if err != nil {
+			releaseLog(log, "k8s", "stderr", "ERROR", err.Error())
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -207,6 +269,7 @@ func (p *DemoProvider) DeployRelease(ctx context.Context, deployment ReleaseDepl
 	if err := p.requireCluster(deployment.ClusterID); err != nil {
 		return err
 	}
+	releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("cluster=%s namespace=%s", deployment.ClusterID, deployment.Namespace))
 
 	keys := make([]string, 0)
 	for key, item := range p.pods {
@@ -219,6 +282,7 @@ func (p *DemoProvider) DeployRelease(ctx context.Context, deployment ReleaseDepl
 		delete(p.pods, keys[len(keys)-1])
 		keys = keys[:len(keys)-1]
 	}
+	releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("deployment.apps/%s configured replicas=%d", sanitizeDemoToken(deployment.ProjectID), deployment.Replicas))
 
 	now := p.now().UTC()
 	nodePrefix := "demo-node-"
@@ -243,7 +307,9 @@ func (p *DemoProvider) DeployRelease(ctx context.Context, deployment ReleaseDepl
 		detail := PodDetail{Pod: Pod{PodRef: PodRef{ClusterID: deployment.ClusterID, Namespace: deployment.Namespace, Name: name}, ProjectID: deployment.ProjectID, NodeName: fmt.Sprintf("%s%c", nodePrefix, 'a'+rune(index%3)), PodIP: fmt.Sprintf("10.0.0.%d", 30+index), Phase: PodRunning, Ready: true, Labels: map[string]string{}, StartedAt: now}, Containers: map[string]ContainerStatus{containerName: {Name: containerName, Image: deployment.Image, Ready: true}}, Config: map[string]string{}, Environment: map[string]string{}}
 		detail = applyDemoRelease(detail, deployment, now)
 		p.pods[podKey(detail.PodRef)] = demoPod{detail: detail, logs: map[string]string{containerName: fmt.Sprintf("%s release %s is running\n", now.Format(time.RFC3339), shortDemoSHA(deployment.CommitSHA))}}
+		releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("pod/%s phase=Running ready=true", name))
 	}
+	releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("deployment/%s successfully rolled out ready=%d/%d", sanitizeDemoToken(deployment.ProjectID), deployment.Replicas, deployment.Replicas))
 	return nil
 }
 

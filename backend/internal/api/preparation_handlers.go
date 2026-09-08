@@ -32,7 +32,7 @@ func (s *Server) prepareRelease(c *gin.Context) {
 	}
 	var request prepareReleaseRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "版本确认参数格式不正确")
+		writeError(c, http.StatusBadRequest, "invalid_request", "发布前检查参数格式不正确")
 		return
 	}
 	sourceBranch := strings.TrimSpace(request.SourceBranch)
@@ -44,12 +44,6 @@ func (s *Server) prepareRelease(c *gin.Context) {
 		baseBranch = project.DefaultBranch
 	}
 	action := strings.ToLower(strings.TrimSpace(request.Action))
-	if action == "merge" || action == "open" || action == "prepare_merge" || action == "resolve" || action == "continue" || action == "resolve_merge" {
-		if err := git.RequireRepositoryMergeAccess(c.Request.Context(), s.deps.Git, project.RepositoryID); err != nil {
-			writePreparationError(c, err)
-			return
-		}
-	}
 	input := release.CreateInput{
 		ProjectID:    project.ID,
 		RepositoryID: project.RepositoryID,
@@ -60,8 +54,27 @@ func (s *Server) prepareRelease(c *gin.Context) {
 	var err error
 	switch action {
 	case "merge", "open", "prepare_merge":
+		// A ready baseline does not create a branch or merge anything, so it
+		// remains available even when the repository bot lacks merge rights.
+		result, err = s.deps.Release.Prepare(c.Request.Context(), input, baseBranch, selectedSHA)
+		if err != nil {
+			writePreparationError(c, err)
+			return
+		}
+		if result.Status != release.PreparationNeedsMerge {
+			c.JSON(http.StatusOK, gin.H{"preparation": result})
+			return
+		}
+		if err := git.RequireRepositoryMergeAccess(c.Request.Context(), s.deps.Git, project.RepositoryID); err != nil {
+			writePreparationError(c, err)
+			return
+		}
 		result, err = s.deps.Release.PrepareMerge(c.Request.Context(), input, baseBranch, selectedSHA, request.TemporaryBranch)
 	case "resolve", "continue", "resolve_merge":
+		if err := git.RequireRepositoryMergeAccess(c.Request.Context(), s.deps.Git, project.RepositoryID); err != nil {
+			writePreparationError(c, err)
+			return
+		}
 		resolutions := make([]git.MergeResolution, 0, len(request.Resolutions))
 		for _, item := range request.Resolutions {
 			resolutions = append(resolutions, git.MergeResolution{Path: item.Path, Content: item.Content})

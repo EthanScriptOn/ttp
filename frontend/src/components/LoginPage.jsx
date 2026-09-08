@@ -14,7 +14,6 @@ export default function LoginPage({ onLogin, loading, error }) {
       <div className="auth-visual">
         <BrandLogo className="auth-brand" />
         <div className="auth-visual-copy">
-          <Typography.Text className="eyebrow">涡轮增压平台 · TTP</Typography.Text>
           <Typography.Title>从代码到 Pod，<br />只走一条清晰的路。</Typography.Title>
           <Typography.Paragraph>把仓库、发布和运行状态放在同一个空间里管理。</Typography.Paragraph>
         </div>
@@ -22,7 +21,7 @@ export default function LoginPage({ onLogin, loading, error }) {
         <div className="auth-orbit orbit-two" />
       </div>
       <div className="auth-panel">
-        <Card bordered={false} className="auth-card">
+        <Card variant="borderless" className="auth-card">
           <div className="mobile-brand"><BrandLogo tone="dark" /></div>
           <Typography.Title level={2}>欢迎回来</Typography.Title>
           <Typography.Paragraph type="secondary">登录你的发布空间</Typography.Paragraph>

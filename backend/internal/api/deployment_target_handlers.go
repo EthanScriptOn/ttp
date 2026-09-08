@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/yuebuy/cicd-platform/backend/internal/domain"
+	"github.com/yuebuy/cicd-platform/backend/internal/release"
 	"github.com/yuebuy/cicd-platform/backend/internal/store"
 )
 
@@ -56,6 +57,10 @@ func (s *Server) updateDeploymentTarget(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request", "部署目标配置格式不正确")
 		return
 	}
+	if s.deploymentTargetHasActiveRelease(project.ID, c.Param("targetID")) {
+		writeError(c, http.StatusConflict, "deployment_target_locked", "环境正在发布中，发布完成后才能修改环境配置")
+		return
+	}
 	target, err := s.deps.Store.UpdateDeploymentTarget(c.Request.Context(), project.SpaceID, project.ID, c.Param("targetID"), input)
 	if err != nil {
 		writeStoreError(c, err)
@@ -71,12 +76,45 @@ func (s *Server) deleteDeploymentTarget(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := s.deps.Store.DeleteDeploymentTarget(c.Request.Context(), project.SpaceID, project.ID, c.Param("targetID")); err != nil {
+	target, err := s.deps.Store.GetDeploymentTarget(c.Request.Context(), project.SpaceID, project.ID, c.Param("targetID"))
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	if s.deploymentTargetHasActiveRelease(project.ID, c.Param("targetID")) {
+		writeError(c, http.StatusConflict, "deployment_target_locked", "环境正在发布中，发布完成后才能删除环境配置")
+		return
+	}
+	if !s.ensureRuntimeTarget(c, project, target) {
+		return
+	}
+	if err := s.deps.Runtime.CleanupEnvironment(c.Request.Context(), target.ClusterID, target.Namespace, project.ID, target.ID); err != nil {
+		writeRuntimeError(c, err)
+		return
+	}
+	if err := s.deps.Store.DeleteDeploymentTarget(c.Request.Context(), project.SpaceID, project.ID, target.ID); err != nil {
 		writeStoreError(c, err)
 		return
 	}
 	s.recordAudit(c, "删除环境部署目标", project.Name+" · "+c.Param("targetID"))
 	c.JSON(http.StatusOK, gin.H{"deleted": true, "target_id": c.Param("targetID")})
+}
+
+func (s *Server) deploymentTargetHasActiveRelease(projectID, targetID string) bool {
+	if s.deps.Release == nil {
+		return false
+	}
+	for _, item := range s.deps.Release.List(projectID) {
+		if item.Status != release.StatusQueued && item.Status != release.StatusRunning {
+			continue
+		}
+		for _, target := range item.Targets {
+			if target.ID == targetID && (target.Status == release.TargetPending || target.Status == release.TargetRunning) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // deploymentTargetForProject resolves the target selected by the console. An
@@ -142,8 +180,4 @@ func (s *Server) enrichDeploymentTarget(c *gin.Context, project domain.Project, 
 		}
 	}
 	return target
-}
-
-func deploymentTargetFromProject(project domain.Project) domain.DeploymentTarget {
-	return store.LegacyDeploymentTarget(project)
 }

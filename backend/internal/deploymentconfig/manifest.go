@@ -231,75 +231,6 @@ var clusterScopedKinds = map[string]bool{
 	"ValidatingWebhookConfiguration": true,
 }
 
-func DefaultManifest(projectName, namespace string, replicas, port int) string {
-	name := dnsName(projectName, "app")
-	namespace = dnsName(namespace, "default")
-	if replicas < 1 {
-		replicas = 1
-	}
-	if port < 1 || port > 65535 {
-		port = 8080
-	}
-	return fmt.Sprintf(`apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: %s
-  namespace: %s
-  labels:
-    app.kubernetes.io/name: %s
-    cicd.yuebuy.com/managed: "true"
-spec:
-  replicas: %d
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: %s
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: %s
-    spec:
-      containers:
-        - name: app
-          image: example.invalid/%s:latest
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: http
-              containerPort: %d
-          env:
-            - name: CICD_MANAGED
-              value: "true"
-          readinessProbe:
-            httpGet:
-              path: /
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: %s
-  namespace: %s
-  labels:
-    app.kubernetes.io/name: %s
-spec:
-  selector:
-    app.kubernetes.io/name: %s
-  ports:
-    - name: http
-      port: %d
-      targetPort: http
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: %s-config
-  namespace: %s
-data:
-  APP_ENV: dev
-`, name, namespace, name, replicas, name, name, name, port, name, namespace, name, name, port, name, namespace)
-}
-
 func decodeDocuments(manifest string) ([]any, error) {
 	if strings.TrimSpace(manifest) == "" {
 		return nil, fmt.Errorf("%w: manifest cannot be empty", ErrInvalidManifest)
@@ -370,24 +301,4 @@ func stringField(source map[string]any, key string) (string, bool) {
 
 func resourceError(index int, message string) error {
 	return fmt.Errorf("%w: resource %d: %s", ErrInvalidManifest, index+1, message)
-}
-
-func dnsName(value, fallback string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var builder strings.Builder
-	lastDash := false
-	for _, char := range value {
-		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
-			builder.WriteRune(char)
-			lastDash = false
-		} else if builder.Len() > 0 && !lastDash {
-			builder.WriteByte('-')
-			lastDash = true
-		}
-	}
-	result := strings.Trim(builder.String(), "-")
-	if result == "" || len(result) > 63 || len(validation.IsDNS1123Subdomain(result)) > 0 {
-		return fallback
-	}
-	return result
 }
