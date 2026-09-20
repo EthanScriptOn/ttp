@@ -38,7 +38,7 @@ type finishABExperimentRequest struct {
 }
 
 func (s *Server) listABExperiments(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -54,7 +54,7 @@ func (s *Server) listABExperiments(c *gin.Context) {
 }
 
 func (s *Server) getABExperiment(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -67,7 +67,7 @@ func (s *Server) getABExperiment(c *gin.Context) {
 }
 
 func (s *Server) createABExperiment(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -92,6 +92,14 @@ func (s *Server) createABExperiment(c *gin.Context) {
 	}
 	if !target.Enabled || target.Status != "active" {
 		writeError(c, http.StatusConflict, "conflict", "实验环境当前不可用")
+		return
+	}
+	if err := s.ensureRuntimeCluster(c.Request.Context(), project.SpaceID, target.ClusterID); err != nil {
+		writeRuntimeError(c, err)
+		return
+	}
+	if err := s.ensureRuntimeNamespace(c.Request.Context(), project.SpaceID, target.Environment, target.ClusterID, target.Namespace); err != nil {
+		writeRuntimeError(c, err)
 		return
 	}
 	aVersion, err := s.releaseVersionForTarget(project, target, request.AReleaseID, true)
@@ -158,7 +166,7 @@ func (s *Server) createABExperiment(c *gin.Context) {
 }
 
 func (s *Server) updateABExperimentTraffic(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -194,7 +202,7 @@ func (s *Server) updateABExperimentTraffic(c *gin.Context) {
 }
 
 func (s *Server) stopABExperiment(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -221,7 +229,7 @@ func (s *Server) stopABExperiment(c *gin.Context) {
 }
 
 func (s *Server) finishABExperiment(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}

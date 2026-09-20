@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/yuebuy/cicd-platform/backend/internal/domain"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -23,6 +24,22 @@ const (
 	DeploymentStageProd   = "prod"
 	DeploymentStageCustom = "custom"
 )
+
+// NormalizeDeploymentEnvironment returns the stable, DNS-safe environment
+// identifier used in generated namespaces and Kubernetes ownership labels.
+func NormalizeDeploymentEnvironment(value string) (string, error) {
+	environment := strings.ToLower(strings.TrimSpace(value))
+	if environment == "" {
+		return defaultTargetEnvironment, nil
+	}
+	if len([]rune(environment)) > 64 || strings.ContainsAny(environment, "\x00\r\n") {
+		return "", fmt.Errorf("%w: target environment is invalid", ErrInvalidInput)
+	}
+	if len(validation.IsDNS1123Label(environment)) > 0 {
+		return "", fmt.Errorf("%w: target environment must use lowercase letters, numbers and hyphens", ErrInvalidInput)
+	}
+	return environment, nil
+}
 
 func normalizeDeploymentStage(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
@@ -77,12 +94,9 @@ func newDeploymentTarget(spaceID, projectID string, input CreateDeploymentTarget
 	if len([]rune(name)) > 120 {
 		return domain.DeploymentTarget{}, fmt.Errorf("%w: target name is too long", ErrInvalidInput)
 	}
-	environment := strings.TrimSpace(input.Environment)
-	if environment == "" {
-		environment = defaultTargetEnvironment
-	}
-	if len([]rune(environment)) > 64 || strings.ContainsAny(environment, "\x00\r\n") {
-		return domain.DeploymentTarget{}, fmt.Errorf("%w: target environment is invalid", ErrInvalidInput)
+	environment, err := NormalizeDeploymentEnvironment(input.Environment)
+	if err != nil {
+		return domain.DeploymentTarget{}, err
 	}
 	stage := normalizeDeploymentStage(input.Stage)
 	if stage == "" {
@@ -169,9 +183,9 @@ func updateDeploymentTarget(current domain.DeploymentTarget, input UpdateDeploym
 		current.Name = name
 	}
 	if input.Environment != nil {
-		environment := strings.TrimSpace(*input.Environment)
-		if environment == "" || len([]rune(environment)) > 64 || strings.ContainsAny(environment, "\x00\r\n") {
-			return domain.DeploymentTarget{}, fmt.Errorf("%w: target environment is invalid", ErrInvalidInput)
+		environment, err := NormalizeDeploymentEnvironment(*input.Environment)
+		if err != nil {
+			return domain.DeploymentTarget{}, err
 		}
 		current.Environment = environment
 	}

@@ -65,6 +65,14 @@ var _ TagProvider = (*RegistryProvider)(nil)
 var _ ServiceAccountProvider = (*RegistryProvider)(nil)
 var _ AccessChecker = (*RegistryProvider)(nil)
 var _ RepositoryCredentialRegistry = (*RegistryProvider)(nil)
+var _ ImageRegistryRequirement = (*RegistryProvider)(nil)
+
+// RequiresImageRegistryConnection marks the production provider used by TTP.
+// Projects managed by this provider must select a space-scoped image registry
+// connection before their settings can be saved. Demo and read-only providers
+// intentionally do not implement this capability so their legacy fixtures
+// remain usable.
+func (*RegistryProvider) RequiresImageRegistryConnection() bool { return true }
 
 func NewRegistry(config RegistryConfig) (*RegistryProvider, error) {
 	kind := normalizeProviderKind(config.Provider)

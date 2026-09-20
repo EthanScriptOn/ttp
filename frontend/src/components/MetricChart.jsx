@@ -60,7 +60,7 @@ export default function MetricChart({ title, description, series = [], lines = [
   const chartRef = useRef(null)
   const chartInstance = useRef(null)
   const [hiddenKeys, setHiddenKeys] = useState(() => new Set())
-  const [hoverIndex, setHoverIndex] = useState(null)
+  const [hoverState, setHoverState] = useState(null)
 
   const points = useMemo(() => (Array.isArray(series) ? series
     .map((point) => ({ point, timestamp: validTimestamp(point?.timestamp) }))
@@ -88,8 +88,14 @@ export default function MetricChart({ title, description, series = [], lines = [
     }))
     const low = finiteNumber(min) ? min : 0
     const high = finiteNumber(max) ? max : niceMaximum(Math.max(...values, low + 1))
-    const xMin = timestamps[0]
-    const xMax = timestamps[timestamps.length - 1] > xMin ? timestamps[timestamps.length - 1] : xMin + 1
+    const firstTimestamp = timestamps[0]
+    const lastTimestamp = timestamps[timestamps.length - 1]
+    const hasRange = lastTimestamp > firstTimestamp
+    // Give a single fresh sample room on both sides so it is visible instead
+    // of being pinned to the left edge until the next refresh arrives.
+    const padding = hasRange ? 0 : 30
+    const xMin = hasRange ? firstTimestamp : firstTimestamp - padding
+    const xMax = hasRange ? lastTimestamp : lastTimestamp + padding
     const yValues = availableLines.map((line) => points.map(({ point }) => finiteNumber(point[line.key]) ? point[line.key] : null))
 
     return {
@@ -132,7 +138,7 @@ export default function MetricChart({ title, description, series = [], lines = [
             stroke: line.color,
             width: index === 0 ? 2.2 : 1.7,
             cap: 'round',
-            points: { show: false, size: 7, width: 2, stroke: line.color, fill: '#fff' },
+            points: { show: true, size: 6, width: 2, stroke: line.color, fill: '#fff' },
             value: (plot, value) => valueText(value, line),
           })),
         ],
@@ -144,7 +150,27 @@ export default function MetricChart({ title, description, series = [], lines = [
           points: { show: false },
         },
         hooks: {
-          setCursor: [(plot) => setHoverIndex(plot.cursor.idx ?? null)],
+          setCursor: [(plot) => {
+            const { left, top } = plot.cursor
+            if (left === null || left === undefined || left < 0) {
+              setHoverState(null)
+              return
+            }
+            // uPlot does not set cursor.idx for a single point. Resolve the
+            // nearest sample from the cursor's x position so the tooltip also
+            // works immediately after the first metrics request.
+            const cursorValue = plot.posToVal(left, 'x')
+            const index = points.reduce((nearest, item, itemIndex) => {
+              const nearestDistance = Math.abs(points[nearest].timestamp / 1000 - cursorValue)
+              const itemDistance = Math.abs(item.timestamp / 1000 - cursorValue)
+              return itemDistance < nearestDistance ? itemIndex : nearest
+            }, 0)
+            setHoverState({
+              index,
+              left: plot.over.offsetLeft + left,
+              top: plot.over.offsetTop + (Number.isFinite(top) && top >= 0 ? top : 12),
+            })
+          }],
         },
       },
     }
@@ -158,7 +184,7 @@ export default function MetricChart({ title, description, series = [], lines = [
     const plot = new uPlot({ ...chartModel.options, width }, chartModel.data, host)
     plot.__metricChartDomain = chartModel.domain
     chartInstance.current = plot
-    setHoverIndex(null)
+    setHoverState(null)
 
     const resize = () => {
       if (!chartRef.current || !chartInstance.current) return
@@ -176,7 +202,9 @@ export default function MetricChart({ title, description, series = [], lines = [
     }
   }, [chartHeight, chartModel])
 
-  const activePoint = hoverIndex === null ? null : points[hoverIndex]
+  const activePoint = hoverState === null ? null : points[hoverState.index]
+  const displayedPoint = activePoint || points[points.length - 1] || null
+  const tooltipLines = availableLines.filter((line) => !hiddenKeys.has(line.key))
 
   function toggleLine(key) {
     setHiddenKeys((current) => {
@@ -209,18 +237,29 @@ export default function MetricChart({ title, description, series = [], lines = [
       : <>
         <div className="metric-chart-legend" aria-label={`${title}指标`}>
           {availableLines.map((line) => {
-            const value = activePoint ? activePoint.point[line.key] : null
+            const value = displayedPoint?.point[line.key]
             const hidden = hiddenKeys.has(line.key)
             return <button type="button" className={`metric-chart-legend-item${hidden ? ' is-hidden' : ''}`} key={line.key} onClick={() => toggleLine(line.key)} aria-pressed={!hidden}>
               <span className="metric-chart-legend-dot" style={{ backgroundColor: line.color }} />
               <span>{line.label}</span>
-              {activePoint && <strong>{valueText(value, line)}</strong>}
+              {displayedPoint && <strong>{valueText(value, line)}</strong>}
             </button>
           })}
-          {activePoint && <time dateTime={new Date(activePoint.timestamp).toISOString()}>{timeText(activePoint.timestamp, true)}</time>}
+          {displayedPoint && <time dateTime={new Date(displayedPoint.timestamp).toISOString()}>{timeText(displayedPoint.timestamp, true)}</time>}
         </div>
         <div className="metric-chart-canvas" style={{ height: `${chartHeight}px` }} onWheel={handleWheel} onDoubleClick={resetZoom}>
           <div ref={chartRef} role="img" aria-label={`${title}折线图`} />
+          {activePoint && <div
+            className={`metric-chart-tooltip${hoverState.left > (chartRef.current?.clientWidth || 0) / 2 ? ' is-left' : ''}`}
+            style={{ left: hoverState.left, top: hoverState.top }}
+          >
+            <time dateTime={new Date(activePoint.timestamp).toISOString()}>{timeText(activePoint.timestamp, true)}</time>
+            {tooltipLines.map((line) => <div key={line.key}>
+              <span className="metric-chart-tooltip-dot" style={{ backgroundColor: line.color }} />
+              <span>{line.label}</span>
+              <strong>{valueText(activePoint.point[line.key], line)}</strong>
+            </div>)}
+          </div>}
         </div>
       </>}
   </section>

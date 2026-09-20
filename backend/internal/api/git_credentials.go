@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -73,25 +74,54 @@ type projectGitCredentialRequest struct {
 }
 
 func (s *Server) getProjectGitCredential(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	claims, ok := s.requireSpace(c)
 	if !ok {
+		return
+	}
+	// Do not restore the provider here. This endpoint is also the recovery
+	// path when a credential was encrypted with a key that is no longer
+	// available; loading through projectForRequest would hide the settings
+	// form behind the decryption error.
+	project, err := s.deps.Store.GetProject(c.Request.Context(), claims.SpaceID, c.Param("projectID"))
+	if err != nil {
+		writeStoreError(c, err)
 		return
 	}
 	credential, err := s.deps.Store.GetProjectGitCredential(c.Request.Context(), project.SpaceID, project.ID)
 	if err != nil {
-		if err == store.ErrNotFound {
+		if errors.Is(err, store.ErrNotFound) {
 			c.JSON(200, gin.H{"credential": gin.H{"project_id": project.ID, "configured": false}})
 			return
 		}
 		writeStoreError(c, err)
 		return
 	}
-	c.JSON(200, gin.H{"credential": safeProjectGitCredential(credential)})
+	response := safeProjectGitCredential(credential)
+	if _, openErr := s.credentialCipher.open(credential.TokenCiphertext); openErr != nil {
+		// Never expose the ciphertext or the decryption error. The token cannot
+		// be recovered, but the user can replace it through the PUT endpoint.
+		response["configured"] = false
+		response["invalid"] = true
+	}
+	c.JSON(200, gin.H{"credential": response})
 }
 
 func (s *Server) saveProjectGitCredential(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	claims, ok := s.requireSpace(c)
 	if !ok {
+		return
+	}
+	// Load the project directly instead of using projectForRequest. The latter
+	// restores the currently stored credential first, which would prevent a
+	// replacement when that credential was encrypted with an old key or is
+	// otherwise unreadable.
+	project, err := s.deps.Store.GetProject(c.Request.Context(), claims.SpaceID, c.Param("projectID"))
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	if err := s.registerRepository(project.RepositoryID, project.RepositoryURL); err != nil {
+		writeProviderError(c, err)
 		return
 	}
 	var request projectGitCredentialRequest
@@ -139,8 +169,15 @@ func (s *Server) saveProjectGitCredential(c *gin.Context) {
 }
 
 func (s *Server) deleteProjectGitCredential(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	claims, ok := s.requireSpace(c)
 	if !ok {
+		return
+	}
+	// Deleting a credential must remain possible even when its ciphertext can
+	// no longer be decrypted after a key rotation or misconfigured restart.
+	project, err := s.deps.Store.GetProject(c.Request.Context(), claims.SpaceID, c.Param("projectID"))
+	if err != nil {
+		writeStoreError(c, err)
 		return
 	}
 	if registry, supported := s.deps.Git.(git.RepositoryCredentialRegistry); supported {

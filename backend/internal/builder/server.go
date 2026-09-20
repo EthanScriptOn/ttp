@@ -34,8 +34,39 @@ func NewServer(token string, executor imagebuild.Builder, maxConcurrent int) (*S
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("POST /v1/preflight", s.preflight)
 	mux.HandleFunc("POST /v1/builds", s.build)
 	return mux
+}
+
+func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
+	if s == nil || !imagebuild.ValidBearerToken(r.Header.Get("Authorization"), s.token) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	var payload struct {
+		Request imagebuild.Request `json:"request"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid preflight request"})
+		return
+	}
+	if err := payload.Request.Validate(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	checker, ok := s.executor.(imagebuild.PreflightChecker)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "builder preflight is unsupported"})
+		return
+	}
+	if err := checker.Preflight(r.Context(), payload.Request); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

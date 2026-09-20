@@ -98,8 +98,11 @@
 .release-flow-permission strong { font-size: 13px; }
 .release-flow-permission span { color: #16856b; font-size: 12px; font-weight: 650; }
 .release-flow-permission small { display: block; margin-top: 7px; color: #4b7668; font-size: 11px; line-height: 1.5; }
-.release-flow-batch { margin-top: 15px; padding-top: 15px; border-top: 1px solid #dbe9e3; }
-.release-flow-batch strong { display: block; margin-top: 6px; font-size: 13px; }
+.release-flow-missing-target { display: grid; gap: 8px; margin-top: 14px; padding: 14px; border: 1px solid #f0d9ad; border-radius: 7px; color: #8b672f; background: #fff9ed; }
+.release-flow-missing-target > .anticon { color: #c78a2d; font-size: 18px; }
+.release-flow-missing-target strong { color: #6e5227; font-size: 13px; }
+.release-flow-missing-target span { color: #927a55; font-size: 11px; line-height: 1.55; }
+.release-flow-missing-target .release-flow-button { justify-self: start; margin-top: 3px; }
 .release-flow-footer { display: flex; min-height: 67px; align-items: center; justify-content: flex-end; gap: 15px; }
 .release-flow-footer > div { display: flex; align-items: center; gap: 15px; }
 .release-flow-order-summary { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 24px; align-items: start; padding: 8px 18px; margin-bottom: 18px; border: 1px solid #dbe9e3; border-radius: 7px; background: #fff; }

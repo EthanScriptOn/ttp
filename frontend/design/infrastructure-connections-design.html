@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TTP · 基础设施连接设计稿</title>
+  <style>
+    :root {
+      --canvas: #f5faf7;
+      --surface: #ffffff;
+      --ink: #1f332a;
+      --muted: #718279;
+      --line: #dcebe3;
+      --green: #08a957;
+      --green-soft: #e8f7ef;
+      --orange: #d18a39;
+      --orange-soft: #fff4e6;
+      --shadow: 0 10px 28px rgba(37, 81, 60, .07);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 1160px;
+      color: var(--ink);
+      background: var(--canvas);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    .app { display: flex; min-height: 900px; }
+    .sidebar {
+      width: 236px;
+      flex: 0 0 236px;
+      padding: 22px 14px;
+      border-right: 1px solid var(--line);
+      background: #fbfefc;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 8px 12px 28px; }
+    .brand-mark {
+      display: grid; place-items: center; width: 34px; height: 34px;
+      border-radius: 10px; color: #fff; background: var(--green);
+      font-weight: 800; font-size: 18px;
+    }
+    .brand strong { font-size: 18px; letter-spacing: .02em; }
+    .brand small { display: block; margin-top: 3px; color: #8ca097; font-size: 10px; letter-spacing: .12em; }
+    .nav { display: grid; gap: 5px; }
+    .nav-item {
+      display: flex; align-items: center; gap: 11px; height: 44px; padding: 0 13px;
+      border-radius: 8px; color: #64776e; font-size: 13px;
+    }
+    .nav-item .icon { width: 20px; color: #8fa097; text-align: center; font-size: 16px; }
+    .nav-item.active { color: #126e4b; background: #daf3e4; font-weight: 650; }
+    .nav-item.active .icon { color: var(--green); }
+    .sidebar-foot {
+      position: absolute; bottom: 22px; width: 208px; padding-top: 14px;
+      border-top: 1px solid var(--line); color: #779087; font-size: 11px;
+    }
+    .dot { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--green); }
+
+    .main { flex: 1; padding: 34px 46px 56px; }
+    .breadcrumb { color: #8a9b92; font-size: 11px; }
+    .heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 22px; margin: 12px 0 28px; }
+    h1 { margin: 0; font-size: 31px; letter-spacing: -.02em; }
+    .subtitle { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+    .button {
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      height: 38px; padding: 0 16px; border: 1px solid var(--line); border-radius: 7px;
+      color: #557166; background: #fff; font-size: 12px; font-weight: 600;
+    }
+    .button.primary { border-color: var(--green); color: #fff; background: var(--green); box-shadow: 0 4px 12px rgba(8, 169, 87, .16); }
+    .filters { display: flex; gap: 4px; width: max-content; margin-bottom: 18px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: #eef7f1; }
+    .filter { padding: 8px 14px; border-radius: 6px; color: #6c7e75; font-size: 12px; }
+    .filter.active { color: #126e4b; background: #fff; box-shadow: 0 2px 8px rgba(30, 88, 58, .08); font-weight: 650; }
+    .section-label { display: flex; align-items: center; justify-content: space-between; margin: 26px 0 10px; }
+    .section-label strong { font-size: 14px; }
+    .section-label span { color: #93a39b; font-size: 11px; }
+    .cards { display: grid; gap: 12px; }
+    .card {
+      padding: 20px 22px 15px; border: 1px solid var(--line); border-radius: 10px;
+      background: var(--surface); box-shadow: var(--shadow);
+    }
+    .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+    .identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
+    .service-icon {
+      display: grid; place-items: center; width: 42px; height: 42px; flex: 0 0 auto;
+      border-radius: 10px; font-size: 20px; font-weight: 700;
+    }
+    .service-icon.cluster { color: #14895a; background: var(--green-soft); }
+    .service-icon.registry { color: var(--orange); background: var(--orange-soft); }
+    .identity h2 { margin: 0 0 4px; font-size: 16px; }
+    .identity p { margin: 0; color: #8b9a93; font-size: 11px; }
+    .status { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 999px; color: #187449; background: #eaf8f0; font-size: 11px; font-weight: 650; }
+    .status i { display: block; width: 6px; height: 6px; border-radius: 50%; background: #21ac68; }
+    .details { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 18px; margin: 21px 0 15px 55px; }
+    .detail { min-width: 0; }
+    .detail span { display: block; margin-bottom: 5px; color: #99a69f; font-size: 10px; }
+    .detail strong { display: block; overflow: hidden; color: #435c50; font-size: 12px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+    .actions { display: flex; align-items: center; justify-content: flex-end; gap: 3px; padding-top: 11px; border-top: 1px solid #eef3f0; }
+    .action { border: 0; padding: 4px 8px; color: #258060; background: transparent; font-size: 11px; }
+    .action.more { color: #8c9b94; font-size: 18px; line-height: 1; }
+    .note { display: flex; align-items: center; gap: 9px; margin-top: 24px; padding: 13px 15px; border: 1px solid #d5ebe0; border-radius: 8px; color: #5e776c; background: #f0faf5; font-size: 11px; }
+    .note b { display: grid; place-items: center; width: 19px; height: 19px; border-radius: 50%; color: #188157; background: #d4f0e1; font-size: 11px; }
+    .relation-head { display: flex; align-items: center; justify-content: space-between; margin: 27px 0 10px; }
+    .relation-head strong { font-size: 14px; }
+    .relation-head span { color: #93a39b; font-size: 11px; }
+    .relation-card { padding: 18px 20px 14px; border: 1px solid #d7e9df; border-radius: 10px; background: #fbfefc; box-shadow: 0 6px 18px rgba(37, 81, 60, .04); }
+    .relation-top { display: flex; align-items: center; gap: 13px; }
+    .relation-node { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .relation-node .mini-icon { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 7px; font-size: 14px; }
+    .mini-icon.cluster { color: #14895a; background: var(--green-soft); }
+    .mini-icon.registry { color: var(--orange); background: var(--orange-soft); }
+    .relation-node strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .relation-node small { display: block; margin-top: 3px; color: #91a097; font-size: 10px; }
+    .relation-arrow { color: #a6b6ad; font-size: 16px; }
+    .relation-overall { margin-left: auto; padding: 5px 9px; border-radius: 999px; color: #987126; background: #fff5d8; font-size: 10px; font-weight: 650; }
+    .relation-tests { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 17px 0 13px; }
+    .relation-test { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 11px; border: 1px solid #e3eee8; border-radius: 7px; background: #fff; }
+    .relation-test > div { min-width: 0; }
+    .relation-test strong { display: block; color: #4f695c; font-size: 11px; }
+    .relation-test small { display: block; margin-top: 4px; color: #97a49e; font-size: 10px; }
+    .test-state { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; color: #a27822; font-size: 10px; }
+    .test-state i { width: 6px; height: 6px; border-radius: 50%; background: #d39c31; }
+    .relation-actions { display: flex; align-items: center; justify-content: space-between; padding-top: 11px; border-top: 1px solid #e8f1ec; }
+    .relation-actions p { margin: 0; color: #819189; font-size: 10px; }
+
+    @media (max-width: 1200px) {
+      .main { padding-right: 28px; padding-left: 28px; }
+      .details { margin-left: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">T</span>
+        <div><strong>TTP</strong><small>TEAM DELIVERY PLATFORM</small></div>
+      </div>
+      <nav class="nav">
+        <div class="nav-item"><span class="icon">▦</span>项目</div>
+        <div class="nav-item active"><span class="icon">⌘</span>基础设施连接</div>
+        <div class="nav-item"><span class="icon">◌</span>集群监控</div>
+        <div class="nav-item"><span class="icon">◷</span>操作记录</div>
+        <div class="nav-item"><span class="icon">⚙</span>空间设置</div>
+        <div class="nav-item"><span class="icon">♙</span>成员与权限</div>
+      </nav>
+      <div class="sidebar-foot"><span class="dot"></span>服务正常</div>
+    </aside>
+    <main class="main">
+      <div class="breadcrumb">工作空间&nbsp; / &nbsp;基础设施</div>
+      <div class="heading">
+        <div>
+          <h1>基础设施连接</h1>
+          <p class="subtitle">空间级连接统一维护，项目和发布环境只引用这里的连接</p>
+        </div>
+        <button class="button primary">＋&nbsp; 添加连接</button>
+      </div>
+      <div class="filters">
+        <div class="filter active">全部连接&nbsp; 2</div>
+        <div class="filter">Kubernetes 集群&nbsp; 1</div>
+        <div class="filter">镜像仓库&nbsp; 1</div>
+      </div>
+      <div class="section-label"><strong>已登记连接</strong><span>只显示当前空间的连接</span></div>
+      <div class="cards">
+        <article class="card">
+          <div class="card-head">
+            <div class="identity">
+              <span class="service-icon cluster">⌘</span>
+              <div><h2>开发集群</h2><p>cluster-389270d9 · Kubernetes</p></div>
+            </div>
+            <span class="status"><i></i>已连接</span>
+          </div>
+          <div class="details">
+            <div class="detail"><span>API 地址</span><strong>↗ https://k8s.example.com:6443</strong></div>
+            <div class="detail"><span>连接方式</span><strong>kubeconfig 已配置</strong></div>
+            <div class="detail"><span>最近检查</span><strong>2026-09-18 14:32</strong></div>
+          </div>
+          <div class="actions"><button class="action">测试连接</button><button class="action">编辑</button><button class="action more">···</button></div>
+        </article>
+        <article class="card">
+          <div class="card-head">
+            <div class="identity">
+              <span class="service-icon registry">▣</span>
+              <div><h2>公司镜像仓库</h2><p>registry.example.com · OCI Registry</p></div>
+            </div>
+            <span class="status"><i></i>已连接</span>
+          </div>
+          <div class="details">
+            <div class="detail"><span>Registry 地址</span><strong>registry.example.com</strong></div>
+            <div class="detail"><span>鉴权方式</span><strong>用户名 / 密码</strong></div>
+            <div class="detail"><span>最近检查</span><strong>2026-09-18 14:35</strong></div>
+          </div>
+          <div class="actions"><button class="action">测试连接</button><button class="action">编辑</button><button class="action more">···</button></div>
+        </article>
+      </div>
+      <div class="relation-head"><strong>发布链路验证</strong><span>按集群 × 镜像仓库组合检查</span></div>
+      <article class="relation-card">
+        <div class="relation-top">
+          <div class="relation-node"><span class="mini-icon cluster">⌘</span><div><strong>开发集群</strong><small>Kubernetes</small></div></div>
+          <span class="relation-arrow">→</span>
+          <div class="relation-node"><span class="mini-icon registry">▣</span><div><strong>公司镜像仓库</strong><small>registry.example.com</small></div></div>
+          <span class="relation-overall">关联未验证</span>
+        </div>
+        <div class="relation-tests">
+          <div class="relation-test"><div><strong>TTP / 构建器 → 镜像仓库</strong><small>登录凭证、推送临时测试镜像</small></div><span class="test-state"><i></i>未验证</span></div>
+          <div class="relation-test"><div><strong>Kubernetes 集群 → 镜像仓库</strong><small>Pod 使用 imagePullSecret 拉取测试镜像</small></div><span class="test-state"><i></i>未验证</span></div>
+        </div>
+        <div class="relation-actions"><p>只有两项都通过，项目发布链路才显示“可发布”。</p><button class="button primary">运行关联测试</button></div>
+      </article>
+      <div class="note"><b>i</b><span>连接只负责登记和连通性检查；集群监控请前往“集群监控”页面，项目设置只选择连接。</span></div>
+    </main>
+  </div>
+</body>
+</html>

@@ -8,6 +8,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -49,12 +50,28 @@ func TestKubernetesProviderCleanupEnvironmentDeletesOnlyOwnedResources(t *testin
 		_, err := client.AppsV1().Deployments(cleanupNamespace).Get(context.Background(), "owned", metav1.GetOptions{})
 		return err
 	})
+	assertNotFound("StatefulSet/owned", func() error {
+		_, err := client.AppsV1().StatefulSets(cleanupNamespace).Get(context.Background(), "owned-stateful", metav1.GetOptions{})
+		return err
+	})
+	assertNotFound("DaemonSet/owned", func() error {
+		_, err := client.AppsV1().DaemonSets(cleanupNamespace).Get(context.Background(), "owned-daemon", metav1.GetOptions{})
+		return err
+	})
 	assertNotFound("Pod/owned", func() error {
 		_, err := client.CoreV1().Pods(cleanupNamespace).Get(context.Background(), "owned-pod", metav1.GetOptions{})
 		return err
 	})
 	assertNotFound("ReplicaSet/owned", func() error {
 		_, err := client.AppsV1().ReplicaSets(cleanupNamespace).Get(context.Background(), "owned-rs", metav1.GetOptions{})
+		return err
+	})
+	assertNotFound("Job/owned", func() error {
+		_, err := client.BatchV1().Jobs(cleanupNamespace).Get(context.Background(), "owned-job", metav1.GetOptions{})
+		return err
+	})
+	assertNotFound("CronJob/owned", func() error {
+		_, err := client.BatchV1().CronJobs(cleanupNamespace).Get(context.Background(), "owned-cron", metav1.GetOptions{})
 		return err
 	})
 	assertNotFound("HPA/owned", func() error {
@@ -77,12 +94,22 @@ func TestKubernetesProviderCleanupEnvironmentDeletesOnlyOwnedResources(t *testin
 		_, err := client.CoreV1().Secrets(cleanupNamespace).Get(context.Background(), "owned-secret", metav1.GetOptions{})
 		return err
 	})
+	assertNotFound("PersistentVolumeClaim/owned", func() error {
+		_, err := client.CoreV1().PersistentVolumeClaims(cleanupNamespace).Get(context.Background(), "owned-data", metav1.GetOptions{})
+		return err
+	})
 
 	if _, err := client.AppsV1().Deployments(cleanupNamespace).Get(context.Background(), "other", metav1.GetOptions{}); err != nil {
 		t.Fatalf("resource from another target was deleted: %v", err)
 	}
+	if _, err := client.AppsV1().StatefulSets(cleanupNamespace).Get(context.Background(), "other-stateful", metav1.GetOptions{}); err != nil {
+		t.Fatalf("StatefulSet from another target was deleted: %v", err)
+	}
 	if _, err := client.CoreV1().Services(cleanupNamespace).Get(context.Background(), "other-service", metav1.GetOptions{}); err != nil {
 		t.Fatalf("service from another target was deleted: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(cleanupNamespace).Get(context.Background(), "other-data", metav1.GetOptions{}); err != nil {
+		t.Fatalf("PVC from another target was deleted: %v", err)
 	}
 }
 
@@ -149,19 +176,26 @@ func cleanupObjects(targetID string, includeOtherTarget bool) []k8sruntime.Objec
 	ownedLabels := labelsFor(targetID)
 	objects := []k8sruntime.Object{
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "owned", Namespace: cleanupNamespace, Labels: ownedLabels}},
+		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "owned-stateful", Namespace: cleanupNamespace, Labels: ownedLabels}},
+		&appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "owned-daemon", Namespace: cleanupNamespace, Labels: ownedLabels}},
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "owned-pod", Namespace: cleanupNamespace, Labels: ownedLabels}},
 		&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "owned-rs", Namespace: cleanupNamespace, Labels: ownedLabels}},
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "owned-job", Namespace: cleanupNamespace, Labels: ownedLabels}},
+		&batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: "owned-cron", Namespace: cleanupNamespace, Labels: ownedLabels}},
 		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "owned-hpa", Namespace: cleanupNamespace, Labels: ownedLabels}},
 		&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "owned-ingress", Namespace: cleanupNamespace, Labels: ownedLabels}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "owned-service", Namespace: cleanupNamespace, Labels: ownedLabels}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owned-config", Namespace: cleanupNamespace, Labels: ownedLabels}},
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "owned-secret", Namespace: cleanupNamespace, Labels: ownedLabels}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "owned-data", Namespace: cleanupNamespace, Labels: ownedLabels}},
 	}
 	if includeOtherTarget {
 		otherLabels := labelsFor(otherTargetID)
 		objects = append(objects,
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: cleanupNamespace, Labels: otherLabels}},
+			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "other-stateful", Namespace: cleanupNamespace, Labels: otherLabels}},
 			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "other-service", Namespace: cleanupNamespace, Labels: otherLabels}},
+			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "other-data", Namespace: cleanupNamespace, Labels: otherLabels}},
 		)
 	}
 	return objects

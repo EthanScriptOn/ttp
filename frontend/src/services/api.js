@@ -4,17 +4,24 @@ import {
   normalizeBranch,
   normalizeCluster,
   normalizeCommit,
-  normalizeDeploymentConfig,
+  normalizeDeploymentResource,
+  normalizeDeploymentResources,
+  normalizeNamespaceQuota,
   normalizeDeploymentTarget,
   normalizeGitCredential,
   normalizeGitAccess,
+  normalizeImageRegistryConnection,
   normalizeAuditLog,
   normalizeABExperiment,
   normalizeMetrics,
+  normalizeMonitoring,
   normalizePreparation,
   normalizePod,
   normalizePodDetail,
   normalizeProject,
+  normalizeProjectAccess,
+  normalizeProjectMember,
+  normalizeProjectRole,
   normalizeRelease,
   normalizeSpace,
   normalizeSpaceMember,
@@ -119,9 +126,103 @@ export async function getSpacePermissions() {
   return normalizeSpacePermissions(result)
 }
 
+export async function getImageRegistryConnections() {
+  const result = await request('/image-registry-connections')
+  return responseItems(result).map(normalizeImageRegistryConnection).filter((item) => item.id)
+}
+
+export async function createImageRegistryConnection(payload = {}) {
+  const body = {
+    name: asString(payload.name),
+    registry: asString(payload.registry),
+    auth_type: asString(payload.auth_type || payload.authType, 'basic'),
+    username: asString(payload.username),
+    secret: asString(payload.secret || payload.password || payload.token || payload.credential),
+  }
+  return normalizeImageRegistryConnection(await request('/image-registry-connections', { method: 'POST', body: JSON.stringify(body) }))
+}
+
+export async function updateImageRegistryConnection(connectionId, payload = {}) {
+  const body = {}
+  for (const key of ['name', 'registry', 'auth_type', 'username']) {
+    if (payload[key] !== undefined) body[key] = asString(payload[key])
+  }
+  if (payload.secret !== undefined || payload.password !== undefined || payload.token !== undefined || payload.credential !== undefined) {
+    body.secret = asString(payload.secret ?? payload.password ?? payload.token ?? payload.credential)
+  }
+  return normalizeImageRegistryConnection(await request(`/image-registry-connections/${segment(connectionId)}`, { method: 'PATCH', body: JSON.stringify(body) }))
+}
+
+export async function testImageRegistryConnection(connectionId) {
+  return normalizeImageRegistryConnection(await request(`/image-registry-connections/${segment(connectionId)}/test`, { method: 'POST' }))
+}
+
+export async function deleteImageRegistryConnection(connectionId) {
+  return request(`/image-registry-connections/${segment(connectionId)}`, { method: 'DELETE' })
+}
+
 export async function getProjects() {
   const result = await request('/projects')
   return responseItems(result).map(normalizeProject).filter((item) => item.id)
+}
+
+export async function getProjectAccess(projectId) {
+  return normalizeProjectAccess(await request(`/projects/${segment(projectId)}/access`))
+}
+
+export async function getProjectMembers(projectId) {
+  const result = await request(`/projects/${segment(projectId)}/members`)
+  return responseItems(result).map(normalizeProjectMember).filter((item) => item.user_id && item.username)
+}
+
+export async function createProjectMember(projectId, payload = {}) {
+  const body = {
+    user_id: Number(payload.user_id || payload.userId || 0),
+    role_id: asString(payload.role_id || payload.roleId),
+    role_key: asString(payload.role_key || payload.roleKey),
+  }
+  return normalizeProjectMember(await request(`/projects/${segment(projectId)}/members`, { method: 'POST', body: JSON.stringify(body) }))
+}
+
+export async function updateProjectMember(projectId, userId, payload = {}) {
+  const body = {
+    role_id: asString(payload.role_id || payload.roleId),
+    role_key: asString(payload.role_key || payload.roleKey),
+  }
+  return normalizeProjectMember(await request(`/projects/${segment(projectId)}/members/${segment(userId)}`, { method: 'PATCH', body: JSON.stringify(body) }))
+}
+
+export async function removeProjectMember(projectId, userId) {
+  return request(`/projects/${segment(projectId)}/members/${segment(userId)}`, { method: 'DELETE' })
+}
+
+export async function getProjectRoles() {
+  const result = await request('/space/project-roles')
+  return {
+    roles: responseItems(result).map(normalizeProjectRole).filter((item) => item.id || item.key),
+    permissions: Array.isArray(result?.permissions) ? result.permissions : [],
+  }
+}
+
+export async function createProjectRole(payload = {}) {
+  const body = {
+    name: asString(payload.name),
+    description: asString(payload.description),
+    permissions: Array.isArray(payload.permissions) ? payload.permissions.map(asString).filter(Boolean) : [],
+  }
+  return normalizeProjectRole(await request('/space/project-roles', { method: 'POST', body: JSON.stringify(body) }))
+}
+
+export async function updateProjectRole(roleId, payload = {}) {
+  const body = {}
+  if (payload.name !== undefined) body.name = asString(payload.name)
+  if (payload.description !== undefined) body.description = asString(payload.description)
+  if (payload.permissions !== undefined) body.permissions = Array.isArray(payload.permissions) ? payload.permissions.map(asString).filter(Boolean) : []
+  return normalizeProjectRole(await request(`/space/project-roles/${segment(roleId)}`, { method: 'PATCH', body: JSON.stringify(body) }))
+}
+
+export async function deleteProjectRole(roleId) {
+  return request(`/space/project-roles/${segment(roleId)}`, { method: 'DELETE' })
 }
 
 export async function createProject(payload) {
@@ -144,9 +245,7 @@ export async function createDeploymentTarget(projectId, payload = {}) {
     stage: asString(payload.stage),
     sort_order: Number(payload.sort_order),
     cluster_id: asString(payload.cluster_id),
-    namespace: asString(payload.namespace),
-    replicas: Number(payload.replicas),
-    container_port: Number(payload.container_port),
+    resource_quota: normalizeNamespaceQuota(payload.resource_quota),
     deploy_strategy: asString(payload.deploy_strategy),
     enabled: payload.enabled === undefined ? true : Boolean(payload.enabled),
   }
@@ -155,6 +254,7 @@ export async function createDeploymentTarget(projectId, payload = {}) {
 
 export async function updateDeploymentTarget(projectId, targetId, payload = {}) {
   const body = { ...payload }
+  if (payload.resource_quota !== undefined) body.resource_quota = normalizeNamespaceQuota(payload.resource_quota)
   return normalizeDeploymentTarget(await request(`/projects/${segment(projectId)}/deployment-targets/${segment(targetId)}`, { method: 'PATCH', body: JSON.stringify(body) }))
 }
 
@@ -162,28 +262,46 @@ export async function deleteDeploymentTarget(projectId, targetId) {
   return request(`/projects/${segment(projectId)}/deployment-targets/${segment(targetId)}`, { method: 'DELETE' })
 }
 
-export async function getDeploymentConfig(projectId, format = '') {
-  const suffix = format ? `?format=${encodeURIComponent(asString(format))}` : ''
-  const result = await request(`/projects/${segment(projectId)}/deployment-config${suffix}`)
-  return normalizeDeploymentConfig(result)
+export async function getDeploymentResources(projectId) {
+  const result = await request(`/projects/${segment(projectId)}/deployment-resources`)
+  return normalizeDeploymentResources(result)
 }
 
-export async function saveDeploymentConfig(projectId, payload = {}) {
+export async function createDeploymentResource(projectId, payload = {}) {
   const body = {
-    manifest: asString(payload.manifest),
+    name: asString(payload.name),
+    path: asString(payload.path),
     format: asString(payload.format),
+    content: asString(payload.content),
+    sort_order: Number(payload.sort_order || 0),
   }
-  return normalizeDeploymentConfig(await request(`/projects/${segment(projectId)}/deployment-config`, { method: 'PUT', body: JSON.stringify(body) }))
+  return normalizeDeploymentResource(await request(`/projects/${segment(projectId)}/deployment-resources`, { method: 'POST', body: JSON.stringify(body) }))
 }
 
-export async function validateDeploymentConfig(projectId, payload = {}) {
-  const body = { manifest: asString(payload.manifest), format: asString(payload.format) }
-  return normalizeDeploymentConfig(await request(`/projects/${segment(projectId)}/deployment-config/validate`, { method: 'POST', body: JSON.stringify(body) }))
+export async function updateDeploymentResource(projectId, resourceId, payload = {}) {
+  const body = {
+    name: asString(payload.name),
+    path: asString(payload.path),
+    format: asString(payload.format),
+    content: asString(payload.content),
+    sort_order: Number(payload.sort_order || 0),
+  }
+  return normalizeDeploymentResource(await request(`/projects/${segment(projectId)}/deployment-resources/${segment(resourceId)}`, { method: 'PUT', body: JSON.stringify(body) }))
 }
 
-export async function convertDeploymentConfig(projectId, payload = {}) {
-  const body = { manifest: asString(payload.manifest), format: asString(payload.format) }
-  return normalizeDeploymentConfig(await request(`/projects/${segment(projectId)}/deployment-config/convert`, { method: 'POST', body: JSON.stringify(body) }))
+export async function deleteDeploymentResource(projectId, resourceId) {
+  return request(`/projects/${segment(projectId)}/deployment-resources/${segment(resourceId)}`, { method: 'DELETE' })
+}
+
+export async function validateDeploymentResource(projectId, payload = {}) {
+  const body = {
+    name: asString(payload.name),
+    path: asString(payload.path),
+    format: asString(payload.format),
+    content: asString(payload.content),
+    sort_order: Number(payload.sort_order || 0),
+  }
+  return normalizeDeploymentResource(await request(`/projects/${segment(projectId)}/deployment-resources/validate`, { method: 'POST', body: JSON.stringify(body) }))
 }
 
 export async function getCommits(projectId, branch = 'main') {
@@ -368,6 +486,15 @@ export async function testCluster(clusterId) {
   return normalizeClusterResult(result)
 }
 
+export async function installClusterMonitoring(clusterId, retentionDays = 7) {
+  const result = await request(`/clusters/${segment(clusterId)}/monitoring/install?retention_days=${encodeURIComponent(retentionDays)}`, { method: 'POST' })
+  return {
+    ...result,
+    cluster: normalizeCluster(result.cluster || result.data?.cluster || result),
+    monitoring: normalizeMonitoring(result.monitoring || result.data?.monitoring),
+  }
+}
+
 function normalizeClusterResult(value) {
   const source = value && typeof value === 'object' ? value : {}
   return {
@@ -375,6 +502,7 @@ function normalizeClusterResult(value) {
     cluster: normalizeCluster(source.cluster || source.data?.cluster || source),
     connected: Boolean(source.connected),
     connection: source.connection || source.data?.connection || null,
+    monitoring: normalizeMonitoring(source.monitoring || source.data?.monitoring),
     message: asString(source.message),
   }
 }

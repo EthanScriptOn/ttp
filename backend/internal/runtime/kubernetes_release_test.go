@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -37,6 +39,7 @@ kind: Deployment
 metadata:
   name: checkout
 spec:
+  replicas: 2
   selector:
     matchLabels:
       app: checkout
@@ -97,6 +100,7 @@ spec:
 	deployment.CommitSHA = "fedcba654321"
 	deployment.Image = "registry.invalid/checkout:fedcba6543"
 	deployment.Replicas = 1
+	deployment.Manifest = strings.Replace(deployment.Manifest, "replicas: 2", "replicas: 3", 1)
 	if err := provider.DeployRelease(context.Background(), deployment); err != nil {
 		t.Fatal(err)
 	}
@@ -104,8 +108,281 @@ spec:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Spec.Replicas == nil || *updated.Spec.Replicas != 1 || updated.Spec.Template.Spec.Containers[0].Image != deployment.Image {
+	if updated.Spec.Replicas == nil || *updated.Spec.Replicas != 3 || updated.Spec.Template.Spec.Containers[0].Image != deployment.Image {
 		t.Fatalf("existing deployment was not updated: %#v", updated.Spec)
+	}
+}
+
+func TestKubernetesProviderDeployReleaseAppliesIndependentResourceFiles(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	markDeploymentsReadyOnGet(client)
+	provider := NewKubernetesProvider()
+	if err := provider.RegisterClient("cluster-files", client); err != nil {
+		t.Fatal(err)
+	}
+	deployment := ReleaseDeployment{
+		ClusterID: "cluster-files", Namespace: "lab", ProjectID: "checkout", ReleaseID: "release-files",
+		CommitSHA: "abcdef123456", Image: "registry.invalid/checkout:abcdef1234", Replicas: 1, Strategy: "rolling",
+		ResourceFiles: []string{
+			"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: checkout-settings\ndata:\n  APP_ENV: dev\n",
+			"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: checkout\nspec:\n  selector:\n    matchLabels:\n      app: checkout\n  template:\n    metadata:\n      labels:\n        app: checkout\n    spec:\n      containers:\n        - name: api\n          image: old.invalid/checkout:old\n",
+		},
+	}
+	if err := provider.DeployRelease(context.Background(), deployment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("lab").Get(context.Background(), "checkout-settings", metav1.GetOptions{}); err != nil {
+		t.Fatalf("config map from resource file was not applied: %v", err)
+	}
+	if _, err := client.AppsV1().Deployments("lab").Get(context.Background(), "checkout", metav1.GetOptions{}); err != nil {
+		t.Fatalf("deployment from resource file was not applied: %v", err)
+	}
+}
+
+func TestKubernetesProviderDeployReleaseManagesPersistentVolumeClaim(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	provider := NewKubernetesProvider(WithKubernetesRolloutWait(false))
+	if err := provider.RegisterClient("cluster-a", client); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: checkout-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+spec:
+  selector:
+    matchLabels:
+      app: checkout
+  template:
+    metadata:
+      labels:
+        app: checkout
+    spec:
+      containers:
+        - name: api
+          image: old.invalid/checkout:old
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: checkout-data
+`
+	deployment := ReleaseDeployment{
+		ClusterID: "cluster-a", Namespace: "lab", ProjectID: "checkout", TargetID: "target-dev", ReleaseID: "release-pvc-1",
+		CommitSHA: "abcdef123456", Image: "registry.invalid/checkout:abcdef1234", Replicas: 1,
+		Strategy: "rolling", Manifest: manifest, ManifestFormat: "yaml",
+	}
+	if err := provider.DeployRelease(context.Background(), deployment); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := client.CoreV1().PersistentVolumeClaims("lab").Get(context.Background(), "checkout-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("PVC was not created: %v", err)
+	}
+	storage := claim.Spec.Resources.Requests[corev1.ResourceStorage]
+	if got := storage.String(); got != "2Gi" {
+		t.Fatalf("PVC storage = %q, want 2Gi", got)
+	}
+	if claim.Labels[ProjectLabelKey] != deployment.ProjectID || claim.Labels[targetLabelKey] != deployment.TargetID || claim.Labels[managedByLabelKey] != managedByLabelValue {
+		t.Fatalf("PVC ownership labels = %#v", claim.Labels)
+	}
+
+	deployment.ReleaseID = "release-pvc-2"
+	deployment.CommitSHA = "fedcba654321"
+	deployment.Image = "registry.invalid/checkout:fedcba6543"
+	deployment.Manifest = strings.Replace(manifest, "storage: 2Gi", "storage: 4Gi", 1)
+	if err := provider.DeployRelease(context.Background(), deployment); err != nil {
+		t.Fatal(err)
+	}
+	resized, err := client.CoreV1().PersistentVolumeClaims("lab").Get(context.Background(), "checkout-data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("resized PVC was not readable: %v", err)
+	}
+	resizedStorage := resized.Spec.Resources.Requests[corev1.ResourceStorage]
+	if got := resizedStorage.String(); got != "4Gi" {
+		t.Fatalf("resized PVC storage = %q, want 4Gi", got)
+	}
+
+	deployment.ReleaseID = "release-pvc-3"
+	deployment.Manifest = strings.Replace(manifest, "storage: 2Gi", "storage: 1Gi", 1)
+	if err := provider.DeployRelease(context.Background(), deployment); !errors.Is(err, ErrInvalidKubernetesInput) || !strings.Contains(err.Error(), "cannot be reduced") {
+		t.Fatalf("PVC shrink error = %v, want a guarded invalid input error", err)
+	}
+}
+
+func TestKubernetesProviderDeployReleaseAppliesAdditionalWorkloads(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	provider := NewKubernetesProvider(WithKubernetesRolloutWait(false))
+	if err := provider.RegisterClient("cluster-a", client); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: checkout-stateful
+spec:
+  serviceName: checkout
+  replicas: 3
+  selector:
+    matchLabels:
+      app: checkout-stateful
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 2Gi
+  template:
+    metadata:
+      labels:
+        app: checkout-stateful
+    spec:
+      containers:
+        - name: api
+          image: old.invalid/checkout:old
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: checkout-agent
+spec:
+  selector:
+    matchLabels:
+      app: checkout-agent
+  template:
+    metadata:
+      labels:
+        app: checkout-agent
+    spec:
+      containers:
+        - name: agent
+          image: old.invalid/checkout:old
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: checkout-migrate
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: old.invalid/checkout:old
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: checkout-cleanup
+spec:
+  schedule: "*/5 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: cleanup
+              image: old.invalid/checkout:old
+`
+	deployment := ReleaseDeployment{
+		ClusterID: "cluster-a", Namespace: "lab", ProjectID: "checkout", TargetID: "target-dev", ReleaseID: "release-workloads",
+		CommitSHA: "abcdef123456", Image: "registry.invalid/checkout:abcdef1234", Replicas: 2,
+		Strategy: "rolling", Manifest: manifest, ManifestFormat: "yaml",
+	}
+	if err := provider.DeployRelease(context.Background(), deployment); err != nil {
+		t.Fatal(err)
+	}
+	statefulSet, err := client.AppsV1().StatefulSets("lab").Get(context.Background(), "checkout-stateful", metav1.GetOptions{})
+	if err != nil || statefulSet.Spec.Replicas == nil || *statefulSet.Spec.Replicas != 3 {
+		t.Fatalf("stateful set did not keep manifest replicas: %v, %#v", err, statefulSet)
+	}
+	if statefulSet.Spec.VolumeClaimTemplates[0].Labels[targetLabelKey] != deployment.TargetID {
+		t.Fatalf("stateful set PVC template target label = %q", statefulSet.Spec.VolumeClaimTemplates[0].Labels[targetLabelKey])
+	}
+	daemonSet, err := client.AppsV1().DaemonSets("lab").Get(context.Background(), "checkout-agent", metav1.GetOptions{})
+	if err != nil || daemonSet.Spec.Template.Spec.Containers[0].Image != deployment.Image {
+		t.Fatalf("daemon set image = %q, err=%v", daemonSet.Spec.Template.Spec.Containers[0].Image, err)
+	}
+	job, err := client.BatchV1().Jobs("lab").Get(context.Background(), "checkout-migrate", metav1.GetOptions{})
+	if err != nil || job.Spec.Template.Spec.Containers[0].Image != deployment.Image {
+		t.Fatalf("job image = %q, err=%v", job.Spec.Template.Spec.Containers[0].Image, err)
+	}
+	cronJob, err := client.BatchV1().CronJobs("lab").Get(context.Background(), "checkout-cleanup", metav1.GetOptions{})
+	if err != nil || cronJob.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Image != deployment.Image {
+		t.Fatalf("cron job image = %q, err=%v", cronJob.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Image, err)
+	}
+	if cronJob.Spec.JobTemplate.Labels[targetLabelKey] != deployment.TargetID {
+		t.Fatalf("cron job template target label = %q", cronJob.Spec.JobTemplate.Labels[targetLabelKey])
+	}
+}
+
+func TestKubernetesProviderDeployReleaseInjectsImagePullSecret(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	provider := NewKubernetesProvider(WithKubernetesRolloutWait(false))
+	if err := provider.RegisterClient("cluster-a", client); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+spec:
+  selector:
+    matchLabels:
+      app: checkout
+  template:
+    metadata:
+      labels:
+        app: checkout
+    spec:
+      imagePullSecrets:
+        - name: existing-secret
+      containers:
+        - name: api
+          image: old.invalid/checkout:old
+`
+	credential := &ImagePullCredential{ConnectionID: "acr-main", Registry: "registry.example.com", AuthType: "basic", Username: "robot", Secret: "password", SecretName: "ttp-registry-acr-main"}
+	if err := provider.DeployRelease(context.Background(), ReleaseDeployment{ClusterID: "cluster-a", Namespace: "lab", ProjectID: "checkout", ReleaseID: "release-1", CommitSHA: "abcdef123456", Image: "registry.example.com/team/checkout@sha256:" + strings.Repeat("a", 64), Replicas: 1, Strategy: "rolling", Manifest: manifest, ManifestFormat: "yaml", ImagePullCredential: credential}); err != nil {
+		t.Fatal(err)
+	}
+	secret, err := client.CoreV1().Secrets("lab").Get(context.Background(), credential.SecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]map[string]map[string]string
+	if err := json.Unmarshal(secret.Data[corev1.DockerConfigJsonKey], &config); err != nil {
+		t.Fatal(err)
+	}
+	if config["auths"][credential.Registry]["auth"] != base64.StdEncoding.EncodeToString([]byte("robot:password")) {
+		t.Fatalf("unexpected docker auth config: %#v", config)
+	}
+	deployed, err := client.AppsV1().Deployments("lab").Get(context.Background(), "checkout", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, reference := range deployed.Spec.Template.Spec.ImagePullSecrets {
+		seen[reference.Name] = true
+	}
+	if !seen[credential.SecretName] || !seen["existing-secret"] {
+		t.Fatalf("imagePullSecrets = %#v", deployed.Spec.Template.Spec.ImagePullSecrets)
 	}
 }
 
@@ -369,9 +646,10 @@ metadata:
 	}
 }
 
-func TestKubernetesProviderRejectsZeroReplicas(t *testing.T) {
-	provider := NewKubernetesProvider()
-	if err := provider.RegisterClient("cluster-a", fake.NewSimpleClientset()); err != nil {
+func TestKubernetesProviderAllowsManifestOwnedReplicas(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	provider := NewKubernetesProvider(WithKubernetesRolloutWait(false))
+	if err := provider.RegisterClient("cluster-a", client); err != nil {
 		t.Fatal(err)
 	}
 	err := provider.DeployRelease(context.Background(), ReleaseDeployment{
@@ -396,8 +674,15 @@ spec:
           image: old.invalid/checkout:old
 `, ManifestFormat: "yaml",
 	})
-	if !errors.Is(err, ErrInvalidKubernetesInput) {
-		t.Fatalf("zero replicas error = %v, want ErrInvalidKubernetesInput", err)
+	if err != nil {
+		t.Fatalf("release should not require target replicas: %v", err)
+	}
+	deployment, err := client.AppsV1().Deployments("lab").Get(context.Background(), "checkout", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deployment.Spec.Replicas != nil {
+		t.Fatalf("replicas should be left to the manifest/defaulting, got %d", *deployment.Spec.Replicas)
 	}
 }
 

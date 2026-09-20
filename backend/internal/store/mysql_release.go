@@ -133,6 +133,16 @@ func (s *MySQL) loadRelease(ctx context.Context, row releaseRecordRow) (release.
 		Message: row.Message, Error: row.Error, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		StartedAt: cloneTimePtr(row.StartedAt), FinishedAt: cloneTimePtr(row.FinishedAt),
 	}
+	if row.CreatedBy != nil {
+		item.CreatedBy = *row.CreatedBy
+		var creator userRow
+		if err := s.db.WithContext(ctx).First(&creator, item.CreatedBy).Error; err == nil {
+			item.CreatedByName = strings.TrimSpace(creator.DisplayName)
+			if item.CreatedByName == "" {
+				item.CreatedByName = strings.TrimSpace(creator.Username)
+			}
+		}
+	}
 	if strings.TrimSpace(row.ImageRef) != "" && strings.TrimSpace(row.ImageDigest) != "" && strings.TrimSpace(row.ImageCommitSHA) != "" {
 		builtAt := row.UpdatedAt.UTC()
 		if row.ImageBuiltAt != nil {
@@ -206,6 +216,10 @@ func (s *MySQL) SaveRelease(ctx context.Context, item release.Release) error {
 		} else if row.SpaceID != item.SpaceID || row.ProjectID != item.ProjectID {
 			return fmt.Errorf("release %s belongs to another project or space", item.ID)
 		}
+		if item.CreatedBy != 0 {
+			createdBy := item.CreatedBy
+			row.CreatedBy = &createdBy
+		}
 		row.ReleaseName = item.Name
 		row.SourceRepositoryID = item.RepositoryID
 		row.SourceBranch = item.Branch
@@ -249,12 +263,18 @@ func (s *MySQL) SaveRelease(ctx context.Context, item release.Release) error {
 			if err := tx.Select("*").Create(&row).Error; err != nil {
 				return err
 			}
-		} else if err := tx.Model(&releaseRecordRow{}).Where("id = ?", item.ID).Updates(map[string]any{
-			"release_name": row.ReleaseName, "source_repository_id": row.SourceRepositoryID, "source_branch": row.SourceBranch, "release_fingerprint": row.ReleaseFingerprint,
-			"strategy": row.Strategy, "stable_percent": row.StablePercent, "candidate_percent": row.CandidatePercent, "blue_percent": row.BluePercent, "green_percent": row.GreenPercent,
-			"status": row.Status, "progress": row.Progress, "stage": row.Stage, "message": row.Message, "error": row.Error, "image_ref": row.ImageRef, "image_digest": row.ImageDigest, "image_commit_sha": row.ImageCommitSHA, "image_built_at": row.ImageBuiltAt, "started_at": row.StartedAt, "finished_at": row.FinishedAt, "published_at": row.PublishedAt, "updated_at": row.UpdatedAt,
-		}).Error; err != nil {
-			return err
+		} else {
+			updates := map[string]any{
+				"release_name": row.ReleaseName, "source_repository_id": row.SourceRepositoryID, "source_branch": row.SourceBranch, "release_fingerprint": row.ReleaseFingerprint,
+				"strategy": row.Strategy, "stable_percent": row.StablePercent, "candidate_percent": row.CandidatePercent, "blue_percent": row.BluePercent, "green_percent": row.GreenPercent,
+				"status": row.Status, "progress": row.Progress, "stage": row.Stage, "message": row.Message, "error": row.Error, "image_ref": row.ImageRef, "image_digest": row.ImageDigest, "image_commit_sha": row.ImageCommitSHA, "image_built_at": row.ImageBuiltAt, "started_at": row.StartedAt, "finished_at": row.FinishedAt, "published_at": row.PublishedAt, "updated_at": row.UpdatedAt,
+			}
+			if item.CreatedBy != 0 {
+				updates["created_by"] = row.CreatedBy
+			}
+			if err := tx.Model(&releaseRecordRow{}).Where("id = ?", item.ID).Updates(updates).Error; err != nil {
+				return err
+			}
 		}
 
 		if err := s.saveReleaseCommits(tx, item); err != nil {

@@ -9,15 +9,17 @@ metadata:
   name: ttp-runtime
   namespace: ttp-system
 ---
-# Replace change-me with one actual target namespace before applying.
+# Namespace-scoped permissions used after TTP creates an environment
+# namespace. TTP automatically creates a RoleBinding to this ClusterRole in
+# each generated namespace, instead of requiring operators to edit this file
+# for every environment.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
-  name: ttp-runtime
-  namespace: change-me
+  name: ttp-runtime-namespace-access
 rules:
   - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "secrets", "events"]
+    resources: ["pods", "services", "configmaps", "secrets", "events", "persistentvolumeclaims", "resourcequotas", "limitranges"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
@@ -26,7 +28,10 @@ rules:
     resources: ["pods/exec"]
     verbs: ["create"]
   - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
@@ -35,21 +40,77 @@ rules:
     resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
+# Bootstrap permissions for creating TTP-owned namespaces and binding the
+# runtime ServiceAccount to ttp-runtime-namespace-access inside those
+# namespaces. The application code refuses to adopt namespaces or RoleBindings
+# without matching TTP ownership labels.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRole
 metadata:
-  name: ttp-runtime
-  namespace: change-me
+  name: ttp-runtime-namespace-manager
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["ttp-runtime-namespace-access"]
+    verbs: ["bind"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ttp-runtime-namespace-manager
 subjects:
   - kind: ServiceAccount
     name: ttp-runtime
     namespace: ttp-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: ttp-runtime
+  kind: ClusterRole
+  name: ttp-runtime-namespace-manager
 ---
-# Read-only cluster resources are intentionally separate from namespaced write access.
+# The monitoring installer targets only the ttp-monitoring namespace plus its
+# two read-only exporter ClusterRoles. Kubernetes ClusterRole rules for
+# namespaced resources are cluster-wide, so review this block if the control
+# plane must not have namespaced write access outside ttp-monitoring.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ttp-runtime-monitoring-manager
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "configmaps", "persistentvolumeclaims", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["ttp-prometheus", "ttp-kube-state-metrics"]
+    verbs: ["bind", "escalate"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ttp-runtime-monitoring-manager
+subjects:
+  - kind: ServiceAccount
+    name: ttp-runtime
+    namespace: ttp-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ttp-runtime-monitoring-manager
+---
+# Read-only cluster resources are intentionally separate from namespace write
+# access.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -57,9 +118,6 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["nodes", "pods"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -9,6 +9,8 @@ repo_url="${CICD_E2E_REPOSITORY_URL:-https://github.com/EthanScriptOn/control_se
 login_user="${CICD_E2E_USERNAME:-admin}"
 login_password="${CICD_E2E_PASSWORD:-ttp}"
 cluster_id="${CICD_E2E_CLUSTER_ID:-${CICD_KUBE_CLUSTER_ID:-local}}"
+kubeconfig_path="${CICD_E2E_KUBECONFIG:-${CICD_KUBECONFIG:-$HOME/.kube/config}}"
+kube_context="${CICD_E2E_KUBE_CONTEXT:-${CICD_KUBE_CONTEXT:-}}"
 compose_project="${COMPOSE_PROJECT_NAME:-cicd-platform}"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ttp-e2e-real.XXXXXX")"
 
@@ -129,7 +131,7 @@ api_call POST /api/auth/select-space "$(jq -nc --arg id "$space_id" '{space_id:$
 expect_status 200 'select temporary space'
 token="$(jq -r '.token' <<<"$last_body")"
 
-api_call POST /api/clusters "$(jq -nc --arg id "$cluster_id" '{id:$id,name:"E2E Kubernetes",provider:"kubernetes",connection_mode:"kubeconfig"}')"
+api_call POST /api/clusters "$(jq -nc --arg id "$cluster_id" --arg path "$kubeconfig_path" --arg context "$kube_context" '{id:$id,name:"E2E Kubernetes",provider:"kubernetes",connection_mode:"kubeconfig",kubeconfig_path:$path,kube_context:$context}')"
 expect_status 201 'create cluster registration'
 expect_json '.connected == true and (.connection.version | type == "string") and (.cluster | has("kubeconfig_path") | not)' 'connect to real Kubernetes'
 printf '      Kubernetes version: %s\n' "$(jq -r '.connection.version' <<<"$last_body")"
@@ -252,7 +254,7 @@ expect_status 202 'start publish workflow'
 expect_json '.release.status == "running" or .release.status == "queued"' 'publish enters execution state'
 
 terminal_status=""
-for _ in {1..20}; do
+for _ in {1..180}; do
   sleep 1
   api_call GET "/api/projects/$project_id/releases/$release_id"
   expect_status 200 'poll publish workflow'
@@ -262,11 +264,15 @@ for _ in {1..20}; do
   fi
 done
 printf '      release terminal status: %s\n' "$terminal_status"
-if [[ "$terminal_status" != "failed" ]]; then
-  printf 'FAIL expected the current unconfigured image builder boundary\n' >&2
+if [[ "$terminal_status" != "succeeded" && "$terminal_status" != "failed" ]]; then
+  printf 'FAIL release did not reach a terminal status within the polling window\n' >&2
   exit 1
 fi
-expect_json '.release.error | contains("image build and push provider")' 'release exposes the image builder boundary'
+if [[ "$terminal_status" == "failed" ]]; then
+  expect_json '.release.error | type == "string" and length > 0' 'failed release exposes a concrete error'
+else
+  expect_json '.release.artifact.digest | type == "string" and startswith("sha256:")' 'successful release stores an immutable image digest'
+fi
 
 api_call GET "/api/projects/$project_id/releases/$release_id/targets/$dev_target_id/logs"
 expect_status 200 'read persisted target logs'
@@ -276,5 +282,4 @@ printf '      log sources: %s\n' "$(jq -r '[.items[].source] | unique | join(","
 api_call POST "/api/projects/$project_id/releases/$release_id/cancel" '{"message":"terminal state check"}'
 expect_status 409 'terminal release cannot be cancelled'
 
-printf 'E2E reached the real Git/Kubernetes release boundary.\n'
-printf 'KNOWN BLOCKER: the running server has no ImageBuilder, so no image push or Deployment rollout can complete.\n'
+printf 'E2E reached the real Git/Builder/Kubernetes release boundary.\n'

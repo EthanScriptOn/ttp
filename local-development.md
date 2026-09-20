@@ -4,7 +4,7 @@
 
 ## 目录和服务
 
-- `migrations/001_init.sql` 至 `migrations/008_drop_project_build_configs.sql`：MySQL 8.0 初始化和增量 schema，其中 `007` 保存发布使用的不可变镜像摘要，`008` 清理已移除的项目级构建配置表。Compose 首次创建 MySQL 数据卷时按文件名顺序自动执行，后端启动时也会补齐表结构并执行已移除表的清理。
+- `migrations/001_init.sql` 至 `migrations/012_deployment_namespace_quotas.sql`：MySQL 8.0 初始化和增量 schema，其中 `007` 保存发布使用的不可变镜像摘要，`008` 清理已移除的项目级构建配置表，`011` 保存逐文件 Kubernetes 资源配置，`012` 保存环境资源配额。Compose 首次创建 MySQL 数据卷时按文件名顺序自动执行，后端启动时也会补齐表结构并执行已移除表的清理。
 - `deploy/docker-compose.yml`：默认启动 MySQL；Redis 通过 Compose profile `cache` 可选启动。
 - Compose 默认从国内公开镜像代理 `docker.m.daocloud.io` 拉取 MySQL 和 Redis。
 - 默认端口：MySQL `3306`，Redis `6379`。
@@ -22,12 +22,8 @@
 
 ```bash
 cd "/Users/yuebuy/GolandProjects/android-reverse-lab-control/cicd-platform"
-export MYSQL_DATABASE=cicd_platform
-export MYSQL_USER=cicd_app
-export MYSQL_ROOT_PASSWORD="$(openssl rand -hex 24)"
-export MYSQL_PASSWORD="$(openssl rand -hex 24)"
-export CICD_JWT_SECRET="$(openssl rand -hex 32)"
-export CICD_GIT_CREDENTIAL_KEY="$(openssl rand -hex 32)"
+cp .env.example .env
+# 编辑 .env，至少替换数据库密码、CICD_JWT_SECRET，并设置 CICD_KUBE_CLUSTER_ID。
 
 docker compose -p "${COMPOSE_PROJECT_NAME:-cicd-platform}" -f deploy/docker-compose.yml up -d mysql
 docker compose -p "${COMPOSE_PROJECT_NAME:-cicd-platform}" -f deploy/docker-compose.yml ps
@@ -57,7 +53,7 @@ scripts/verify-local-db.sh
 
 ## 一键启动
 
-准备好 MySQL 账号、JWT 密钥、凭证加密密钥和 Kubernetes 集群标识后，在项目根目录执行：
+准备好 MySQL 账号、JWT 密钥和 Kubernetes 集群标识后，在项目根目录执行：
 
 ```bash
 export MYSQL_DATABASE=cicd_platform
@@ -65,12 +61,11 @@ export MYSQL_USER=cicd_app
 export MYSQL_ROOT_PASSWORD='本地 MySQL root 密码'
 export MYSQL_PASSWORD='本地 MySQL 应用密码'
 export CICD_JWT_SECRET='本地 JWT 密钥'
-export CICD_GIT_CREDENTIAL_KEY='本地凭证加密密钥'
 export CICD_KUBE_CLUSTER_ID=local
 scripts/start-local.sh
 ```
 
-脚本会等待 MySQL 健康后，同时启动后端 `8790` 和前端 `5173`。按 `Ctrl-C` 会停止本次启动的前后端进程，但不会删除 MySQL 数据卷。空库首次连接时自动创建 `admin` / `ttp`；已有用户密码不会被启动过程覆盖。
+脚本会自动读取根目录 `.env`（也可以通过 `TTP_ENV_FILE` 指定），等待 MySQL 健康后同时启动后端 `8790` 和前端 `5173`。首次启动会在项目根目录的 `.runtime/credential.key` 初始化项目 Git Token 和镜像仓库凭证的加密密钥，后续重启自动复用。`CICD_GIT_CREDENTIAL_KEY` 只用于初始化缺失的 key 文件；key 文件存在时始终以文件为准，避免旧 shell 环境变量覆盖已保存的凭证。按 `Ctrl-C` 会停止本次启动的前后端进程，但不会删除 MySQL 数据卷。空库首次连接时自动创建 `admin` / `ttp`；已有用户密码不会被启动过程覆盖。
 
 如需本机完成镜像构建，先按 [`deploy/builder/README.md`](deploy/builder/README.md) 安装并启动 BuildKit，设置 Builder 的私有 registry 凭证映射，再设置 `TTP_BUILDER_ENABLED=true` 后运行相同脚本。脚本会启动 `ttp-builder` 作为独立进程；TTP API 不会获得镜像仓库密码。
 
@@ -116,17 +111,32 @@ API 请求应始终先完成身份认证，再固定一个空间上下文；空�
 8. `POST /api/projects/{project_id}/releases/{release_id}/publish`：推进发布状态。发布进入运行态后应视为不可变，并写入 `audit_logs`。
 9. `GET /api/audit-logs?limit=100`：读取当前空间的操作记录；服务端按 token 中的空间过滤，不能通过参数读取其他空间。
 
-## 部署配置编辑器
+## Kubernetes 资源文件编辑器
 
-项目详情里的“部署配置”页面直接编辑 Kubernetes 原生 YAML/JSON，不要求项目里存在 Helm Chart。
+项目详情里的“部署配置”页面维护 Kubernetes 资源文件列表，不要求项目里存在 Helm Chart。
 
-- 空项目没有部署配置。用户必须显式保存合法的 Kubernetes Manifest，发布时读取保存的配置版本。
-- 一个编辑器可以放多份资源，YAML 文档之间用 `---` 分隔；切换到 JSON 时，多份资源会转换成 JSON 数组，不会丢掉后面的文档。
-- “检查配置”会先做浏览器端检查，再由服务端检查语法、资源身份、重复资源、大小上限和项目命名空间。保存成功后版本号递增，后续发布读取该版本。
-- 项目命名空间是边界：带 `metadata.namespace` 的资源必须和项目命名空间一致；集群级资源可以不填写 namespace，但真实集群权限仍应由 Kubernetes RBAC 控制。
-- API：`GET /api/projects/{project_id}/deployment-config` 读取，`PUT` 保存，`POST .../validate` 校验，`POST .../convert` 转换格式。所有接口都继承当前 JWT 的空间和项目权限。
+- 每个文件只能包含一个 Kubernetes 对象，文件内容可以直接保存为 `.yaml` 或 `.json` 后使用 `kubectl apply -f`。
+- 文件通过 `GET/POST /api/projects/{project_id}/deployment-resources` 列出和创建，通过 `PUT/DELETE .../{resource_id}` 单独保存或删除，也可以调用 `POST .../validate` 先校验。
+- 服务端会检查语法、资源身份、文件大小、项目命名空间和集群级资源边界；发布时按列表逐文件应用，不再拼接多文档内容。
+- 当前发布器会对已适配的常见 namespaced 资源执行 TTP 镜像、环境变量和归属标签注入；列表中未适配的资源会明确标记并在发布校验阶段拒绝。
 
-这个编辑器解决的是“配置怎么写、怎么保存、发布时用哪一版”的问题。真实 Kubernetes provider 当前只处理已适配的常见资源并等待 Deployment rollout；不支持的资源、空 Manifest、镜像构建缺失或集群能力缺失都会让发布失败，不会返回伪造成功。Secret 会随项目配置保存，生产环境应使用正式的加密存储或外部密钥管理。
+这个编辑器解决的是“资源文件怎么写、怎么保存、发布时按什么顺序应用”的问题。Secret 内容会随资源文件保存，生产环境应使用正式的加密存储或外部密钥管理。
+
+## 环境资源配额
+
+在“发布环境”中配置资源预算。TTP 按“空间 + 集群 + 环境标识”保存一份共享配额，因此同一空间下的多个项目如果选择同一集群和 `dev` 环境，会共同使用同一个 namespace 和同一份预算，而不会各自创建一份无限制的 namespace。
+
+创建或编辑环境时可填写：
+
+- CPU request/limit 总量；
+- 内存 request/limit 总量；
+- 临时磁盘 request/limit 总量；
+- PVC 请求的持久化存储总量；
+- Pod 数量上限和 PVC 数量上限。
+
+真实 Kubernetes provider 会把预算同步到目标 namespace 的 `ResourceQuota`，并通过 `LimitRange` 为未写 `resources` 的容器补上默认 CPU、内存和临时磁盘 request/limit。创建或更新环境时，TTP 还会在生成 namespace 中自动维护 `RoleBinding/ttp-runtime`，绑定到平台运行 ServiceAccount，让动态 namespace 不再需要人工逐个授权。默认预算为 CPU `2/4`、内存 `2Gi/4Gi`、临时盘 `10Gi/20Gi`、持久盘 `50Gi`、Pod `20`、PVC `10`；容器默认值为 CPU `100m/500m`、内存 `128Mi/512Mi`、临时盘 `256Mi/1Gi`。
+
+PVC 仍然需要作为项目资源文件由用户维护。TTP 只负责 namespace 的 PVC 数量和总存储上限，不会替项目隐式创建或扩容 PVC。配额是 namespace 上限，不是对集群容量的预留；多个空间的配额总和仍应由运维人员结合集群节点容量规划。
 
 ## 集群配置
 
@@ -137,7 +147,7 @@ API 请求应始终先完成身份认证，再固定一个空间上下文；空�
 - 选择“集群内身份”时，平台进程需要运行在 Kubernetes Pod 内，并通过 ServiceAccount 访问 API Server。
 - 保存后会自动测试连接。测试失败仍会保留配置并将集群标记为“离线”，修正后可以反复点击“测试连接”。kubeconfig 内容和路径不会通过 API 返回给前端。
 
-生产和本地真实运行都使用 `CICD_RUNTIME_PROVIDER=kubernetes`。后端必须能读取 `CICD_KUBECONFIG` 或运行在有 ServiceAccount 的集群内，并且 `CICD_KUBE_CLUSTER_ID` 必须对应页面中登记的集群。
+生产和本地真实运行都使用 `CICD_RUNTIME_PROVIDER=kubernetes`。后端必须能读取 `CICD_KUBECONFIG` 或运行在有 ServiceAccount 的集群内，并且 `CICD_KUBE_CLUSTER_ID` 必须对应页面中登记的集群。自动 RoleBinding 默认绑定 `ttp-system/ttp-runtime`，如果实际运行账号不同，请设置 `CICD_KUBE_SERVICE_ACCOUNT_NAMESPACE` 和 `CICD_KUBE_SERVICE_ACCOUNT_NAME`。
 
 当前 API 不把 `space_id` 拼在资源 URL 中；服务端从 JWT 的 `space_id` claim 取得空间，并在每次资源访问时校验用户是否属于该空间。切换空间后必须用接口返回的新 token 替换旧 token。
 
@@ -147,7 +157,7 @@ API 请求应始终先完成身份认证，再固定一个空间上下文；空�
 
 项目详情和集群监控页使用 Grafana 风格的时间序列面板，当前按时间范围查看近 15 分钟、1 小时、6 小时或 24 小时，并支持手动刷新和自动刷新。面板覆盖主机资源（CPU、内存、Swap、磁盘、磁盘读写、网络收发、Load）、Kubernetes 运行状态（节点、Pod、部署可用度、重启、Pending、失败、CrashLoop、OOMKilled）以及应用服务质量（请求量、错误率、P50/P95/P99 延迟）。
 
-Pod、节点身份和就绪状态来自 Kubernetes API；CPU、内存等实时资源曲线需要额外接入 metrics-server，磁盘、网络、请求量和延迟历史曲线需要接入 Prometheus。未接入时页面显示指标不可用，不补 0，也不显示示例序列。
+Pod、节点身份和就绪状态来自 Kubernetes API；资源指标统一来自 Prometheus。TTP 安装监控时会同时配置 Prometheus、node-exporter、kube-state-metrics，并让 Prometheus 通过 Kubernetes API 抓取 Kubelet/cAdvisor。采集链路未就绪时页面显示指标不可用，不补 0，也不显示示例序列。
 
 ## 策略比例
 
@@ -178,7 +188,8 @@ export CICD_GIT_ALLOWED_HOSTS='git.example.com' # 自建 Git 服务必填，可�
 # 自建 GitLab/GitHub Enterprise 可指定 API 根地址，例如 https://git.example.com/api/v4
 export CICD_GIT_API_BASE_URL=''
 export CICD_GIT_TIMEOUT_SECONDS=15
-export CICD_GIT_CREDENTIAL_KEY='服务端密钥管理中注入的随机密钥'
+# 可选。未设置时，TTP 会在 CICD_GIT_CREDENTIAL_KEY_FILE 指向的位置自动生成并复用密钥。
+export CICD_GIT_CREDENTIAL_KEY_FILE='/var/lib/cicd-platform/credential.key'
 ```
 
 `auto` 会识别 `github.com` 和 `gitlab.com`；自建 Git 服务请显式设置 provider，并把仓库/API 的主机加入 allowlist。token 只通过请求头发送，不会拼进 URL、日志或错误响应。当前 provider 负责读取仓库信息、分支和 commit，并校验项目机器人权限；镜像构建、滚动发布和流量切换分别由对应的 builder、Kubernetes runtime 和流量 provider 负责。
@@ -192,6 +203,6 @@ Kubernetes 集群的核心 API、监控组件、流量组件和最小 RBAC 参�
 - GitHub：把项目机器人作为仓库 Collaborator，权限至少为 `Write`。如果要让平台合并受保护分支，通常还需要 `Maintain` 或 `Admin`，并满足组织 SSO 和分支保护规则。
 - GitLab：把项目机器人加入项目，权限至少为 `Developer`；受保护分支的合并通常需要 `Maintainer`，还要满足 Approval、Protected Branch 和 Push Rules。
 - Token 只通过 HTTPS 请求发送到 TTP 后端，由后端用 `CICD_GIT_CREDENTIAL_KEY` 加密保存。接口只返回平台、用户名、配置状态和检查结果，Token 不回显、不写日志、不进入 Git。
-- `CICD_GIT_CREDENTIAL_KEY` 必须通过密钥管理或环境变量注入；密钥丢失后历史凭证无法解密，需要重新配置。
+- 项目 Git Token 使用 AES-GCM 加密保存。`CICD_GIT_CREDENTIAL_KEY` 可以由密钥管理或环境变量注入；未设置时服务首次启动会生成并持久化实例密钥。密钥文件或显式密钥丢失后，历史凭证无法解密，需要重新配置。
 
 项目级接口为 `GET/PUT/DELETE /api/projects/{project_id}/git/credential`，仓库访问检查为 `GET /api/projects/{project_id}/git/access`。所有项目的分支、提交、发布前检查、发布和重试请求都会先加载并绑定该项目凭证。

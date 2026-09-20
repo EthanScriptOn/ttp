@@ -9,14 +9,17 @@ import (
 )
 
 var (
-	ErrClusterNotFound               = errors.New("runtime cluster not found")
-	ErrProjectNotFound               = errors.New("runtime project not found")
-	ErrPodNotFound                   = errors.New("runtime pod not found")
-	ErrContainerNotFound             = errors.New("runtime container not found")
-	ErrInvalidRuntimeInput           = errors.New("invalid runtime input")
-	ErrPodExecUnsupported            = errors.New("runtime provider does not support pod exec")
-	ErrEnvironmentCleanupUnsupported = errors.New("runtime provider does not support environment cleanup")
-	ErrEnvironmentCleanupFailed      = errors.New("runtime environment cleanup failed")
+	ErrClusterNotFound                = errors.New("runtime cluster not found")
+	ErrProjectNotFound                = errors.New("runtime project not found")
+	ErrPodNotFound                    = errors.New("runtime pod not found")
+	ErrContainerNotFound              = errors.New("runtime container not found")
+	ErrInvalidRuntimeInput            = errors.New("invalid runtime input")
+	ErrPodExecUnsupported             = errors.New("runtime provider does not support pod exec")
+	ErrEnvironmentCleanupUnsupported  = errors.New("runtime provider does not support environment cleanup")
+	ErrEnvironmentCleanupFailed       = errors.New("runtime environment cleanup failed")
+	ErrReleaseAccessDenied            = errors.New("runtime release permissions are insufficient")
+	ErrNamespaceManagementUnsupported = errors.New("runtime provider does not support namespace management")
+	ErrNamespaceOwnershipConflict     = errors.New("runtime namespace is owned by another resource")
 )
 
 type PodPhase string
@@ -112,7 +115,22 @@ type ReleaseDeployment struct {
 	Manifest         string
 	ManifestFormat   string
 	ManifestVersion  int
-	Log              ReleaseLogFunc `json:"-"`
+	// ResourceFiles contains one independently applicable Kubernetes object per
+	// entry. Each entry is validated and applied separately.
+	ResourceFiles       []string
+	ImagePullCredential *ImagePullCredential
+	Log                 ReleaseLogFunc `json:"-"`
+}
+
+// ImagePullCredential is short-lived release input. KubernetesProvider turns
+// it into a namespaced dockerconfigjson Secret and never logs the secret.
+type ImagePullCredential struct {
+	ConnectionID string
+	Registry     string
+	AuthType     string
+	Username     string
+	Secret       string
+	SecretName   string
 }
 
 // ReleaseDeployer is intentionally optional. It keeps the current
@@ -192,6 +210,38 @@ type ClusterConnection struct {
 	Version string `json:"version,omitempty"`
 }
 
+type MonitoringStatus struct {
+	Available        bool                   `json:"available"`
+	Component        string                 `json:"component,omitempty"`
+	DisplayName      string                 `json:"display_name,omitempty"`
+	Installable      bool                   `json:"installable"`
+	Message          string                 `json:"message,omitempty"`
+	Installed        bool                   `json:"installed"`
+	InstallVersion   string                 `json:"install_version,omitempty"`
+	Dependencies     []MonitoringDependency `json:"dependencies,omitempty"`
+	HistoryAvailable bool                   `json:"history_available"`
+	RetentionDays    int                    `json:"retention_days,omitempty"`
+}
+
+type MonitoringDependency struct {
+	Component      string `json:"component"`
+	DisplayName    string `json:"display_name"`
+	Available      bool   `json:"available"`
+	Installed      bool   `json:"installed"`
+	Installable    bool   `json:"installable"`
+	InstallVersion string `json:"install_version,omitempty"`
+	Message        string `json:"message,omitempty"`
+}
+
+type MonitoringInstaller interface {
+	CheckMonitoring(ctx context.Context, clusterID string) (MonitoringStatus, error)
+	InstallMonitoring(ctx context.Context, clusterID string) (MonitoringStatus, error)
+}
+
+type MonitoringRetentionInstaller interface {
+	InstallMonitoringWithRetention(ctx context.Context, clusterID string, retentionDays int) (MonitoringStatus, error)
+}
+
 // ClusterRegistrar is implemented by providers that can add a cluster while
 // the control plane is running. The kubeconfig path is read on the server and
 // its contents stay inside the provider/client-go process.
@@ -202,6 +252,30 @@ type ClusterRegistrar interface {
 
 type ClusterChecker interface {
 	CheckCluster(ctx context.Context, clusterID string) (ClusterConnection, error)
+}
+
+// ReleaseAccessChecker verifies the Kubernetes permissions required before a
+// release is queued. It does not inspect image registry credentials; those
+// belong to the node/service-account image pull path.
+type ReleaseAccessChecker interface {
+	CheckReleaseAccess(ctx context.Context, clusterID, namespace string) error
+}
+
+// NamespaceManager is an optional runtime extension used when an environment
+// is created. Kubernetes implementations create the generated namespace and
+// refuse to take over an existing namespace without matching TTP ownership
+// labels.
+type NamespaceManager interface {
+	EnsureNamespace(ctx context.Context, clusterID, namespace string, labels map[string]string) error
+}
+
+// NamespaceQuotaManager is an optional extension used when an environment
+// namespace is created or updated. Implementations must ensure the namespace
+// ownership and apply the complete namespace budget atomically from the
+// caller's point of view. The quota is shared by every project targeting the
+// same space/cluster/environment tuple.
+type NamespaceQuotaManager interface {
+	EnsureNamespaceWithQuota(ctx context.Context, clusterID, namespace string, labels map[string]string, quota domain.NamespaceQuota) error
 }
 
 // MetricPoint is one timestamped sample returned by a runtime provider. The
@@ -240,85 +314,92 @@ type NodeMetrics struct {
 	MemoryUsedPercent   float64 `json:"memory_used_percent"`
 	SwapUsedPercent     float64 `json:"swap_used_percent"`
 	DiskUsedPercent     float64 `json:"disk_used_percent"`
+	DiskReadMbps        float64 `json:"disk_read_mbps"`
+	DiskWriteMbps       float64 `json:"disk_write_mbps"`
 	Load1               float64 `json:"load_1m"`
+	Load5               float64 `json:"load_5m"`
+	Load15              float64 `json:"load_15m"`
 	NetworkReceiveMbps  float64 `json:"network_receive_mbps"`
 	NetworkTransmitMbps float64 `json:"network_transmit_mbps"`
 	PodCount            int     `json:"pod_count"`
+	Pods                []Pod   `json:"pods,omitempty"`
 }
 
 type ClusterMetrics struct {
-	ClusterID           string        `json:"cluster_id"`
-	CPUUsedPercent      float64       `json:"cpu_used_percent"`
-	MemoryUsedPercent   float64       `json:"memory_used_percent"`
-	SwapUsedPercent     float64       `json:"swap_used_percent"`
-	DiskUsedPercent     float64       `json:"disk_used_percent"`
-	DiskReadMbps        float64       `json:"disk_read_mbps"`
-	DiskWriteMbps       float64       `json:"disk_write_mbps"`
-	NetworkReceiveMbps  float64       `json:"network_receive_mbps"`
-	NetworkTransmitMbps float64       `json:"network_transmit_mbps"`
-	Load1               float64       `json:"load_1m"`
-	Load5               float64       `json:"load_5m"`
-	Load15              float64       `json:"load_15m"`
-	RequestRateRPS      float64       `json:"request_rate_rps"`
-	ErrorRatePercent    float64       `json:"error_rate_percent"`
-	LatencyP50Ms        float64       `json:"latency_p50_ms"`
-	LatencyP95Ms        float64       `json:"latency_p95_ms"`
-	LatencyP99Ms        float64       `json:"latency_p99_ms"`
-	PodRestartCount     int           `json:"pod_restart_count"`
-	PendingPodCount     int           `json:"pending_pod_count"`
-	FailedPodCount      int           `json:"failed_pod_count"`
-	CrashLoopCount      int           `json:"crash_loop_count"`
-	OOMKilledCount      int           `json:"oom_killed_count"`
-	NodeCount           int           `json:"node_count"`
-	ReadyNodeCount      int           `json:"ready_node_count"`
-	DeploymentDesired   int           `json:"deployment_desired"`
-	DeploymentAvailable int           `json:"deployment_available"`
-	MetricsSource       string        `json:"metrics_source,omitempty"`
-	MetricsAvailable    bool          `json:"metrics_available"`
-	MetricsMessage      string        `json:"metrics_message,omitempty"`
-	PodCount            int           `json:"pod_count"`
-	HealthyPodCount     int           `json:"healthy_pod_count"`
-	ObservedAt          time.Time     `json:"observed_at"`
-	Series              []MetricPoint `json:"series,omitempty"`
-	Nodes               []NodeMetrics `json:"nodes,omitempty"`
+	ClusterID           string            `json:"cluster_id"`
+	CPUUsedPercent      float64           `json:"cpu_used_percent"`
+	MemoryUsedPercent   float64           `json:"memory_used_percent"`
+	SwapUsedPercent     float64           `json:"swap_used_percent"`
+	DiskUsedPercent     float64           `json:"disk_used_percent"`
+	DiskReadMbps        float64           `json:"disk_read_mbps"`
+	DiskWriteMbps       float64           `json:"disk_write_mbps"`
+	NetworkReceiveMbps  float64           `json:"network_receive_mbps"`
+	NetworkTransmitMbps float64           `json:"network_transmit_mbps"`
+	Load1               float64           `json:"load_1m"`
+	Load5               float64           `json:"load_5m"`
+	Load15              float64           `json:"load_15m"`
+	RequestRateRPS      float64           `json:"request_rate_rps"`
+	ErrorRatePercent    float64           `json:"error_rate_percent"`
+	LatencyP50Ms        float64           `json:"latency_p50_ms"`
+	LatencyP95Ms        float64           `json:"latency_p95_ms"`
+	LatencyP99Ms        float64           `json:"latency_p99_ms"`
+	PodRestartCount     int               `json:"pod_restart_count"`
+	PendingPodCount     int               `json:"pending_pod_count"`
+	FailedPodCount      int               `json:"failed_pod_count"`
+	CrashLoopCount      int               `json:"crash_loop_count"`
+	OOMKilledCount      int               `json:"oom_killed_count"`
+	NodeCount           int               `json:"node_count"`
+	ReadyNodeCount      int               `json:"ready_node_count"`
+	DeploymentDesired   int               `json:"deployment_desired"`
+	DeploymentAvailable int               `json:"deployment_available"`
+	MetricsSource       string            `json:"metrics_source,omitempty"`
+	MetricsAvailable    bool              `json:"metrics_available"`
+	MetricsMessage      string            `json:"metrics_message,omitempty"`
+	PodCount            int               `json:"pod_count"`
+	HealthyPodCount     int               `json:"healthy_pod_count"`
+	ObservedAt          time.Time         `json:"observed_at"`
+	Series              []MetricPoint     `json:"series,omitempty"`
+	Nodes               []NodeMetrics     `json:"nodes,omitempty"`
+	Monitoring          *MonitoringStatus `json:"monitoring,omitempty"`
 }
 
 type ProjectMetrics struct {
-	ClusterID           string        `json:"cluster_id"`
-	ProjectID           string        `json:"project_id"`
-	PodCount            int           `json:"pod_count"`
-	HealthyPodCount     int           `json:"healthy_pod_count"`
-	CPUUsedPercent      float64       `json:"cpu_used_percent"`
-	MemoryUsedPercent   float64       `json:"memory_used_percent"`
-	SwapUsedPercent     float64       `json:"swap_used_percent"`
-	DiskUsedPercent     float64       `json:"disk_used_percent"`
-	DiskReadMbps        float64       `json:"disk_read_mbps"`
-	DiskWriteMbps       float64       `json:"disk_write_mbps"`
-	NetworkReceiveMbps  float64       `json:"network_receive_mbps"`
-	NetworkTransmitMbps float64       `json:"network_transmit_mbps"`
-	Load1               float64       `json:"load_1m"`
-	Load5               float64       `json:"load_5m"`
-	Load15              float64       `json:"load_15m"`
-	RequestRateRPS      float64       `json:"request_rate_rps"`
-	ErrorRatePercent    float64       `json:"error_rate_percent"`
-	LatencyP50Ms        float64       `json:"latency_p50_ms"`
-	LatencyP95Ms        float64       `json:"latency_p95_ms"`
-	LatencyP99Ms        float64       `json:"latency_p99_ms"`
-	PodRestartCount     int           `json:"pod_restart_count"`
-	PendingPodCount     int           `json:"pending_pod_count"`
-	FailedPodCount      int           `json:"failed_pod_count"`
-	CrashLoopCount      int           `json:"crash_loop_count"`
-	OOMKilledCount      int           `json:"oom_killed_count"`
-	NodeCount           int           `json:"node_count"`
-	ReadyNodeCount      int           `json:"ready_node_count"`
-	DeploymentDesired   int           `json:"deployment_desired"`
-	DeploymentAvailable int           `json:"deployment_available"`
-	MetricsSource       string        `json:"metrics_source,omitempty"`
-	MetricsAvailable    bool          `json:"metrics_available"`
-	MetricsMessage      string        `json:"metrics_message,omitempty"`
-	ObservedAt          time.Time     `json:"observed_at"`
-	Series              []MetricPoint `json:"series,omitempty"`
-	Nodes               []NodeMetrics `json:"nodes,omitempty"`
+	ClusterID           string            `json:"cluster_id"`
+	ProjectID           string            `json:"project_id"`
+	PodCount            int               `json:"pod_count"`
+	HealthyPodCount     int               `json:"healthy_pod_count"`
+	CPUUsedPercent      float64           `json:"cpu_used_percent"`
+	MemoryUsedPercent   float64           `json:"memory_used_percent"`
+	SwapUsedPercent     float64           `json:"swap_used_percent"`
+	DiskUsedPercent     float64           `json:"disk_used_percent"`
+	DiskReadMbps        float64           `json:"disk_read_mbps"`
+	DiskWriteMbps       float64           `json:"disk_write_mbps"`
+	NetworkReceiveMbps  float64           `json:"network_receive_mbps"`
+	NetworkTransmitMbps float64           `json:"network_transmit_mbps"`
+	Load1               float64           `json:"load_1m"`
+	Load5               float64           `json:"load_5m"`
+	Load15              float64           `json:"load_15m"`
+	RequestRateRPS      float64           `json:"request_rate_rps"`
+	ErrorRatePercent    float64           `json:"error_rate_percent"`
+	LatencyP50Ms        float64           `json:"latency_p50_ms"`
+	LatencyP95Ms        float64           `json:"latency_p95_ms"`
+	LatencyP99Ms        float64           `json:"latency_p99_ms"`
+	PodRestartCount     int               `json:"pod_restart_count"`
+	PendingPodCount     int               `json:"pending_pod_count"`
+	FailedPodCount      int               `json:"failed_pod_count"`
+	CrashLoopCount      int               `json:"crash_loop_count"`
+	OOMKilledCount      int               `json:"oom_killed_count"`
+	NodeCount           int               `json:"node_count"`
+	ReadyNodeCount      int               `json:"ready_node_count"`
+	DeploymentDesired   int               `json:"deployment_desired"`
+	DeploymentAvailable int               `json:"deployment_available"`
+	MetricsSource       string            `json:"metrics_source,omitempty"`
+	MetricsAvailable    bool              `json:"metrics_available"`
+	MetricsMessage      string            `json:"metrics_message,omitempty"`
+	ObservedAt          time.Time         `json:"observed_at"`
+	Series              []MetricPoint     `json:"series,omitempty"`
+	Nodes               []NodeMetrics     `json:"nodes,omitempty"`
+	Monitoring          *MonitoringStatus `json:"monitoring,omitempty"`
 }
 
 // Provider is the runtime boundary. A client-go implementation can map these

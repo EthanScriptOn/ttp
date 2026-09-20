@@ -1,4 +1,5 @@
 .runtime/
+.env
 
 # Builder credentials are intentionally local-only.
 deploy/builder/registry-credentials.json

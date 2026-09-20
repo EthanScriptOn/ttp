@@ -115,6 +115,40 @@ func (p *KubernetesProvider) environmentCollections(ctx context.Context, client 
 			},
 		},
 		{
+			kind: "StatefulSet",
+			list: func() ([]environmentObject, error) {
+				list, err := client.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+				if err != nil {
+					return nil, err
+				}
+				items := make([]environmentObject, 0, len(list.Items))
+				for _, item := range list.Items {
+					item := item
+					items = append(items, environmentObject{kind: "StatefulSet", name: item.Name, labels: item.Labels, delete: func(options metav1.DeleteOptions) error {
+						return client.AppsV1().StatefulSets(namespace).Delete(ctx, item.Name, options)
+					}})
+				}
+				return items, nil
+			},
+		},
+		{
+			kind: "DaemonSet",
+			list: func() ([]environmentObject, error) {
+				list, err := client.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+				if err != nil {
+					return nil, err
+				}
+				items := make([]environmentObject, 0, len(list.Items))
+				for _, item := range list.Items {
+					item := item
+					items = append(items, environmentObject{kind: "DaemonSet", name: item.Name, labels: item.Labels, delete: func(options metav1.DeleteOptions) error {
+						return client.AppsV1().DaemonSets(namespace).Delete(ctx, item.Name, options)
+					}})
+				}
+				return items, nil
+			},
+		},
+		{
 			kind: "Pod",
 			list: func() ([]environmentObject, error) {
 				list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
@@ -143,6 +177,40 @@ func (p *KubernetesProvider) environmentCollections(ctx context.Context, client 
 					item := item
 					items = append(items, environmentObject{kind: "ReplicaSet", name: item.Name, labels: item.Labels, delete: func(options metav1.DeleteOptions) error {
 						return client.AppsV1().ReplicaSets(namespace).Delete(ctx, item.Name, options)
+					}})
+				}
+				return items, nil
+			},
+		},
+		{
+			kind: "Job",
+			list: func() ([]environmentObject, error) {
+				list, err := client.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+				if err != nil {
+					return nil, err
+				}
+				items := make([]environmentObject, 0, len(list.Items))
+				for _, item := range list.Items {
+					item := item
+					items = append(items, environmentObject{kind: "Job", name: item.Name, labels: item.Labels, delete: func(options metav1.DeleteOptions) error {
+						return client.BatchV1().Jobs(namespace).Delete(ctx, item.Name, options)
+					}})
+				}
+				return items, nil
+			},
+		},
+		{
+			kind: "CronJob",
+			list: func() ([]environmentObject, error) {
+				list, err := client.BatchV1().CronJobs(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+				if err != nil {
+					return nil, err
+				}
+				items := make([]environmentObject, 0, len(list.Items))
+				for _, item := range list.Items {
+					item := item
+					items = append(items, environmentObject{kind: "CronJob", name: item.Name, labels: item.Labels, delete: func(options metav1.DeleteOptions) error {
+						return client.BatchV1().CronJobs(namespace).Delete(ctx, item.Name, options)
 					}})
 				}
 				return items, nil
@@ -233,6 +301,23 @@ func (p *KubernetesProvider) environmentCollections(ctx context.Context, client 
 				return items, nil
 			},
 		},
+		{
+			kind: "PersistentVolumeClaim",
+			list: func() ([]environmentObject, error) {
+				list, err := client.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+				if err != nil {
+					return nil, err
+				}
+				items := make([]environmentObject, 0, len(list.Items))
+				for _, item := range list.Items {
+					item := item
+					items = append(items, environmentObject{kind: "PersistentVolumeClaim", name: item.Name, labels: item.Labels, delete: func(options metav1.DeleteOptions) error {
+						return client.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, item.Name, options)
+					}})
+				}
+				return items, nil
+			},
+		},
 	}
 }
 
@@ -242,12 +327,18 @@ func cleanupKindRank(kind string) int {
 		return 1
 	case "ReplicaSet":
 		return 2
+	case "CronJob":
+		return 2
+	case "Job":
+		return 3
 	case "HorizontalPodAutoscaler", "Ingress", "Service", "ConfigMap", "Secret":
 		return 3
-	case "Deployment":
+	case "Deployment", "StatefulSet", "DaemonSet":
 		return 4
-	default:
+	case "PersistentVolumeClaim":
 		return 5
+	default:
+		return 6
 	}
 }
 
@@ -303,6 +394,34 @@ func (p *KubernetesProvider) countEnvironmentResources(ctx context.Context, clie
 	if err := countList("ReplicaSet", len(list.Items), nil); err != nil {
 		return 0, err
 	}
+	listJobs, err := client.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return 0, countList("Job", 0, err)
+	}
+	if err := countList("Job", len(listJobs.Items), nil); err != nil {
+		return 0, err
+	}
+	listCronJobs, err := client.BatchV1().CronJobs(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return 0, countList("CronJob", 0, err)
+	}
+	if err := countList("CronJob", len(listCronJobs.Items), nil); err != nil {
+		return 0, err
+	}
+	listStatefulSets, err := client.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return 0, countList("StatefulSet", 0, err)
+	}
+	if err := countList("StatefulSet", len(listStatefulSets.Items), nil); err != nil {
+		return 0, err
+	}
+	listDaemonSets, err := client.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return 0, countList("DaemonSet", 0, err)
+	}
+	if err := countList("DaemonSet", len(listDaemonSets.Items), nil); err != nil {
+		return 0, err
+	}
 	listHPA, err := client.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return 0, countList("HorizontalPodAutoscaler", 0, err)
@@ -336,6 +455,13 @@ func (p *KubernetesProvider) countEnvironmentResources(ctx context.Context, clie
 		return 0, countList("Secret", 0, err)
 	}
 	if err := countList("Secret", len(listSecrets.Items), nil); err != nil {
+		return 0, err
+	}
+	listClaims, err := client.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return 0, countList("PersistentVolumeClaim", 0, err)
+	}
+	if err := countList("PersistentVolumeClaim", len(listClaims.Items), nil); err != nil {
 		return 0, err
 	}
 	listDeployments, err := client.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})

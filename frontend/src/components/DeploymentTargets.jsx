@@ -2,6 +2,7 @@ import {
   Button,
   Checkbox,
   Col,
+  Collapse,
   Empty,
   Form,
   Input,
@@ -26,9 +27,11 @@ import {
   EnvironmentOutlined,
   InfoCircleOutlined,
   PlusOutlined,
+  QuestionCircleOutlined,
   StopOutlined,
 } from '@ant-design/icons'
 import { useEffect, useMemo, useState } from 'react'
+import { DEFAULT_NAMESPACE_QUOTA, normalizeNamespaceQuota } from '../services/api-helpers'
 
 const DEFAULT_VALUES = {
   name: '',
@@ -36,11 +39,9 @@ const DEFAULT_VALUES = {
   stage: 'dev',
   sort_order: 1,
   cluster_id: '',
-  namespace: '',
-  replicas: 2,
-  container_port: 8080,
   deploy_strategy: 'rolling',
   enabled: true,
+  resource_quota: { ...DEFAULT_NAMESPACE_QUOTA },
 }
 
 export const STAGE_OPTIONS = [
@@ -68,10 +69,30 @@ const STRATEGIES = [
   { value: 'blue_green', label: '蓝绿发布' },
 ]
 
+const TARGET_HELP = {
+  namespace: '命名规则：TTP 空间 slug + 环境标识；同一集群中的不同 TTP 空间不会共用 namespace。',
+  quota: '配额属于 TTP 空间 + 集群 + 环境。同一环境下的多个项目共享这份预算，避免一个项目耗尽整个集群的资源；如果该环境已经存在共享预算，新项目会沿用已有值，请编辑已有环境来调整。',
+  containerDefaults: '每个容器的默认 request/limit 会由 TTP 写入 LimitRange；未填写时使用 100m/500m CPU、128Mi/512Mi 内存和 256Mi/1Gi 临时盘。',
+  workloadSpec: '副本数、容器端口、探针/保活、HPA/PDB 等工作负载规格由部署配置中的 Kubernetes 资源文件维护。',
+}
+
+function TargetHelp({ label, title }) {
+  return <Tooltip overlayClassName="deployment-target-help-tooltip" placement="top" title={title}>
+    <button type="button" className="deployment-target-help" aria-label={label} onClick={(event) => event.stopPropagation()}>
+      <QuestionCircleOutlined />
+    </button>
+  </Tooltip>
+}
+
 function targetHealth(target) {
   if (target.health === 'healthy' || target.healthy_pod_count > 0 && target.healthy_pod_count === target.pod_count) return ['success', '运行正常']
   if (target.health === 'degraded') return ['warning', '部分异常']
   return ['default', target.pod_count ? '状态未知' : '尚未发布']
+}
+
+function quotaSummary(quota) {
+  const value = normalizeNamespaceQuota(quota)
+  return `CPU ${value.cpu_limit} · 内存 ${value.memory_limit} · 临时盘 ${value.ephemeral_storage_limit} · 持久盘 ${value.storage}`
 }
 
 export function targetDisplay(target, clusters = []) {
@@ -165,11 +186,9 @@ export default function DeploymentTargets({
       stage: editing.stage || 'custom',
       sort_order: editing.sort_order || 1,
       cluster_id: editing.cluster_id,
-      namespace: editing.namespace,
-      replicas: editing.replicas,
-      container_port: editing.container_port,
       deploy_strategy: editing.deploy_strategy,
       enabled: editing.enabled,
+      resource_quota: normalizeNamespaceQuota(editing.resource_quota),
     } : { ...DEFAULT_VALUES, sort_order: Math.max(1, ...targets.map((target) => Number(target.sort_order) || 0)) + 1 })
   }, [editing, form, modalOpen, targets])
 
@@ -198,9 +217,7 @@ export default function DeploymentTargets({
         environment: values.environment.trim().toLowerCase(),
         stage: values.stage,
         sort_order: Number(values.sort_order),
-        namespace: values.namespace.trim().toLowerCase(),
-        replicas: Number(values.replicas),
-        container_port: Number(values.container_port),
+        resource_quota: normalizeNamespaceQuota(values.resource_quota),
       }
       if (editing) await onUpdate?.(editing, payload)
       else await onCreate?.(payload)
@@ -236,7 +253,7 @@ export default function DeploymentTargets({
     <div className="deployment-targets-heading">
       <div>
         <Typography.Title level={3}>发布环境</Typography.Title>
-        <Typography.Paragraph type="secondary">每个环境单独设置集群、namespace、实例数和发布方式；发布时选择一个或多个环境。</Typography.Paragraph>
+        <Typography.Paragraph type="secondary">每个环境单独设置集群、namespace、资源配额和发布方式；副本、端口、探针等工作负载规格由资源文件维护。</Typography.Paragraph>
       </div>
       <Space wrap>
         {canEdit && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>添加环境</Button>}
@@ -255,15 +272,38 @@ export default function DeploymentTargets({
           <div className={`deployment-target-card ${!target.enabled ? 'is-disabled' : ''}`}>
             <div className="deployment-target-card-head"><div className="deployment-target-icon"><EnvironmentOutlined /></div><div className="deployment-target-title"><strong><span className="deployment-target-order">#{target.sort_order}</span><span className="deployment-target-name">{target.name}</span></strong></div><Space size={4}><Tag color={healthColor}>{healthLabel}</Tag></Space></div>
             <div className="deployment-target-context"><ClusterOutlined /><span title={context}>{context}</span></div>
-            <div className="deployment-target-stats"><div><span>Pod</span><strong>{target.healthy_pod_count} / {target.pod_count}</strong><small>健康 / 总数</small></div><div><span>副本</span><strong>{target.replicas}</strong><small>{target.deploy_strategy === 'blue_green' ? '蓝绿' : target.deploy_strategy === 'canary' ? '灰度' : '滚动'}</small></div><div><span>最近版本</span><strong>{target.last_commit || '-'}</strong><small>{target.last_release || '暂无发布'}</small></div></div>
-            <div className="deployment-target-actions"><Tooltip title={lockTitle}><span><Button type="link" size="small" icon={target.enabled ? <StopOutlined /> : <CheckCircleOutlined />} onClick={() => toggleEnabled(target, !target.enabled)} disabled={!canEdit || targetLocked}>{target.enabled ? '停用' : '启用'}</Button></span></Tooltip><Space size={2}>{canEdit && <Tooltip title={lockTitle}><span><Button type="link" size="small" icon={<EditOutlined />} onClick={() => openEdit(target)} disabled={targetLocked}>编辑</Button></span></Tooltip>}{canEdit && <Tooltip title={lockTitle}><span><Popconfirm title="删除这个发布环境？" description="删除后不会影响已经完成的历史发布。" okText="删除" cancelText="取消" onConfirm={() => remove(target)} disabled={targetLocked}><Button type="link" danger size="small" icon={<DeleteOutlined />} loading={deleting === target.id} disabled={targetLocked}>删除</Button></Popconfirm></span></Tooltip>}</Space></div>
+            <div className="deployment-target-quota"><span>资源配额</span><strong>{quotaSummary(target.resource_quota)}</strong><small>Pod {normalizeNamespaceQuota(target.resource_quota).pods} · PVC {normalizeNamespaceQuota(target.resource_quota).persistent_volume_claims}</small></div>
+            <div className="deployment-target-stats"><div><span>Pod</span><strong>{target.healthy_pod_count} / {target.pod_count}</strong><small>健康 / 总数</small></div><div><span>发布策略</span><strong>{target.deploy_strategy === 'blue_green' ? '蓝绿' : target.deploy_strategy === 'canary' ? '灰度' : '滚动'}</strong><small>流程策略</small></div><div><span>最近版本</span><strong>{target.last_commit || '-'}</strong><small>{target.last_release || '暂无发布'}</small></div></div>
+            <div className="deployment-target-actions"><Tooltip title={lockTitle}><span><Button type="link" size="small" icon={target.enabled ? <StopOutlined /> : <CheckCircleOutlined />} onClick={() => toggleEnabled(target, !target.enabled)} disabled={!canEdit || targetLocked}>{target.enabled ? '停用' : '启用'}</Button></span></Tooltip><Space size={2}>{canEdit && <Tooltip title={lockTitle}><span><Button type="link" size="small" icon={<EditOutlined />} onClick={() => openEdit(target)} disabled={targetLocked}>编辑</Button></span></Tooltip>}{canEdit && <Tooltip title={lockTitle}><span><Popconfirm title="删除这个发布环境？" description="删除后不会影响已完成的历史发布；该环境由 TTP 管理的 PVC 及其中数据也会被删除。" okText="删除" cancelText="取消" onConfirm={() => remove(target)} disabled={targetLocked}><Button type="link" danger size="small" icon={<DeleteOutlined />} loading={deleting === target.id} disabled={targetLocked}>删除</Button></Popconfirm></span></Tooltip>}</Space></div>
           </div>
         </Col>
       })}
     </Row>}
     <Modal title={editing ? '编辑发布环境' : '添加发布环境'} open={modalOpen} onCancel={closeModal} onOk={() => form.submit()} confirmLoading={saving} okText="保存" cancelText="取消" destroyOnHidden width="min(680px, calc(100vw - 32px))">
       <Form form={form} layout="vertical" onFinish={submit} initialValues={DEFAULT_VALUES} className="deployment-target-form" requiredMark>
-        <Row gutter={[16, 0]}><Col xs={24} sm={12}><Form.Item label="显示名称" name="name" rules={[{ required: true, message: '请输入环境名称' }, { max: 120, message: '名称不能超过 120 个字符' }]}><Input placeholder="例如：验收环境" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="环境标识" name="environment" rules={[{ required: true, message: '请输入环境标识' }, { pattern: /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/, message: '只能使用小写字母、数字和短横线' }]}><Input placeholder="例如：release" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>阶段类型 <Tooltip title="阶段类型决定发布流程，不看环境名称。发布必须从 DEV 开始。"><InfoCircleOutlined /></Tooltip></span>} name="stage" rules={[{ required: true, message: '请选择阶段类型' }]}><Select options={STAGE_OPTIONS} /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>发布顺序 <Tooltip title="数字越小越先发布。顺序 1 必须是 DEV。"><InfoCircleOutlined /></Tooltip></span>} name="sort_order" rules={[{ required: true, message: '请输入发布顺序' }, { type: 'number', min: 1, max: 99, message: '发布顺序范围为 1 到 99' }]}><InputNumber min={1} max={99} precision={0} style={{ width: '100%' }} /></Form.Item></Col><Col xs={24}><Form.Item label="部署集群" name="cluster_id" rules={[{ required: true, message: '请选择部署集群' }]}><Select options={clusterOptions} placeholder="选择集群" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="Kubernetes namespace" name="namespace" rules={[{ required: true, message: '请输入 namespace' }, { max: 63, message: 'namespace 最多 63 个字符' }, { pattern: /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/, message: '只能使用小写字母、数字和短横线' }]}><Input placeholder="例如：uat" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="发布策略" name="deploy_strategy"><Select options={STRATEGIES} /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="副本数" name="replicas" rules={[{ required: true, message: '请输入副本数' }, { type: 'number', min: 1, max: 100, message: '副本数范围为 1 到 100' }]}><InputNumber min={1} max={100} precision={0} style={{ width: '100%' }} /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="容器端口" name="container_port" rules={[{ required: true, message: '请输入容器端口' }, { type: 'number', min: 1, max: 65535, message: '端口范围为 1 到 65535' }]}><InputNumber min={1} max={65535} precision={0} style={{ width: '100%' }} /></Form.Item></Col></Row>
+        <Row gutter={[16, 0]}><Col xs={24} sm={12}><Form.Item label="显示名称" name="name" rules={[{ required: true, message: '请输入环境名称' }, { max: 120, message: '名称不能超过 120 个字符' }]}><Input placeholder="例如：验收环境" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="环境标识" name="environment" rules={[{ required: true, message: '请输入环境标识' }, { pattern: /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/, message: '只能使用小写字母、数字和短横线' }]}><Input placeholder="例如：release" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>阶段类型 <Tooltip title="阶段类型决定发布流程，不看环境名称。发布必须从 DEV 开始。"><InfoCircleOutlined /></Tooltip></span>} name="stage" rules={[{ required: true, message: '请选择阶段类型' }]}><Select options={STAGE_OPTIONS} /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>发布顺序 <Tooltip title="数字越小越先发布。顺序 1 必须是 DEV。"><InfoCircleOutlined /></Tooltip></span>} name="sort_order" rules={[{ required: true, message: '请输入发布顺序' }, { type: 'number', min: 1, max: 99, message: '发布顺序范围为 1 到 99' }]}><InputNumber min={1} max={99} precision={0} style={{ width: '100%' }} /></Form.Item></Col><Col xs={24}><Form.Item label="部署集群" name="cluster_id" rules={[{ required: true, message: '请选择部署集群' }]}><Select options={clusterOptions} placeholder="选择集群" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>Kubernetes namespace <TargetHelp label="查看 namespace 命名规则" title={TARGET_HELP.namespace} /></span>}><Typography.Text code>{editing?.namespace || '保存后自动生成'}</Typography.Text></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="发布策略" name="deploy_strategy"><Select options={STRATEGIES} /></Form.Item></Col><Col xs={24}><Form.Item label={<span>工作负载规格 <TargetHelp label="查看工作负载规格说明" title={TARGET_HELP.workloadSpec} /></span>}><Typography.Text type="secondary">由部署配置中的 Kubernetes 资源文件维护</Typography.Text></Form.Item></Col></Row>
+        <Collapse
+          className="deployment-target-quota-collapse"
+          defaultActiveKey={['quota']}
+          items={[{
+            key: 'quota',
+            label: <span>环境资源配额 <TargetHelp label="查看环境资源配额说明" title={TARGET_HELP.quota} /></span>,
+            children: <div className="deployment-target-quota-form">
+              <Row gutter={[16, 0]}>
+                <Col xs={24} sm={12}><Form.Item label="CPU request 总量" name={['resource_quota', 'cpu_request']} rules={[{ required: true, message: '请输入 CPU request 配额' }]}><Input placeholder="例如 2" /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item label="CPU limit 总量" name={['resource_quota', 'cpu_limit']} rules={[{ required: true, message: '请输入 CPU limit 配额' }]}><Input placeholder="例如 4" /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item label="内存 request 总量" name={['resource_quota', 'memory_request']} rules={[{ required: true, message: '请输入内存 request 配额' }]}><Input placeholder="例如 2Gi" /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item label="内存 limit 总量" name={['resource_quota', 'memory_limit']} rules={[{ required: true, message: '请输入内存 limit 配额' }]}><Input placeholder="例如 4Gi" /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item label="临时磁盘 request 总量" name={['resource_quota', 'ephemeral_storage_request']} rules={[{ required: true, message: '请输入临时磁盘 request 配额' }]}><Input placeholder="例如 10Gi" /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item label="临时磁盘 limit 总量" name={['resource_quota', 'ephemeral_storage_limit']} rules={[{ required: true, message: '请输入临时磁盘 limit 配额' }]}><Input placeholder="例如 20Gi" /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item label="持久化存储总量" name={['resource_quota', 'storage']} rules={[{ required: true, message: '请输入持久化存储配额' }]}><Input placeholder="例如 50Gi" /></Form.Item></Col>
+                <Col xs={24} sm={6}><Form.Item label="Pod 数量上限" name={['resource_quota', 'pods']} rules={[{ required: true, type: 'number', min: 1, max: 10000, message: 'Pod 上限为 1 到 10000' }]}><InputNumber min={1} max={10000} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
+                <Col xs={24} sm={6}><Form.Item label="PVC 数量上限" name={['resource_quota', 'persistent_volume_claims']} rules={[{ required: true, type: 'number', min: 1, max: 1000, message: 'PVC 上限为 1 到 1000' }]}><InputNumber min={1} max={1000} precision={0} style={{ width: '100%' }} /></Form.Item></Col>
+              </Row>
+              <div className="deployment-target-default-help"><Typography.Text type="secondary">容器默认值</Typography.Text><TargetHelp label="查看容器默认 request 和 limit 说明" title={TARGET_HELP.containerDefaults} /></div>
+            </div>,
+          }]}
+        />
         <div className="deployment-target-form-switches"><Form.Item label="启用这个环境" name="enabled" valuePropName="checked"><Switch /></Form.Item></div>
       </Form>
     </Modal>

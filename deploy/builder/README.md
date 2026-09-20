@@ -11,24 +11,54 @@ root with the repository root as context, pushes to the platform-owned OCI
 registry, and returns `repository@sha256:...`. Every environment in one release
 execution deploys that same digest.
 
+## Registry contract
+
+TTP uses the standard OCI/Docker Registry interface. It does not contain an
+阿里云、Harbor、GitLab or Docker Hub push implementation. The builder accepts
+any reachable registry that supports the normal `/v2/` authentication flow,
+including Basic and Bearer authentication.
+
+The platform can forward a selected, space-owned connection for one build. A
+project only selects that connection; the builder derives a stable repository
+path from the registry host and project ID. For backwards-compatible API
+clients that still provide an image repository, the builder verifies that the
+forwarded credential's host matches it and refuses a mismatch. For projects
+without a connection, configure one credential entry per registry host in the
+builder's private credential map. Repository values must not contain a tag or
+digest.
+
+Push and pull credentials are separate concerns:
+
+- Builder credential: lets BuildKit push the newly built image.
+- Kubernetes `imagePullSecrets`: lets cluster nodes pull that image.
+
+TTP checks the builder-side registry credential before a release starts, but
+the actual push remains the final authority. A registry can still reject a
+specific repository or operation during upload, and that error is recorded in
+the release logs.
+
 ## Boundaries
 
 - TTP supports any HTTP(S) Git source allowed by the worker's host allowlist;
   GitHub and GitLab are not special cases.
-- A project may specify its own image repository in project settings
-  (`registry.example.com/team/app`, no tag). The worker only accepts it when
-  the repository's registry host matches one of the credentials in the
-  builder-host credential mapping, so projects can choose a repository path
-  but never receive or provide registry passwords. Without a project
-  override, the tag policy, registry and target platforms stay configured by
-  TTP platform operators.
-- Registry passwords exist only in the builder-host credential mapping. They
-  are never stored in the TTP database or exposed to project users.
+- A project selects a space-owned image registry connection in project
+  settings. The worker derives a stable repository path from that connection
+  and the project ID, so project users never need to enter a registry path or
+  receive registry passwords. Explicit image repository values remain
+  accepted for backwards-compatible API clients. Without a project
+  connection, the tag policy, registry and target platforms stay configured
+  by TTP platform operators.
+- Registry credentials selected in the console are encrypted in the TTP
+  database and forwarded only for the lifetime of a build; they are never
+  exposed to project users. The builder-host mapping remains the fallback for
+  platform-owned repositories and is never returned by the API.
 - A project Git robot token is forwarded only for a single build request. It is
   never included in the image, artifact record, browser response, or build log.
-- Kubernetes image pull credentials remain a cluster administrator concern;
-  configure `imagePullSecrets` in the project's Kubernetes manifest or
-  namespace as appropriate.
+- For a project connection, TTP creates/updates a namespaced
+  `kubernetes.io/dockerconfigjson` Secret and injects its name into each
+  Deployment. Existing manifest `imagePullSecrets` are preserved. The TTP
+  Kubernetes identity therefore needs Secret create/update permission in each
+  target namespace.
 
 ## Prerequisites
 
@@ -45,9 +75,9 @@ the BuildKit endpoint to the public network. For a remote endpoint, put it on
 a private network and use the BuildKit deployment's own TLS/authentication
 controls.
 
-Create a private credential mapping on the builder machine. The map key is the
-reference entered in TTP project settings. Copy the example and replace its
-placeholder values locally:
+Create a private credential mapping on the builder machine. The map contains
+one entry per registry host. Copy the example and replace its placeholder
+values locally:
 
 ```bash
 install -d -m 700 "$HOME/.config/ttp-builder"
@@ -56,8 +86,10 @@ chmod 600 "$HOME/.config/ttp-builder/registry-credentials.json"
 ```
 
 The file must be a regular file with mode `0600`; the worker refuses more
-permissive files. Do not commit a real credential file. The reference is a
-platform environment setting, not a project setting.
+permissive files. Do not commit a real credential file. The selected default
+credential reference is a platform environment setting, not a project setting.
+For a project-specific repository, the registry host is matched automatically
+to its entry.
 
 ## Same-machine startup
 
@@ -70,7 +102,11 @@ export TTP_BUILDER_ENABLED=true
 export TTP_BUILDER_TOKEN="$(openssl rand -hex 32)"
 export TTP_BUILDER_BUILDKIT_ADDR="unix://$HOME/.local/share/ttp-builder/buildkitd.sock"
 export TTP_BUILDER_REGISTRY_CREDENTIALS_FILE="$HOME/.config/ttp-builder/registry-credentials.json"
+# Only for explicitly trusted local HTTP registries. Omit for production HTTPS registries.
+export TTP_BUILDER_INSECURE_REGISTRIES='docker.for.mac.localhost:5000'
 export TTP_BUILDER_ALLOWED_GIT_HOSTS='git.example.com,github.com,gitlab.com'
+export TTP_BUILDER_IMAGE_REPOSITORY_PREFIX='registry.example.com/ttp'
+export TTP_BUILDER_REGISTRY_CREDENTIAL_REF='platform-registry'
 export TTP_BUILDER_WORKDIR="$HOME/.local/share/ttp-builder/work"
 
 # Optional. Keep false when buildkitd is supervised separately.

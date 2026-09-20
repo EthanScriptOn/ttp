@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -12,7 +14,7 @@ import (
 )
 
 func (s *Server) listDeploymentTargets(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -28,13 +30,48 @@ func (s *Server) listDeploymentTargets(c *gin.Context) {
 }
 
 func (s *Server) createDeploymentTarget(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
 	var input store.CreateDeploymentTargetInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "部署目标配置格式不正确")
+		return
+	}
+	environment, err := store.NormalizeDeploymentEnvironment(input.Environment)
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	namespace, err := s.generatedDeploymentNamespace(c, project, environment)
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	clusterID := strings.TrimSpace(input.ClusterID)
+	if clusterID == "" {
+		clusterID = strings.TrimSpace(project.ClusterID)
+	}
+	input.ClusterID = clusterID
+	input.Environment = environment
+	input.Namespace = namespace
+	quota, err := s.resolveNamespaceQuota(c.Request.Context(), project.SpaceID, clusterID, environment, input.ResourceQuota, false)
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	input.ResourceQuota = &quota
+	if err := s.ensureRuntimeCluster(c.Request.Context(), project.SpaceID, clusterID); err != nil {
+		writeRuntimeError(c, err)
+		return
+	}
+	if err := s.ensureRuntimeNamespaceWithQuota(c.Request.Context(), project.SpaceID, environment, clusterID, namespace, quota); err != nil {
+		writeRuntimeError(c, err)
+		return
+	}
+	if _, err := s.deps.Store.UpsertNamespaceQuota(c.Request.Context(), project.SpaceID, clusterID, environment, namespace, quota); err != nil {
+		writeStoreError(c, err)
 		return
 	}
 	target, err := s.deps.Store.CreateDeploymentTarget(c.Request.Context(), project.SpaceID, project.ID, input)
@@ -48,7 +85,7 @@ func (s *Server) createDeploymentTarget(c *gin.Context) {
 }
 
 func (s *Server) updateDeploymentTarget(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -59,6 +96,52 @@ func (s *Server) updateDeploymentTarget(c *gin.Context) {
 	}
 	if s.deploymentTargetHasActiveRelease(project.ID, c.Param("targetID")) {
 		writeError(c, http.StatusConflict, "deployment_target_locked", "环境正在发布中，发布完成后才能修改环境配置")
+		return
+	}
+	current, err := s.deps.Store.GetDeploymentTarget(c.Request.Context(), project.SpaceID, project.ID, c.Param("targetID"))
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	environment, err := store.NormalizeDeploymentEnvironment(current.Environment)
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	if input.Environment != nil {
+		environment, err = store.NormalizeDeploymentEnvironment(*input.Environment)
+		if err != nil {
+			writeStoreError(c, err)
+			return
+		}
+	}
+	input.Environment = &environment
+	clusterID := current.ClusterID
+	if input.ClusterID != nil {
+		clusterID = strings.TrimSpace(*input.ClusterID)
+	}
+	namespace, err := s.generatedDeploymentNamespace(c, project, environment)
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	input.Namespace = &namespace
+	quota, err := s.resolveNamespaceQuota(c.Request.Context(), project.SpaceID, clusterID, environment, input.ResourceQuota, true)
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	input.ResourceQuota = &quota
+	if err := s.ensureRuntimeCluster(c.Request.Context(), project.SpaceID, clusterID); err != nil {
+		writeRuntimeError(c, err)
+		return
+	}
+	if err := s.ensureRuntimeNamespaceWithQuota(c.Request.Context(), project.SpaceID, environment, clusterID, namespace, quota); err != nil {
+		writeRuntimeError(c, err)
+		return
+	}
+	if _, err := s.deps.Store.UpsertNamespaceQuota(c.Request.Context(), project.SpaceID, clusterID, environment, namespace, quota); err != nil {
+		writeStoreError(c, err)
 		return
 	}
 	target, err := s.deps.Store.UpdateDeploymentTarget(c.Request.Context(), project.SpaceID, project.ID, c.Param("targetID"), input)
@@ -72,7 +155,7 @@ func (s *Server) updateDeploymentTarget(c *gin.Context) {
 }
 
 func (s *Server) deleteDeploymentTarget(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -117,6 +200,46 @@ func (s *Server) deploymentTargetHasActiveRelease(projectID, targetID string) bo
 	return false
 }
 
+func (s *Server) generatedDeploymentNamespace(c *gin.Context, project domain.Project, environment string) (string, error) {
+	space, err := s.deps.Store.Space(c.Request.Context(), currentUserID(c), project.SpaceID)
+	if err != nil {
+		return "", err
+	}
+	source := strings.TrimSpace(space.Slug)
+	if source == "" {
+		source = strings.TrimSpace(space.Name)
+	}
+	if source == "" {
+		source = strings.TrimSpace(space.ID)
+	}
+	return store.BuildDeploymentNamespace(source, environment)
+}
+
+func (s *Server) resolveNamespaceQuota(ctx context.Context, spaceID, clusterID, environment string, requested *domain.NamespaceQuota, preferRequested bool) (domain.NamespaceQuota, error) {
+	if !preferRequested && s.deps.Store != nil {
+		persisted, err := s.deps.Store.GetNamespaceQuota(ctx, spaceID, clusterID, environment)
+		switch {
+		case err == nil:
+			return store.NormalizeNamespaceQuota(&persisted)
+		case !errors.Is(err, store.ErrNotFound):
+			return domain.NamespaceQuota{}, err
+		}
+	}
+	if requested != nil {
+		return store.NormalizeNamespaceQuota(requested)
+	}
+	if s.deps.Store != nil {
+		persisted, err := s.deps.Store.GetNamespaceQuota(ctx, spaceID, clusterID, environment)
+		switch {
+		case err == nil:
+			return store.NormalizeNamespaceQuota(&persisted)
+		case !errors.Is(err, store.ErrNotFound):
+			return domain.NamespaceQuota{}, err
+		}
+	}
+	return store.NormalizeNamespaceQuota(nil)
+}
+
 // deploymentTargetForProject resolves the target selected by the console. An
 // omitted target_id means the first target in the explicit release order.
 func (s *Server) deploymentTargetForProject(c *gin.Context, project domain.Project) (domain.DeploymentTarget, bool) {
@@ -130,6 +253,13 @@ func (s *Server) deploymentTargetForProject(c *gin.Context, project domain.Proje
 }
 
 func (s *Server) enrichDeploymentTarget(c *gin.Context, project domain.Project, target domain.DeploymentTarget) domain.DeploymentTarget {
+	if s.deps.Store != nil {
+		if quota, err := s.deps.Store.GetNamespaceQuota(c.Request.Context(), project.SpaceID, target.ClusterID, target.Environment); err == nil {
+			target.ResourceQuota = quota
+		} else if errors.Is(err, store.ErrNotFound) {
+			target.ResourceQuota = store.DefaultNamespaceQuota()
+		}
+	}
 	target.Health = "unknown"
 	target.PodCount = 0
 	target.HealthyPodCount = 0

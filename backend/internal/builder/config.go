@@ -15,6 +15,7 @@ type RuntimeConfig struct {
 	BuildctlPath            string
 	BuildkitAddr            string
 	RegistryCredentialsFile string
+	InsecureRegistries      []string
 	AllowedSourceHosts      []string
 	ImageRepositoryPrefix   string
 	RegistryCredentialRef   string
@@ -32,6 +33,7 @@ func LoadRuntimeConfig() RuntimeConfig {
 		BuildctlPath:            env("TTP_BUILDER_BUILDCTL", "buildctl"),
 		BuildkitAddr:            strings.TrimSpace(os.Getenv("TTP_BUILDER_BUILDKIT_ADDR")),
 		RegistryCredentialsFile: strings.TrimSpace(os.Getenv("TTP_BUILDER_REGISTRY_CREDENTIALS_FILE")),
+		InsecureRegistries:      envList("TTP_BUILDER_INSECURE_REGISTRIES"),
 		AllowedSourceHosts:      envList("TTP_BUILDER_ALLOWED_GIT_HOSTS"),
 		ImageRepositoryPrefix:   strings.TrimSpace(os.Getenv("TTP_BUILDER_IMAGE_REPOSITORY_PREFIX")),
 		RegistryCredentialRef:   strings.TrimSpace(os.Getenv("TTP_BUILDER_REGISTRY_CREDENTIAL_REF")),
@@ -45,6 +47,7 @@ func (c RuntimeConfig) Executor() (*BuildKitExecutor, error) {
 	return NewBuildKitExecutor(BuildKitConfig{
 		WorkDir: c.WorkDir, GitPath: c.GitPath, BuildctlPath: c.BuildctlPath, BuildkitAddr: c.BuildkitAddr,
 		RegistryCredentialsFile: c.RegistryCredentialsFile, AllowedSourceHosts: c.AllowedSourceHosts,
+		InsecureRegistries:    c.InsecureRegistries,
 		ImageRepositoryPrefix: c.ImageRepositoryPrefix, RegistryCredentialRef: c.RegistryCredentialRef, Platforms: c.Platforms, Timeout: c.BuildTimeout,
 	})
 }

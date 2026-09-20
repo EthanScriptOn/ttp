@@ -31,6 +31,9 @@ func newRuntimeProvider(cfg config.Config) (runtime.Provider, error) {
 	if strings.TrimSpace(cfg.KubeProjectLabel) != "" {
 		options = append(options, runtime.WithProjectLabelKey(strings.TrimSpace(cfg.KubeProjectLabel)))
 	}
+	if strings.TrimSpace(cfg.KubeServiceAccountNamespace) != "" || strings.TrimSpace(cfg.KubeServiceAccountName) != "" {
+		options = append(options, runtime.WithKubernetesRuntimeServiceAccount(cfg.KubeServiceAccountNamespace, cfg.KubeServiceAccountName))
+	}
 	provider := runtime.NewKubernetesProvider(options...)
 	clusterID := strings.TrimSpace(cfg.KubeClusterID)
 	if clusterID == "" {

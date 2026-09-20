@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TTP · 基础设施连接 v2</title>
+  <style>
+    :root {
+      --canvas: #f6faf8; --surface: #fff; --ink: #20352b; --muted: #778980;
+      --line: #dcebe3; --green: #08a957; --green-soft: #e8f7ef;
+      --amber: #c88a29; --amber-soft: #fff5e4; --red: #c95e57;
+      --shadow: 0 10px 30px rgba(30, 80, 56, .06);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 1160px; color: var(--ink); background: var(--canvas); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    button, select { font: inherit; }
+    .app { display: flex; min-height: 900px; }
+    .sidebar { width: 236px; flex: 0 0 236px; padding: 22px 14px; border-right: 1px solid var(--line); background: #fbfefc; }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 8px 12px 28px; }
+    .brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: #fff; background: var(--green); font-weight: 800; font-size: 18px; }
+    .brand strong { font-size: 18px; }.brand small { display: block; margin-top: 3px; color: #8ca097; font-size: 10px; letter-spacing: .12em; }
+    .nav { display: grid; gap: 5px; }.nav-item { display: flex; align-items: center; gap: 11px; height: 44px; padding: 0 13px; border-radius: 8px; color: #64776e; font-size: 13px; }
+    .nav-item .icon { width: 20px; color: #91a199; text-align: center; font-size: 16px; }.nav-item.active { color: #126e4b; background: #daf3e4; font-weight: 650; }.nav-item.active .icon { color: var(--green); }
+    .sidebar-foot { position: absolute; bottom: 22px; width: 208px; padding-top: 14px; border-top: 1px solid var(--line); color: #779087; font-size: 11px; }.dot { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--green); }
+    .main { flex: 1; padding: 34px 46px 56px; }.breadcrumb { color: #8a9b92; font-size: 11px; }
+    .heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 22px; margin: 12px 0 23px; } h1 { margin: 0; font-size: 31px; letter-spacing: -.02em; }.subtitle { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+    .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 38px; padding: 0 16px; border: 1px solid var(--line); border-radius: 7px; color: #557166; background: #fff; font-size: 12px; font-weight: 600; cursor: pointer; }.button.primary { border-color: var(--green); color: #fff; background: var(--green); box-shadow: 0 4px 12px rgba(8, 169, 87, .16); }
+    .tabs { display: flex; gap: 3px; width: max-content; margin-bottom: 22px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: #edf7f1; }.tab { padding: 9px 16px; border: 0; border-radius: 6px; color: #71847a; background: transparent; font-size: 12px; cursor: pointer; }.tab.active { color: #126e4b; background: #fff; box-shadow: 0 2px 8px rgba(30, 88, 58, .08); font-weight: 650; }
+    .view { display: none; }.view.active { display: block; }
+    .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 25px; }.summary-card { padding: 15px 17px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }.summary-card span { display: block; color: #8a9b92; font-size: 10px; }.summary-card strong { display: block; margin-top: 6px; font-size: 21px; }.summary-card em { color: #258060; font-size: 11px; font-style: normal; }
+    .section-label { display: flex; align-items: center; justify-content: space-between; margin: 24px 0 10px; }.section-label strong { font-size: 14px; }.section-label span { color: #93a39b; font-size: 11px; }
+    .cards { display: grid; gap: 12px; }.card { padding: 19px 21px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }.identity { display: flex; align-items: center; gap: 13px; }.service-icon { display: grid; place-items: center; width: 41px; height: 41px; border-radius: 10px; font-size: 19px; font-weight: 700; }.service-icon.cluster { color: #14895a; background: var(--green-soft); }.service-icon.registry { color: var(--amber); background: var(--amber-soft); }.identity h2 { margin: 0 0 4px; font-size: 16px; }.identity p { margin: 0; color: #8b9a93; font-size: 11px; }
+    .status { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 999px; color: #187449; background: #eaf8f0; font-size: 11px; font-weight: 650; }.status i { display: block; width: 6px; height: 6px; border-radius: 50%; background: #21ac68; }
+    .details { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 18px; margin: 20px 0 14px 54px; }.detail span { display: block; margin-bottom: 5px; color: #99a69f; font-size: 10px; }.detail strong { display: block; overflow: hidden; color: #435c50; font-size: 12px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+    .actions { display: flex; align-items: center; justify-content: flex-end; gap: 3px; padding-top: 10px; border-top: 1px solid #eef3f0; }.action { border: 0; padding: 4px 8px; color: #258060; background: transparent; font-size: 11px; cursor: pointer; }.action.more { color: #8c9b94; font-size: 18px; line-height: 1; }
+    .info { display: flex; align-items: center; gap: 9px; margin-top: 22px; padding: 12px 14px; border: 1px solid #d5ebe0; border-radius: 8px; color: #5e776c; background: #f0faf5; font-size: 11px; }.info b { display: grid; place-items: center; width: 19px; height: 19px; border-radius: 50%; color: #188157; background: #d4f0e1; }
+    .check-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; }.check-card, .history-card { padding: 22px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }.check-card h2, .history-card h2 { margin: 0; font-size: 16px; }.muted { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .selectors { display: grid; grid-template-columns: 1fr 34px 1fr; align-items: end; gap: 12px; margin-top: 23px; }.field label { display: block; margin-bottom: 7px; color: #73847b; font-size: 11px; }.field select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid #d7e6de; border-radius: 7px; color: #3f5b4e; background: #fbfefc; font-size: 12px; }.connector { align-self: center; padding-top: 23px; color: #a5b5ad; text-align: center; font-size: 19px; }
+    .flow { display: grid; grid-template-columns: 1fr 80px 1fr 80px 1fr; align-items: center; margin: 34px 0 24px; }.node { min-height: 94px; padding: 16px 13px; border: 1px solid #dbeae1; border-radius: 9px; text-align: center; background: #fbfefc; }.node-icon { display: grid; place-items: center; width: 31px; height: 31px; margin: 0 auto 8px; border-radius: 8px; color: #168458; background: var(--green-soft); }.node.registry .node-icon { color: var(--amber); background: var(--amber-soft); }.node strong { display: block; font-size: 12px; }.node small { display: block; margin-top: 5px; color: #91a097; font-size: 10px; }.edge { position: relative; color: #86a395; text-align: center; font-size: 19px; }.edge span { display: block; margin-bottom: 5px; color: #8a9a92; font-size: 10px; }.edge em { display: inline-flex; align-items: center; gap: 4px; color: #b07d24; font-size: 10px; font-style: normal; }.edge em i { width: 6px; height: 6px; border-radius: 50%; background: #d59e31; }
+    .checks { display: grid; gap: 8px; }.check-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 12px 13px; border: 1px solid #e4eee8; border-radius: 7px; }.check-copy { min-width: 0; }.check-copy strong { display: block; color: #4f695c; font-size: 11px; }.check-copy small { display: block; margin-top: 4px; color: #97a49e; font-size: 10px; }.check-state { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; color: #a27822; font-size: 10px; }.check-state i { width: 6px; height: 6px; border-radius: 50%; background: #d39c31; }.check-footer { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 18px; padding-top: 15px; border-top: 1px solid #e8f1ec; }.check-footer span { color: #819189; font-size: 10px; }
+    .history-card h2 { margin-bottom: 15px; }.history-empty { padding: 31px 8px; color: #9aa9a2; text-align: center; font-size: 11px; }.history-item { display: grid; gap: 4px; padding: 12px 0; border-bottom: 1px solid #edf3ef; }.history-item:last-child { border-bottom: 0; }.history-item strong { font-size: 11px; }.history-item span { color: #91a097; font-size: 10px; }.history-item b { color: #bd8629; font-size: 10px; font-weight: 500; }
+    @media (max-width: 1250px) { .main { padding-right: 28px; padding-left: 28px; }.check-layout { grid-template-columns: 1fr; }.history-card { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">T</span><div><strong>TTP</strong><small>TEAM DELIVERY PLATFORM</small></div></div>
+      <nav class="nav">
+        <div class="nav-item"><span class="icon">▦</span>项目</div>
+        <div class="nav-item active"><span class="icon">⌘</span>基础设施连接</div>
+        <div class="nav-item"><span class="icon">◌</span>集群监控</div>
+        <div class="nav-item"><span class="icon">◷</span>操作记录</div>
+        <div class="nav-item"><span class="icon">⚙</span>空间设置</div>
+        <div class="nav-item"><span class="icon">♙</span>成员与权限</div>
+      </nav>
+      <div class="sidebar-foot"><span class="dot"></span>服务正常</div>
+    </aside>
+    <main class="main">
+      <div class="breadcrumb">工作空间&nbsp; / &nbsp;基础设施</div>
+      <div class="heading"><div><h1>基础设施连接</h1><p class="subtitle">空间级连接统一维护，项目和发布环境只引用这里的连接</p></div><button class="button primary">＋&nbsp; 添加连接</button></div>
+      <div class="tabs">
+        <button class="tab active" data-view="catalog">连接目录</button>
+        <button class="tab" data-view="check">发布链路检查</button>
+      </div>
+
+      <section class="view active" id="catalog">
+        <div class="summary"><div class="summary-card"><span>已登记连接</span><strong>2</strong><em>1 个集群 · 1 个镜像仓库</em></div><div class="summary-card"><span>独立连接状态</span><strong>2 <small style="font-size:12px;color:#8a9b92;font-weight:500">/ 2</small></strong><em>最近检查均通过</em></div><div class="summary-card"><span>发布链路</span><strong>待验证</strong><em style="color:#b07d24">选择集群和仓库后检查</em></div></div>
+        <div class="section-label"><strong>已登记连接</strong><span>只显示当前空间的连接</span></div>
+        <div class="cards">
+          <article class="card"><div class="card-head"><div class="identity"><span class="service-icon cluster">⌘</span><div><h2>开发集群</h2><p>cluster-389270d9 · Kubernetes</p></div></div><span class="status"><i></i>已连接</span></div><div class="details"><div class="detail"><span>API 地址</span><strong>↗ https://k8s.example.com:6443</strong></div><div class="detail"><span>连接方式</span><strong>kubeconfig 已配置</strong></div><div class="detail"><span>最近检查</span><strong>2026-09-18 14:32</strong></div></div><div class="actions"><button class="action">测试连接</button><button class="action">编辑</button><button class="action more">···</button></div></article>
+          <article class="card"><div class="card-head"><div class="identity"><span class="service-icon registry">▣</span><div><h2>公司镜像仓库</h2><p>registry.example.com · OCI Registry</p></div></div><span class="status"><i></i>已连接</span></div><div class="details"><div class="detail"><span>Registry 地址</span><strong>registry.example.com</strong></div><div class="detail"><span>鉴权方式</span><strong>用户名 / 密码</strong></div><div class="detail"><span>最近检查</span><strong>2026-09-18 14:35</strong></div></div><div class="actions"><button class="action">测试连接</button><button class="action">编辑</button><button class="action more">···</button></div></article>
+        </div>
+        <div class="info"><b>i</b><span>连接目录只负责登记和检查单个连接。要验证真实发布路径，请切换到“发布链路检查”。</span></div>
+      </section>
+
+      <section class="view" id="check">
+        <div class="check-layout">
+          <article class="check-card">
+            <h2>验证一条真实发布链路</h2>
+            <p class="muted">选择目标集群和镜像仓库，TTP 会分别验证“推送”和“拉取”两条链路。这个结果只代表当前组合。</p>
+            <div class="selectors"><div class="field"><label>目标集群</label><select><option>开发集群 · cluster-389270d9</option><option>测试集群 · cluster-7ac8120e</option></select></div><div class="connector">×</div><div class="field"><label>镜像仓库</label><select><option>公司镜像仓库 · registry.example.com</option><option>阿里云 ACR · acr.example.com</option></select></div></div>
+            <div class="flow">
+              <div class="node"><div class="node-icon">T</div><strong>TTP 构建器</strong><small>构建并推送镜像</small></div>
+              <div class="edge"><span>推送</span>→<em><i></i>待检查</em></div>
+              <div class="node registry"><div class="node-icon">▣</div><strong>公司镜像仓库</strong><small>registry.example.com</small></div>
+              <div class="edge"><span>拉取</span>→<em><i></i>待检查</em></div>
+              <div class="node"><div class="node-icon">⌘</div><strong>开发集群</strong><small>namespace · dev</small></div>
+            </div>
+            <div class="checks"><div class="check-row"><div class="check-copy"><strong>TTP → 镜像仓库</strong><small>使用当前凭证推送并删除一份临时测试镜像</small></div><span class="check-state"><i></i>尚未检查</span></div><div class="check-row"><div class="check-copy"><strong>Kubernetes → 镜像仓库</strong><small>创建短生命周期测试 Pod，验证 imagePullSecret 拉取</small></div><span class="check-state"><i></i>尚未检查</span></div></div>
+            <div class="check-footer"><span>测试资源会自动清理，不会修改项目现有工作负载</span><button class="button primary">开始关联测试</button></div>
+          </article>
+          <aside class="history-card"><h2>最近检查</h2><div class="history-item"><strong>开发集群 × 公司镜像仓库</strong><span>今天 14:35 · 检查未完成</span><b>待检查</b></div><div class="history-item"><strong>测试集群 × 公司镜像仓库</strong><span>昨天 18:21 · 凭证已更新</span><b>需要重新检查</b></div><div class="history-empty">关联测试结果会显示在这里</div></aside>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script>
+    document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach((item) => item.classList.toggle('active', item === tab))
+      document.querySelectorAll('.view').forEach((view) => view.classList.toggle('active', view.id === tab.dataset.view))
+    }))
+  </script>
+</body>
+</html>

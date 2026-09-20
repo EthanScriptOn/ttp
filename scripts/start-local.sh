@@ -2,6 +2,13 @@
 set -Eeuo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+env_file="${TTP_ENV_FILE:-$root_dir/.env}"
+if [[ -f "$env_file" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
+  set +a
+fi
 compose_file="$root_dir/deploy/docker-compose.yml"
 compose_project="${COMPOSE_PROJECT_NAME:-cicd-platform}"
 compose_args=(-p "$compose_project" -f "$compose_file")
@@ -54,7 +61,7 @@ wait_for_builder() {
   return 1
 }
 
-required=(MYSQL_PASSWORD MYSQL_ROOT_PASSWORD CICD_JWT_SECRET CICD_GIT_CREDENTIAL_KEY CICD_KUBE_CLUSTER_ID)
+required=(MYSQL_PASSWORD MYSQL_ROOT_PASSWORD CICD_JWT_SECRET CICD_KUBE_CLUSTER_ID)
 for name in "${required[@]}"; do
   if [[ -z "${!name:-}" ]]; then
     printf '%s must be set before starting TTP\n' "$name" >&2
@@ -90,6 +97,11 @@ export MYSQL_PORT="${MYSQL_PORT:-3306}"
 export CICD_ADDR="${CICD_ADDR:-:8790}"
 export CICD_RUNTIME_PROVIDER="${CICD_RUNTIME_PROVIDER:-kubernetes}"
 export CICD_MYSQL_DSN="${CICD_MYSQL_DSN:-${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(127.0.0.1:${MYSQL_PORT})/${MYSQL_DATABASE}?parseTime=true&charset=utf8mb4&loc=UTC}"
+credential_key_file="${CICD_GIT_CREDENTIAL_KEY_FILE:-$root_dir/.runtime/credential.key}"
+if [[ "$credential_key_file" != /* ]]; then
+  credential_key_file="$root_dir/$credential_key_file"
+fi
+export CICD_GIT_CREDENTIAL_KEY_FILE="$credential_key_file"
 
 builder_enabled="${TTP_BUILDER_ENABLED:-false}"
 builder_pid=''

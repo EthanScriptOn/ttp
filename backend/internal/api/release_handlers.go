@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yuebuy/cicd-platform/backend/internal/auth"
 	"github.com/yuebuy/cicd-platform/backend/internal/deploymentconfig"
 	"github.com/yuebuy/cicd-platform/backend/internal/domain"
 	"github.com/yuebuy/cicd-platform/backend/internal/git"
@@ -49,7 +50,7 @@ type releaseFailRequest struct {
 }
 
 func (s *Server) listReleases(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -58,7 +59,7 @@ func (s *Server) listReleases(c *gin.Context) {
 }
 
 func (s *Server) getRelease(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -75,7 +76,7 @@ func (s *Server) getRelease(c *gin.Context) {
 }
 
 func (s *Server) getReleaseTargetLogs(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -115,7 +116,15 @@ func (s *Server) createRelease(c *gin.Context) {
 		writeStoreError(c, err)
 		return
 	}
-	created, duplicate, err := s.deps.Release.Create(c.Request.Context(), release.CreateInput{SpaceID: project.SpaceID, ProjectID: project.ID, RepositoryID: project.RepositoryID, Branch: branch, Name: strings.TrimSpace(request.Name), CommitSHAs: request.CommitSHAs, Targets: targets, Strategy: release.Strategy(request.Strategy), Traffic: release.TrafficSplit{StablePercent: request.Stable, CandidatePercent: request.Candidate, BluePercent: request.Blue, GreenPercent: request.Green}})
+	claims, _ := auth.ClaimsFrom(c)
+	createdByName := strings.TrimSpace(claims.Username)
+	if user, userErr := s.deps.Store.User(c.Request.Context(), claims.UserID); userErr == nil {
+		createdByName = strings.TrimSpace(user.DisplayName)
+		if createdByName == "" {
+			createdByName = strings.TrimSpace(user.Username)
+		}
+	}
+	created, duplicate, err := s.deps.Release.Create(c.Request.Context(), release.CreateInput{SpaceID: project.SpaceID, ProjectID: project.ID, RepositoryID: project.RepositoryID, CreatedBy: claims.UserID, CreatedByName: createdByName, Branch: branch, Name: strings.TrimSpace(request.Name), CommitSHAs: request.CommitSHAs, Targets: targets, Strategy: release.Strategy(request.Strategy), Traffic: release.TrafficSplit{StablePercent: request.Stable, CandidatePercent: request.Candidate, BluePercent: request.Blue, GreenPercent: request.Green}})
 	if err != nil {
 		writeReleaseError(c, err)
 		return
@@ -209,7 +218,7 @@ func (s *Server) retryReleaseTarget(c *gin.Context) {
 		writeReleaseError(c, fmt.Errorf("目标 %s 配置校验失败：%w", target.Name, targetErr))
 		return
 	}
-	if strings.TrimSpace(resolvedConfig.Manifest) == "" || resolvedConfig.Version < 1 {
+	if !deploymentConfigReady(resolvedConfig) {
 		writeReleaseError(c, fmt.Errorf("目标 %s 尚未配置部署配置", target.Name))
 		return
 	}
@@ -346,6 +355,11 @@ func (s *Server) startPublish(ctx context.Context, project domain.Project, id st
 	if err != nil {
 		return err
 	}
+	// A second click while the same release is already queued or running is
+	// idempotent. Return before repeating the network-heavy preflight checks.
+	if item.Status == release.StatusQueued || item.Status == release.StatusRunning {
+		return nil
+	}
 	if err := git.RequireRepositoryWriteAccess(ctx, s.deps.Git, project.RepositoryID); err != nil {
 		return err
 	}
@@ -359,14 +373,39 @@ func (s *Server) startPublish(ctx context.Context, project domain.Project, id st
 			return err
 		}
 	}
+	if s.deps.ImageBuilder == nil {
+		return runtime.ErrImageBuildUnsupported
+	}
+	if checker, ok := s.deps.ImageBuilder.(imagebuild.PreflightChecker); ok {
+		request, requestErr := s.imageBuildRequest(ctx, project, item, firstReleaseCommit(item))
+		if requestErr != nil {
+			return requestErr
+		}
+		if err := checker.Preflight(ctx, request); err != nil {
+			return err
+		}
+	}
 	// Validate every selected environment before changing the release state. A
 	// single project manifest is retargeted to each namespace independently.
 	for _, target := range item.Targets {
+		// Cluster clients are process-local. Restore the persisted connection
+		// before asking Kubernetes for an access review; otherwise a service
+		// restart reports a healthy, persisted target as "runtime cluster not
+		// found" even though its kubeconfig is available.
+		if err := s.ensureRuntimeCluster(ctx, project.SpaceID, target.ClusterID); err != nil {
+			return fmt.Errorf("目标 %s 的 Kubernetes 集群连接失败：%w", target.Name, err)
+		}
+		if err := s.ensureRuntimeNamespace(ctx, project.SpaceID, target.Environment, target.ClusterID, target.Namespace); err != nil {
+			return fmt.Errorf("目标 %s 的 Kubernetes namespace 准备失败：%w", target.Name, err)
+		}
+		if err := s.deps.Runtime.CheckReleaseAccess(ctx, target.ClusterID, target.Namespace); err != nil {
+			return fmt.Errorf("目标 %s 的 Kubernetes 发布权限检查失败：%w", target.Name, err)
+		}
 		resolvedConfig, _, targetErr := s.resolveDeploymentConfigForTargetWithContext(ctx, project, deploymentTargetFromReleaseTarget(project, target))
 		if targetErr != nil {
 			return fmt.Errorf("目标 %s 配置校验失败：%w", target.Name, targetErr)
 		}
-		if strings.TrimSpace(resolvedConfig.Manifest) == "" || resolvedConfig.Version < 1 {
+		if !deploymentConfigReady(resolvedConfig) {
 			return fmt.Errorf("目标 %s 尚未配置部署配置", target.Name)
 		}
 	}
@@ -507,11 +546,18 @@ func (s *Server) deployRelease(project domain.Project, item release.Release, tar
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(config.Manifest) == "" || config.Version < 1 {
+	if !deploymentConfigReady(config) {
 		return fmt.Errorf("目标 %s 尚未配置部署配置", target.Name)
 	}
 	s.appendReleaseLog(item.ID, target.ID, "k8s", "stdout", "INFO", fmt.Sprintf("manifest format=%s version=%d", config.Format, config.Version))
 	if err := s.ensureRuntimeCluster(ctx, project.SpaceID, target.ClusterID); err != nil {
+		return err
+	}
+	if err := s.ensureRuntimeNamespace(ctx, project.SpaceID, target.Environment, target.ClusterID, target.Namespace); err != nil {
+		return err
+	}
+	imagePullCredential, err := s.imagePullCredentialForProject(ctx, project)
+	if err != nil {
 		return err
 	}
 	artifact, err := s.artifactForRelease(ctx, project, item, commitSHA)
@@ -521,27 +567,44 @@ func (s *Server) deployRelease(project domain.Project, item release.Release, tar
 	}
 	s.appendReleaseLog(item.ID, target.ID, "build", "stdout", "INFO", fmt.Sprintf("image=%s", artifact.Image))
 	return s.deps.Runtime.DeployRelease(ctx, runtime.ReleaseDeployment{
-		ClusterID:        target.ClusterID,
-		Namespace:        target.Namespace,
-		ProjectID:        project.ID,
-		TargetID:         target.ID,
-		ReleaseID:        item.ID,
-		Branch:           item.Branch,
-		CommitSHA:        commitSHA,
-		Image:            artifact.Image,
-		Replicas:         target.Replicas,
-		Strategy:         string(item.Plan.Strategy),
-		StablePercent:    item.Plan.Traffic.StablePercent,
-		CandidatePercent: item.Plan.Traffic.CandidatePercent,
-		BluePercent:      item.Plan.Traffic.BluePercent,
-		GreenPercent:     item.Plan.Traffic.GreenPercent,
-		Manifest:         config.Manifest,
-		ManifestFormat:   config.Format,
-		ManifestVersion:  config.Version,
+		ClusterID:           target.ClusterID,
+		Namespace:           target.Namespace,
+		ProjectID:           project.ID,
+		TargetID:            target.ID,
+		ReleaseID:           item.ID,
+		Branch:              item.Branch,
+		CommitSHA:           commitSHA,
+		Image:               artifact.Image,
+		Replicas:            target.Replicas,
+		Strategy:            string(item.Plan.Strategy),
+		StablePercent:       item.Plan.Traffic.StablePercent,
+		CandidatePercent:    item.Plan.Traffic.CandidatePercent,
+		BluePercent:         item.Plan.Traffic.BluePercent,
+		GreenPercent:        item.Plan.Traffic.GreenPercent,
+		Manifest:            config.Manifest,
+		ManifestFormat:      config.Format,
+		ManifestVersion:     config.Version,
+		ResourceFiles:       deploymentResourceContents(config.Files),
+		ImagePullCredential: imagePullCredential,
 		Log: func(source, stream, level, line string) {
 			s.appendReleaseLog(item.ID, target.ID, source, stream, level, line)
 		},
 	})
+}
+
+func (s *Server) imagePullCredentialForProject(ctx context.Context, project domain.Project) (*runtime.ImagePullCredential, error) {
+	if strings.TrimSpace(project.RegistryConnectionID) == "" {
+		return nil, nil
+	}
+	connection, err := s.deps.Store.GetImageRegistryConnection(ctx, project.SpaceID, project.RegistryConnectionID)
+	if err != nil {
+		return nil, fmt.Errorf("项目镜像仓库连接不可用")
+	}
+	credential, err := s.openImageRegistryCredential(connection)
+	if err != nil {
+		return nil, fmt.Errorf("项目镜像仓库凭证不可用")
+	}
+	return &runtime.ImagePullCredential{ConnectionID: connection.ID, Registry: connection.Registry, AuthType: connection.AuthType, Username: credential.Username, Secret: credential.Secret, SecretName: connection.PullSecretName}, nil
 }
 
 // artifactForRelease obtains one immutable artifact for a release execution.
@@ -570,21 +633,54 @@ func (s *Server) buildReleaseImage(ctx context.Context, project domain.Project, 
 	if s == nil || s.deps.ImageBuilder == nil {
 		return imagebuild.Result{}, runtime.ErrImageBuildUnsupported
 	}
+	request, err := s.imageBuildRequest(ctx, project, release.Release{ID: releaseID}, commitSHA)
+	if err != nil {
+		return imagebuild.Result{}, err
+	}
+	return s.deps.ImageBuilder.Build(ctx, request)
+}
+
+func firstReleaseCommit(item release.Release) string {
+	if len(item.Commits) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(item.Commits[0].SHA)
+}
+
+func (s *Server) imageBuildRequest(ctx context.Context, project domain.Project, item release.Release, commitSHA string) (imagebuild.Request, error) {
 	credential := imagebuild.SourceCredential{}
 	gitCredential, credentialErr := s.deps.Store.GetProjectGitCredential(ctx, project.SpaceID, project.ID)
 	if credentialErr == nil {
 		token, openErr := s.credentialCipher.open(gitCredential.TokenCiphertext)
 		if openErr != nil {
-			return imagebuild.Result{}, fmt.Errorf("项目仓库机器人凭证不可用")
+			return imagebuild.Request{}, fmt.Errorf("项目仓库机器人凭证不可用")
 		}
 		credential = imagebuild.SourceCredential{Username: gitCredential.Username, Token: token}
 	} else if !errors.Is(credentialErr, store.ErrNotFound) {
-		return imagebuild.Result{}, credentialErr
+		return imagebuild.Request{}, credentialErr
 	}
-	return s.deps.ImageBuilder.Build(ctx, imagebuild.Request{
-		ProjectID: project.ID, ReleaseID: releaseID, RepositoryURL: project.RepositoryURL, CommitSHA: commitSHA,
+	request := imagebuild.Request{
+		ProjectID: project.ID, ReleaseID: item.ID, RepositoryURL: project.RepositoryURL, CommitSHA: commitSHA,
 		SourceCredential: credential, ImageRepository: strings.TrimSpace(project.ImageRepository),
-	})
+	}
+	if strings.TrimSpace(project.RegistryConnectionID) != "" {
+		connection, connectionErr := s.deps.Store.GetImageRegistryConnection(ctx, project.SpaceID, project.RegistryConnectionID)
+		if connectionErr != nil {
+			return imagebuild.Request{}, fmt.Errorf("项目镜像仓库连接不可用")
+		}
+		registryCredential, openErr := s.openImageRegistryCredential(connection)
+		if openErr != nil {
+			return imagebuild.Request{}, fmt.Errorf("项目镜像仓库凭证不可用")
+		}
+		request.RegistryCredential = imagebuild.PushCredential{
+			ConnectionID: connection.ID,
+			Registry:     connection.Registry,
+			AuthType:     connection.AuthType,
+			Username:     registryCredential.Username,
+			Secret:       registryCredential.Secret,
+		}
+	}
+	return request, nil
 }
 
 func (s *Server) appendBuildLogs(releaseID, targetID string, logs []imagebuild.LogEntry) {
@@ -666,7 +762,7 @@ func (s *Server) resolveReleaseTargetsForContext(ctx context.Context, project do
 		}
 	}
 	if len(selected) == 0 {
-		return nil, fmt.Errorf("%w: 项目没有可用的部署目标", store.ErrInvalidInput)
+		return nil, fmt.Errorf("%w: 项目没有可用的发布环境；部署配置只定义资源文件，请先在“发布环境”中添加并启用 DEV 环境", store.ErrInvalidInput)
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
 		return selected[i].SortOrder < selected[j].SortOrder
@@ -713,8 +809,12 @@ func writeReleaseError(c *gin.Context, err error) {
 		status, code = http.StatusNotImplemented, "deployment_unsupported"
 	case errors.Is(err, runtime.ErrImageBuildUnsupported):
 		status, code = http.StatusNotImplemented, "image_build_unsupported"
+	case errors.Is(err, runtime.ErrReleaseAccessDenied):
+		status, code = http.StatusForbidden, "kubernetes_release_access_denied"
 	case errors.Is(err, imagebuild.ErrUnauthorized):
 		status, code = http.StatusBadGateway, "image_builder_unauthorized"
+	case errors.Is(err, imagebuild.ErrRegistryPreflightFailed):
+		status, code = http.StatusBadGateway, "image_registry_preflight_failed"
 	case errors.Is(err, runtime.ErrProviderNotConfigured):
 		status, code = http.StatusServiceUnavailable, "runtime_provider_not_configured"
 	case strings.Contains(err.Error(), "尚未配置部署配置"):

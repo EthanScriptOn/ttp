@@ -52,7 +52,7 @@ function environmentKey(target) {
 }
 
 export function releaseOwner(release) {
-  return release.created_by_name || release.creator_name || release.author || release.created_by || '发布人未返回'
+  return release.created_by_name || release.creator_name || (release.created_by ? `用户 #${release.created_by}` : '未知发布人')
 }
 
 export function commitOf(value) {

@@ -1,12 +1,12 @@
-import { Button, Form, Input, Modal, Select, Space, Tag, Typography, message } from 'antd'
-import { EnvironmentOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
+import { Alert, Button, Form, Input, Modal, Select, Space, Tag, Typography, message } from 'antd'
+import { SafetyCertificateOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
 
 const DEFAULT_VALUES = {
   repository_url: '',
   default_branch: 'main',
   description: '',
-  image_repository: '',
+  registry_connection_id: '',
 }
 
 const isValidRepository = (value) => {
@@ -31,7 +31,7 @@ function projectValues(project) {
     repository_url: project?.repository_url || DEFAULT_VALUES.repository_url,
     default_branch: project?.default_branch || DEFAULT_VALUES.default_branch,
     description: project?.description || DEFAULT_VALUES.description,
-    image_repository: project?.image_repository || DEFAULT_VALUES.image_repository,
+    registry_connection_id: project?.registry_connection_id || DEFAULT_VALUES.registry_connection_id,
   }
 }
 
@@ -40,11 +40,11 @@ function cleanPayload(values) {
     repository_url: values.repository_url.trim(),
     default_branch: values.default_branch.trim(),
     description: values.description?.trim() || '',
-    image_repository: values.image_repository?.trim() || '',
+    registry_connection_id: values.registry_connection_id || '',
   }
 }
 
-export default function ProjectSettings({ project, open, loading = false, onCancel, onSubmit, onGoTargets, gitCredential, gitCredentialLoading = false, onSaveGitCredential, onDeleteGitCredential }) {
+export default function ProjectSettings({ project, open, loading = false, onCancel, onSubmit, gitCredential, gitCredentialLoading = false, onSaveGitCredential, onDeleteGitCredential, registryConnections = [], canManageGit = true }) {
   const [form] = Form.useForm()
   const [credentialForm, setCredentialForm] = useState({ provider: 'auto', username: '', token: '' })
   const [credentialSaving, setCredentialSaving] = useState(false)
@@ -56,7 +56,17 @@ export default function ProjectSettings({ project, open, loading = false, onCanc
     }
   }, [form, open, project, gitCredential])
 
-  const handleFinish = (formValues) => onSubmit?.(cleanPayload(formValues))
+  const handleFinish = (formValues) => {
+    if (gitCredentialLoading) {
+      message.warning('正在检查仓库机器人，请稍后再保存')
+      return
+    }
+    if (gitCredential?.configured !== true) {
+      message.warning('请先配置并验证仓库机器人')
+      return
+    }
+    onSubmit?.(cleanPayload(formValues))
+  }
   const handleCredentialSave = async () => {
     if (!credentialForm.username.trim() || !credentialForm.token.trim()) {
       message.warning('请输入机器人账号和 Token')
@@ -72,7 +82,7 @@ export default function ProjectSettings({ project, open, loading = false, onCanc
   }
   return (
     <Modal
-      title="项目基本设置"
+      title="项目设置"
       open={open}
       onCancel={onCancel}
       onOk={() => form.submit()}
@@ -83,36 +93,6 @@ export default function ProjectSettings({ project, open, loading = false, onCanc
       width="min(680px, calc(100vw - 32px))"
       styles={{ body: { maxHeight: 'calc(100vh - 190px)', overflowY: 'auto', paddingInline: 2 } }}
     >
-      <Typography.Paragraph type="secondary" style={{ marginBottom: 18 }}>
-        这里只设置项目的基本信息和代码来源。一个项目可以有多个环境，集群、命名空间、实例数、容器端口和发布方式，请在“发布环境”中分别配置。
-      </Typography.Paragraph>
-
-      <div className="project-settings-route">
-        <EnvironmentOutlined />
-        <div>
-          <Typography.Text strong>要配置部署环境？</Typography.Text>
-          <Typography.Text type="secondary">每个环境可以使用不同的集群和发布策略。</Typography.Text>
-        </div>
-        <Button type="link" onClick={onGoTargets}>去配置环境</Button>
-      </div>
-
-      <div className="project-git-credential">
-        <div className="project-git-credential-heading">
-          <div><SafetyCertificateOutlined /><Typography.Text strong>仓库机器人</Typography.Text></div>
-          {gitCredentialLoading ? <Tag>检查中</Tag> : gitCredential?.configured ? <Tag color="green">已配置 · @{gitCredential.username}</Tag> : <Tag>未配置</Tag>}
-        </div>
-        <Typography.Text type="secondary" className="project-git-credential-note">用于读取仓库和执行发布操作，Token 不会回显。</Typography.Text>
-        <div className="project-git-credential-fields">
-          <Select value={credentialForm.provider} onChange={(provider) => setCredentialForm((value) => ({ ...value, provider }))} options={[{ value: 'auto', label: '自动识别 Git 平台' }, { value: 'github', label: 'GitHub' }, { value: 'gitlab', label: 'GitLab' }]} />
-          <Input value={credentialForm.username} onChange={(event) => setCredentialForm((value) => ({ ...value, username: event.target.value }))} placeholder="机器人用户名" autoComplete="off" />
-          <Input.Password value={credentialForm.token} onChange={(event) => setCredentialForm((value) => ({ ...value, token: event.target.value }))} placeholder={gitCredential?.configured ? '输入新 Token 以更新' : '访问 Token'} autoComplete="new-password" />
-        </div>
-        <Space className="project-git-credential-actions">
-          <Button type="primary" loading={credentialSaving} onClick={handleCredentialSave}>检查并保存</Button>
-          {gitCredential?.configured && <Button danger onClick={() => onDeleteGitCredential?.()}>移除授权</Button>}
-        </Space>
-      </div>
-
       <Form
         form={form}
         layout="vertical"
@@ -148,15 +128,37 @@ export default function ProjectSettings({ project, open, loading = false, onCanc
           <Input allowClear placeholder="例如：订单服务的后端接口" />
         </Form.Item>
 
-        <Form.Item
-          label="镜像仓库地址"
-          name="image_repository"
-          extra="发布产物的推送目标，格式 registry.example.com/命名空间/仓库（不带 tag）。留空使用平台默认仓库。"
-          rules={[
-            { validator: (_, value) => { const trimmed = value?.trim(); if (!trimmed) return Promise.resolve(); if (/\s|@/.test(trimmed) || trimmed.includes('://') || !trimmed.includes('/') || !/^[^/]+\.[^/]+(:\d+)?\//.test(trimmed)) return Promise.reject(new Error('请输入有效的镜像仓库地址，例如 registry.example.com/team/app')); return Promise.resolve() } },
-          ]}
-        >
-          <Input allowClear placeholder="例如：registry.example.com/team/order-service" />
+        <div className="project-settings-subheading">
+          <Typography.Text strong>仓库授权</Typography.Text>
+          <Typography.Text type="secondary">用于读取代码和执行发布。</Typography.Text>
+        </div>
+        <div className="project-git-credential">
+          <div className="project-git-credential-heading">
+            <div><SafetyCertificateOutlined /><Typography.Text strong>仓库机器人</Typography.Text></div>
+            {gitCredentialLoading ? <Tag>检查中</Tag> : gitCredential?.invalid ? <Tag color="red">授权已失效，请重新配置</Tag> : gitCredential?.configured ? <Tag color="green">已配置 · @{gitCredential.username}</Tag> : <Tag>未配置</Tag>}
+          </div>
+          <Typography.Text type={gitCredential?.invalid ? 'danger' : 'secondary'} className="project-git-credential-note">{gitCredential?.invalid ? '凭证不可用，请重新输入。Token 不会回显。' : 'Token 不会回显。'}</Typography.Text>
+          {canManageGit ? <>
+            <div className="project-git-credential-fields">
+              <Select value={credentialForm.provider} onChange={(provider) => setCredentialForm((value) => ({ ...value, provider }))} options={[{ value: 'auto', label: '自动识别 Git 平台' }, { value: 'github', label: 'GitHub' }, { value: 'gitlab', label: 'GitLab' }]} />
+              <Input value={credentialForm.username} onChange={(event) => setCredentialForm((value) => ({ ...value, username: event.target.value }))} placeholder="机器人用户名" autoComplete="off" />
+              <Input.Password value={credentialForm.token} onChange={(event) => setCredentialForm((value) => ({ ...value, token: event.target.value }))} placeholder={gitCredential?.configured ? '输入新 Token 以更新' : '访问 Token'} autoComplete="new-password" />
+            </div>
+            <Space className="project-git-credential-actions">
+              <Button type="primary" loading={credentialSaving} onClick={handleCredentialSave}>检查并保存</Button>
+              {gitCredential?.configured && <Button danger onClick={() => onDeleteGitCredential?.()}>移除授权</Button>}
+            </Space>
+          </> : <Alert type="info" showIcon message="当前项目角色只能查看 Git 连接状态，不能替换仓库机器人。" />}
+        </div>
+
+        <div className="project-settings-subheading project-settings-subheading-inline">
+          <Typography.Text strong>构建与镜像</Typography.Text>
+          <Typography.Text type="secondary">选择项目使用的镜像仓库。</Typography.Text>
+        </div>
+        {!registryConnections.length && <Alert type="warning" showIcon message="当前空间还没有镜像仓库连接，请先到连接管理中添加并测试连接。" />}
+
+        <Form.Item label="镜像仓库连接" name="registry_connection_id" rules={[{ required: true, message: '请选择镜像仓库连接' }]} extra="用于构建推送和集群拉取。">
+          <Select showSearch optionFilterProp="label" placeholder={registryConnections.length ? '请选择镜像仓库连接' : '尚未配置镜像仓库连接'} options={registryConnections.map((connection) => ({ value: connection.id, label: `${connection.name} · ${connection.registry}` }))} />
         </Form.Item>
       </Form>
     </Modal>

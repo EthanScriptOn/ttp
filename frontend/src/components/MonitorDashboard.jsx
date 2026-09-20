@@ -118,8 +118,9 @@ export default function MonitorDashboard({ scope = 'project', metrics, pods = []
   const hasIssues = failedPods > 0 || pendingPods > 0 || (crashLoopCount || 0) > 0 || (oomCount || 0) > 0 || (desired > 0 && available < desired)
   const statusState = !hasStatusData ? 'unknown' : hasIssues ? 'warning' : 'healthy'
   const statusLabel = statusState === 'healthy' ? '运行正常' : statusState === 'warning' ? '存在异常' : '暂无运行实例'
+  const hasNodeDetails = Array.isArray(metrics?.nodes) && metrics.nodes.length > 0
   const statusDescription = statusState === 'warning'
-    ? '有 Pod 或部署状态需要关注，请查看下方明细。'
+    ? hasNodeDetails ? '有 Pod 或部署状态需要关注。' : '有 Pod 或部署状态需要关注，但当前没有可用的节点明细。'
     : statusState === 'unknown'
       ? '当前还没有可观测的 Pod 或节点。'
       : snapshotUnavailable
@@ -154,6 +155,13 @@ export default function MonitorDashboard({ scope = 'project', metrics, pods = []
     { title: '入网', dataIndex: 'network_receive_mbps', width: 82, render: (value) => <span>{NodeValue({ value, unit: ' Mbps', precision: 0, available: metrics?.metrics_available !== false })}</span> },
     { title: '出网', dataIndex: 'network_transmit_mbps', width: 82, render: (value) => <span>{NodeValue({ value, unit: ' Mbps', precision: 0, available: metrics?.metrics_available !== false })}</span> },
     { title: 'Pod', dataIndex: 'pod_count', width: 62, render: (value) => integerMetric(value) },
+  ]
+  const podColumns = [
+    { title: 'Pod', dataIndex: 'name', ellipsis: true },
+    { title: '命名空间', dataIndex: 'namespace', width: 130, ellipsis: true },
+    { title: '状态', dataIndex: 'ready', width: 78, render: (value) => <Tag color={value ? 'green' : 'orange'}>{value ? '正常' : '处理中'}</Tag> },
+    { title: '重启', dataIndex: 'restart_count', width: 70, render: (value) => integerMetric(value, ' 次') },
+    { title: 'Pod IP', dataIndex: 'pod_ip', width: 125, render: (value) => value || '-' },
   ]
 
   const trendGroups = [
@@ -231,7 +239,8 @@ export default function MonitorDashboard({ scope = 'project', metrics, pods = []
 
     {focusPod && <div className="monitor-focus-note">曲线按当前环境统计；Pod 状态、版本、节点和重启次数为当前 Pod 信息。</div>}
 
-    {metrics?.metrics_available === false && <Alert className="monitor-source-alert" type="warning" showIcon message="当前能看到 Pod 和集群基础信息，资源曲线还没有数据" description={metrics.metrics_message || '接入 metrics-server 或 Prometheus 后，CPU、内存、磁盘和网络曲线会自动出现。'} />}
+    {metrics?.metrics_available === false && <Alert className="monitor-source-alert" type="warning" showIcon message="当前能看到 Pod 和集群基础信息，资源曲线还没有数据" description={metrics.metrics_message || '请确认 Prometheus、node-exporter 和 kube-state-metrics 已安装并正常运行。'} />}
+    {metrics?.metrics_available !== false && metrics?.monitoring?.history_available === false && <Alert className="monitor-source-alert" type="info" showIcon message="Prometheus 历史数据正在准备" description="Prometheus 采集链路就绪后，平台会保存并读取历史资源数据；强制刷新页面不会清空历史记录。" />}
 
     <section className={`monitor-status-overview status-state-${statusState}`}>
       <div className="monitor-status-summary">
@@ -240,7 +249,6 @@ export default function MonitorDashboard({ scope = 'project', metrics, pods = []
       </div>
       <div className="monitor-overview-content">
         <div className="monitor-overview-metrics">{statusItems.map((item) => <OverviewMetric key={item.label} {...item} />)}</div>
-        <div className="monitor-overview-health"><div><span>{isCluster ? '工作负载可用度' : '部署可用度'}</span><strong>{desired ? `${available} / ${desired}` : '暂无'}</strong></div><div className="monitor-overview-health-track"><span style={{ width: `${desired ? Math.min(100, Math.round((available / desired) * 100)) : 0}%` }} /></div></div>
       </div>
     </section>
 
@@ -249,7 +257,7 @@ export default function MonitorDashboard({ scope = 'project', metrics, pods = []
     <div className="monitor-detail-grid">
       <Card variant="borderless" className="monitor-detail-card monitor-node-card monitor-node-card-wide">
         <div className="monitor-card-heading"><Typography.Title level={5}>{isCluster ? '节点明细' : '承载节点'}</Typography.Title></div>
-        {metrics?.nodes?.length ? <Table className="monitor-node-table" size="small" rowKey="name" columns={nodeColumns} dataSource={metrics.nodes} pagination={false} scroll={{ x: 760 }} /> : <div className="monitor-table-empty">当前数据源没有节点明细</div>}
+        {metrics?.nodes?.length ? <Table className="monitor-node-table" size="small" rowKey="name" columns={nodeColumns} dataSource={metrics.nodes} pagination={false} scroll={{ x: 760 }} expandable={{ rowExpandable: (node) => node.pods?.length > 0, expandedRowRender: (node) => <Table size="small" rowKey="name" columns={podColumns} dataSource={node.pods} pagination={false} showHeader /> }} /> : <div className="monitor-table-empty">当前数据源没有节点明细</div>}
       </Card>
     </div>
 

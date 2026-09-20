@@ -6,12 +6,17 @@ import "sort"
 // of namespaced resources. Keeping this list next to manifest validation gives
 // the editor and the runtime one source of truth for the release boundary.
 var releaseSupportedKinds = []string{
+	"CronJob",
 	"ConfigMap",
+	"DaemonSet",
 	"Deployment",
 	"HorizontalPodAutoscaler",
 	"Ingress",
+	"Job",
+	"PersistentVolumeClaim",
 	"Secret",
 	"Service",
+	"StatefulSet",
 }
 
 // ReleaseSupportedKinds returns a copy so callers cannot mutate the shared

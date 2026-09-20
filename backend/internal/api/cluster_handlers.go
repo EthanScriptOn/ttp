@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -16,6 +17,7 @@ type clusterConnectionView struct {
 	Cluster    store.Cluster             `json:"cluster"`
 	Connected  bool                      `json:"connected"`
 	Connection runtime.ClusterConnection `json:"connection,omitempty"`
+	Monitoring runtime.MonitoringStatus  `json:"monitoring,omitempty"`
 	Message    string                    `json:"message,omitempty"`
 }
 
@@ -113,8 +115,40 @@ func (s *Server) checkAndPersistCluster(c *gin.Context, cluster store.Cluster) c
 	}
 	view.Connected = true
 	view.Message = "连接成功"
+	if monitoring, monitoringErr := s.deps.Runtime.CheckMonitoring(ctx, cluster.ID); monitoringErr == nil {
+		view.Monitoring = monitoring
+	}
 	view.Cluster = s.markClusterActive(c, cluster)
 	return view
+}
+
+func (s *Server) installMonitoring(c *gin.Context) {
+	claims, ok := s.requireSpace(c)
+	if !ok {
+		return
+	}
+	cluster, err := s.deps.Store.GetCluster(c.Request.Context(), claims.SpaceID, c.Param("clusterID"))
+	if err != nil {
+		writeStoreError(c, err)
+		return
+	}
+	if err := s.registerRuntimeCluster(c.Request.Context(), cluster); err != nil {
+		writeRuntimeError(c, err)
+		return
+	}
+	retentionDays := 7
+	if value := c.Query("retention_days"); value != "" {
+		if parsed, parseErr := strconv.Atoi(value); parseErr == nil {
+			retentionDays = parsed
+		}
+	}
+	status, err := s.deps.Runtime.InstallMonitoringWithRetention(c.Request.Context(), cluster.ID, retentionDays)
+	if err != nil {
+		writeRuntimeError(c, err)
+		return
+	}
+	s.recordAudit(c, "安装监控组件", cluster.Name+" · "+status.DisplayName)
+	c.JSON(http.StatusOK, gin.H{"cluster": cluster, "monitoring": status})
 }
 
 func (s *Server) markClusterOffline(c *gin.Context, cluster store.Cluster) store.Cluster {

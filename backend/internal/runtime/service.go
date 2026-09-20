@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/yuebuy/cicd-platform/backend/internal/domain"
 )
 
 var (
@@ -102,6 +104,92 @@ func (s *Service) DeployRelease(ctx context.Context, deployment ReleaseDeploymen
 		return ErrReleaseDeploymentUnsupported
 	}
 	return deployer.DeployRelease(ctx, deployment)
+}
+
+func (s *Service) CheckReleaseAccess(ctx context.Context, clusterID, namespace string) error {
+	if s == nil || s.provider == nil {
+		return ErrProviderNotConfigured
+	}
+	checker, ok := s.provider.(ReleaseAccessChecker)
+	if !ok {
+		// Observation-only/custom providers predate the optional preflight
+		// contract. The Kubernetes provider implements this check; providers
+		// that can publish must implement it to get the same gate.
+		return nil
+	}
+	return checker.CheckReleaseAccess(ctx, clusterID, namespace)
+}
+
+// EnsureNamespace delegates generated namespace creation/ownership checks to a
+// runtime that supports them. Observation-only providers remain compatible and
+// report ErrNamespaceManagementUnsupported to callers that want to skip the
+// optional write.
+func (s *Service) EnsureNamespace(ctx context.Context, clusterID, namespace string, labels map[string]string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s == nil || s.provider == nil {
+		return ErrNamespaceManagementUnsupported
+	}
+	manager, ok := s.provider.(NamespaceManager)
+	if !ok {
+		return ErrNamespaceManagementUnsupported
+	}
+	return manager.EnsureNamespace(ctx, clusterID, namespace, labels)
+}
+
+// EnsureNamespaceWithQuota prefers the quota-aware runtime contract while
+// retaining compatibility with providers that only know how to create
+// namespaces. The latter still get ownership checks, but cannot enforce a
+// live Kubernetes budget.
+func (s *Service) EnsureNamespaceWithQuota(ctx context.Context, clusterID, namespace string, labels map[string]string, quota domain.NamespaceQuota) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s == nil || s.provider == nil {
+		return ErrNamespaceManagementUnsupported
+	}
+	if manager, ok := s.provider.(NamespaceQuotaManager); ok {
+		return manager.EnsureNamespaceWithQuota(ctx, clusterID, namespace, labels, quota)
+	}
+	if manager, ok := s.provider.(NamespaceManager); ok {
+		return manager.EnsureNamespace(ctx, clusterID, namespace, labels)
+	}
+	return ErrNamespaceManagementUnsupported
+}
+
+func (s *Service) CheckMonitoring(ctx context.Context, clusterID string) (MonitoringStatus, error) {
+	if s == nil || s.provider == nil {
+		return MonitoringStatus{}, ErrProviderNotConfigured
+	}
+	installer, ok := s.provider.(MonitoringInstaller)
+	if !ok {
+		return MonitoringStatus{
+			Component:   "prometheus",
+			DisplayName: "Prometheus",
+			Installable: false,
+			Message:     "当前运行时不支持自动安装监控组件",
+		}, nil
+	}
+	return installer.CheckMonitoring(ctx, clusterID)
+}
+
+func (s *Service) InstallMonitoring(ctx context.Context, clusterID string) (MonitoringStatus, error) {
+	return s.InstallMonitoringWithRetention(ctx, clusterID, 7)
+}
+
+func (s *Service) InstallMonitoringWithRetention(ctx context.Context, clusterID string, retentionDays int) (MonitoringStatus, error) {
+	if s == nil || s.provider == nil {
+		return MonitoringStatus{}, ErrProviderNotConfigured
+	}
+	installer, ok := s.provider.(MonitoringInstaller)
+	if !ok {
+		return MonitoringStatus{}, ErrClusterManagementUnsupported
+	}
+	if retentionInstaller, ok := s.provider.(MonitoringRetentionInstaller); ok {
+		return retentionInstaller.InstallMonitoringWithRetention(ctx, clusterID, retentionDays)
+	}
+	return installer.InstallMonitoring(ctx, clusterID)
 }
 
 // CleanupEnvironment refuses to claim success when the configured provider

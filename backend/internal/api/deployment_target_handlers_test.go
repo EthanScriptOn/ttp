@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/yuebuy/cicd-platform/backend/internal/domain"
+	"github.com/yuebuy/cicd-platform/backend/internal/store"
 )
 
 func TestDeploymentTargetCannotChangeDuringActiveRelease(t *testing.T) {
@@ -72,5 +76,84 @@ func TestDeploymentTargetCannotChangeDuringActiveRelease(t *testing.T) {
 	updated := doRequest(t, handler, http.MethodPatch, "/api/projects/reverse-lab/deployment-targets/"+uatID, token, `{"deploy_strategy":"canary"}`)
 	if updated.Code != http.StatusOK {
 		t.Fatalf("update target after release: expected 200, got %d: %s", updated.Code, updated.Body.String())
+	}
+}
+
+func TestDeploymentTargetPersistsAndReusesNamespaceQuota(t *testing.T) {
+	server := testServer()
+	handler := server.Router()
+	token := loginForTest(t, handler)
+
+	body := `{"resource_quota":{"cpu_request":"1","cpu_limit":"2","memory_request":"1Gi","memory_limit":"2Gi","ephemeral_storage_request":"5Gi","ephemeral_storage_limit":"10Gi","storage":"25Gi","pods":8,"persistent_volume_claims":4,"default_cpu_request":"100m","default_cpu_limit":"250m","default_memory_request":"128Mi","default_memory_limit":"256Mi","default_ephemeral_storage_request":"128Mi","default_ephemeral_storage_limit":"512Mi"}}`
+	updated := doRequest(t, handler, http.MethodPatch, "/api/projects/reverse-lab/deployment-targets/target-reverse-lab-uat", token, body)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update quota: expected 200, got %d: %s", updated.Code, updated.Body.String())
+	}
+	var updatedBody struct {
+		Target struct {
+			ResourceQuota domain.NamespaceQuota `json:"resource_quota"`
+		} `json:"target"`
+	}
+	if err := json.Unmarshal(updated.Body.Bytes(), &updatedBody); err != nil {
+		t.Fatal(err)
+	}
+	if updatedBody.Target.ResourceQuota.CPULimit != "2" || updatedBody.Target.ResourceQuota.Storage != "25Gi" || updatedBody.Target.ResourceQuota.Pods != 8 {
+		t.Fatalf("updated target quota = %#v", updatedBody.Target.ResourceQuota)
+	}
+
+	withoutQuota := doRequest(t, handler, http.MethodPatch, "/api/projects/reverse-lab/deployment-targets/target-reverse-lab-uat", token, `{"deploy_strategy":"canary"}`)
+	if withoutQuota.Code != http.StatusOK {
+		t.Fatalf("update without quota: expected 200, got %d: %s", withoutQuota.Code, withoutQuota.Body.String())
+	}
+	var reusedBody struct {
+		Target struct {
+			ResourceQuota domain.NamespaceQuota `json:"resource_quota"`
+		} `json:"target"`
+	}
+	if err := json.Unmarshal(withoutQuota.Body.Bytes(), &reusedBody); err != nil {
+		t.Fatal(err)
+	}
+	if reusedBody.Target.ResourceQuota != updatedBody.Target.ResourceQuota {
+		t.Fatalf("quota was reset when omitted: got %#v want %#v", reusedBody.Target.ResourceQuota, updatedBody.Target.ResourceQuota)
+	}
+}
+
+func TestDeploymentTargetSharesNamespaceQuotaAcrossProjects(t *testing.T) {
+	server := testServer()
+	handler := server.Router()
+	token := loginForTest(t, handler)
+
+	body := `{"resource_quota":{"cpu_request":"1","cpu_limit":"2","memory_request":"1Gi","memory_limit":"2Gi","ephemeral_storage_request":"5Gi","ephemeral_storage_limit":"10Gi","storage":"25Gi","pods":8,"persistent_volume_claims":4,"default_cpu_request":"100m","default_cpu_limit":"250m","default_memory_request":"128Mi","default_memory_limit":"256Mi","default_ephemeral_storage_request":"128Mi","default_ephemeral_storage_limit":"512Mi"}}`
+	updated := doRequest(t, handler, http.MethodPatch, "/api/projects/reverse-lab/deployment-targets/target-reverse-lab-dev", token, body)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update shared quota: expected 200, got %d: %s", updated.Code, updated.Body.String())
+	}
+
+	project, err := server.deps.Store.CreateProject(context.Background(), "space-lab", store.CreateProjectInput{
+		Name:          "共享环境项目",
+		RepositoryURL: "https://example.invalid/shared-environment",
+		ClusterID:     "demo-cluster",
+	})
+	if err != nil {
+		t.Fatalf("create second project: %v", err)
+	}
+	created := doRequest(t, handler, http.MethodPost, "/api/projects/"+project.ID+"/deployment-targets", token, `{"name":"开发环境","environment":"DEV","stage":"dev","sort_order":1,"cluster_id":"demo-cluster","resource_quota":{"cpu_request":"2","cpu_limit":"4","memory_request":"2Gi","memory_limit":"4Gi","ephemeral_storage_request":"10Gi","ephemeral_storage_limit":"20Gi","storage":"50Gi","pods":20,"persistent_volume_claims":10,"default_cpu_request":"100m","default_cpu_limit":"500m","default_memory_request":"128Mi","default_memory_limit":"512Mi","default_ephemeral_storage_request":"256Mi","default_ephemeral_storage_limit":"1Gi"},"replicas":1,"container_port":8080,"deploy_strategy":"rolling"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create second project target: expected 201, got %d: %s", created.Code, created.Body.String())
+	}
+	var createdBody struct {
+		Target struct {
+			Namespace     string                `json:"namespace"`
+			ResourceQuota domain.NamespaceQuota `json:"resource_quota"`
+		} `json:"target"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil {
+		t.Fatal(err)
+	}
+	if createdBody.Target.Namespace != "ttp-lab-dev" {
+		t.Fatalf("shared target namespace = %q, want ttp-lab-dev", createdBody.Target.Namespace)
+	}
+	if createdBody.Target.ResourceQuota.CPULimit != "2" || createdBody.Target.ResourceQuota.Storage != "25Gi" || createdBody.Target.ResourceQuota.Pods != 8 {
+		t.Fatalf("second project did not reuse shared quota: %#v", createdBody.Target.ResourceQuota)
 	}
 }

@@ -17,6 +17,7 @@ import (
 var (
 	ErrNotConfigured               = errors.New("image builder is not configured")
 	ErrUnauthorized                = errors.New("image builder authentication failed")
+	ErrRegistryPreflightFailed     = errors.New("image registry preflight failed")
 	ErrPlatformConfigNotConfigured = errors.New("platform image build configuration is not configured")
 )
 
@@ -26,11 +27,28 @@ type Builder interface {
 	Build(context.Context, Request) (Result, error)
 }
 
+// PreflightChecker verifies builder-side credentials before a release enters
+// the running state. Build remains the final authority because registries may
+// apply repository-specific policy only when an upload starts.
+type PreflightChecker interface {
+	Preflight(context.Context, Request) error
+}
+
 // SourceCredential is sent only for the lifetime of a single build request.
 // It must not be persisted or returned in a Result.
 type SourceCredential struct {
 	Username string `json:"username"`
 	Token    string `json:"token"`
+}
+
+// PushCredential is supplied for one build only. The detached builder uses it
+// to create a private, short-lived Docker config and never persists it.
+type PushCredential struct {
+	ConnectionID string `json:"connection_id,omitempty"`
+	Registry     string `json:"registry"`
+	AuthType     string `json:"auth_type"`
+	Username     string `json:"username,omitempty"`
+	Secret       string `json:"secret"`
 }
 
 // Request contains the source information a detached builder needs to build
@@ -43,11 +61,12 @@ type Request struct {
 	RepositoryURL    string           `json:"repository_url"`
 	CommitSHA        string           `json:"commit_sha"`
 	SourceCredential SourceCredential `json:"source_credential"`
-	// ImageRepository is the optional project-specified push target in the
-	// form "registry.host/namespace/repository" without a tag or digest.
-	// When it is empty the builder falls back to the platform-owned
-	// repository naming derived from the configured prefix.
-	ImageRepository string `json:"image_repository,omitempty"`
+	// ImageRepository is an optional legacy/project-specific push target in the
+	// form "registry.host/namespace/repository" without a tag or digest. When
+	// a managed RegistryCredential is present and this is empty, the builder
+	// derives a stable repository path from that connection and ProjectID.
+	ImageRepository    string         `json:"image_repository,omitempty"`
+	RegistryCredential PushCredential `json:"registry_credential,omitempty"`
 }
 
 // LogEntry intentionally contains no command line or environment value. A
@@ -115,6 +134,34 @@ func (r Request) Validate() error {
 	if strings.TrimSpace(r.ImageRepository) != "" {
 		if err := ValidateImageRepository(r.ImageRepository); err != nil {
 			return err
+		}
+	}
+	if r.RegistryCredential != (PushCredential{}) {
+		credential := r.RegistryCredential
+		registry := strings.ToLower(strings.TrimSpace(credential.Registry))
+		if _, err := NormalizeImageRepositoryPrefix(registry); err != nil || strings.Contains(registry, "/") {
+			return fmt.Errorf("registry credential registry is invalid")
+		}
+		if strings.TrimSpace(r.ImageRepository) != "" {
+			host, err := RegistryHost(r.ImageRepository)
+			if err != nil || registry != host {
+				return fmt.Errorf("registry credential does not match image_repository")
+			}
+		}
+		if credential.AuthType != "basic" && credential.AuthType != "token" {
+			return fmt.Errorf("registry credential auth_type must be basic or token")
+		}
+		if strings.TrimSpace(credential.Secret) == "" || len(credential.Secret) > 4096 || strings.ContainsAny(credential.Secret, "\x00\r\n") {
+			return fmt.Errorf("registry credential secret is invalid")
+		}
+		if len(credential.Username) > 120 || strings.ContainsAny(credential.Username, "\x00\r\n") {
+			return fmt.Errorf("registry credential username is invalid")
+		}
+		if credential.AuthType == "basic" && strings.TrimSpace(credential.Username) == "" {
+			return fmt.Errorf("registry credential username is required for basic auth")
+		}
+		if credential.ConnectionID != "" && !credentialRef.MatchString(strings.TrimSpace(credential.ConnectionID)) {
+			return fmt.Errorf("registry credential connection_id is invalid")
 		}
 	}
 	return nil

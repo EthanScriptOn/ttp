@@ -116,37 +116,41 @@ type Artifact struct {
 }
 
 type Release struct {
-	ID           string          `json:"id"`
-	SpaceID      string          `json:"space_id,omitempty"`
-	ProjectID    string          `json:"project_id"`
-	RepositoryID string          `json:"repository_id"`
-	Branch       string          `json:"branch"`
-	Name         string          `json:"name,omitempty"`
-	Commits      []git.Commit    `json:"commits"`
-	Targets      []ReleaseTarget `json:"targets,omitempty"`
-	Artifact     *Artifact       `json:"artifact,omitempty"`
-	Plan         RolloutPlan     `json:"plan"`
-	Status       Status          `json:"status"`
-	Progress     int             `json:"progress,omitempty"`
-	Stage        string          `json:"stage,omitempty"`
-	Message      string          `json:"message,omitempty"`
-	Error        string          `json:"error,omitempty"`
-	StartedAt    *time.Time      `json:"started_at,omitempty"`
-	FinishedAt   *time.Time      `json:"finished_at,omitempty"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
+	ID            string          `json:"id"`
+	SpaceID       string          `json:"space_id,omitempty"`
+	ProjectID     string          `json:"project_id"`
+	RepositoryID  string          `json:"repository_id"`
+	CreatedBy     uint64          `json:"created_by,omitempty"`
+	CreatedByName string          `json:"created_by_name,omitempty"`
+	Branch        string          `json:"branch"`
+	Name          string          `json:"name,omitempty"`
+	Commits       []git.Commit    `json:"commits"`
+	Targets       []ReleaseTarget `json:"targets,omitempty"`
+	Artifact      *Artifact       `json:"artifact,omitempty"`
+	Plan          RolloutPlan     `json:"plan"`
+	Status        Status          `json:"status"`
+	Progress      int             `json:"progress,omitempty"`
+	Stage         string          `json:"stage,omitempty"`
+	Message       string          `json:"message,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	StartedAt     *time.Time      `json:"started_at,omitempty"`
+	FinishedAt    *time.Time      `json:"finished_at,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
 type CreateInput struct {
-	SpaceID      string        `json:"space_id,omitempty"`
-	ProjectID    string        `json:"project_id"`
-	RepositoryID string        `json:"repository_id"`
-	Branch       string        `json:"branch"`
-	Name         string        `json:"name"`
-	CommitSHAs   []string      `json:"commit_shas"`
-	Strategy     Strategy      `json:"strategy"`
-	Traffic      TrafficSplit  `json:"traffic"`
-	Targets      []TargetInput `json:"targets,omitempty"`
+	SpaceID       string        `json:"space_id,omitempty"`
+	ProjectID     string        `json:"project_id"`
+	RepositoryID  string        `json:"repository_id"`
+	CreatedBy     uint64        `json:"-"`
+	CreatedByName string        `json:"-"`
+	Branch        string        `json:"branch"`
+	Name          string        `json:"name"`
+	CommitSHAs    []string      `json:"commit_shas"`
+	Strategy      Strategy      `json:"strategy"`
+	Traffic       TrafficSplit  `json:"traffic"`
+	Targets       []TargetInput `json:"targets,omitempty"`
 }
 
 type Service struct {
@@ -245,7 +249,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Release, bool,
 	now := s.now().UTC()
 	s.nextID++
 	id := fmt.Sprintf("rel-%06d", s.nextID)
-	result := Release{ID: id, SpaceID: strings.TrimSpace(input.SpaceID), ProjectID: input.ProjectID, RepositoryID: input.RepositoryID, Branch: input.Branch, Name: strings.TrimSpace(input.Name), Commits: append([]git.Commit(nil), commits...), Targets: newReleaseTargets(input.Targets), Plan: plan, Status: StatusDraft, CreatedAt: now, UpdatedAt: now}
+	result := Release{ID: id, SpaceID: strings.TrimSpace(input.SpaceID), ProjectID: input.ProjectID, RepositoryID: input.RepositoryID, CreatedBy: input.CreatedBy, CreatedByName: strings.TrimSpace(input.CreatedByName), Branch: input.Branch, Name: strings.TrimSpace(input.Name), Commits: append([]git.Commit(nil), commits...), Targets: newReleaseTargets(input.Targets), Plan: plan, Status: StatusDraft, CreatedAt: now, UpdatedAt: now}
 	if err := s.persist(ctx, result); err != nil {
 		return Release{}, false, err
 	}

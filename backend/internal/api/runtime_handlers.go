@@ -13,7 +13,7 @@ import (
 )
 
 func (s *Server) listPods(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -33,7 +33,7 @@ func (s *Server) listPods(c *gin.Context) {
 }
 
 func (s *Server) getPod(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -53,7 +53,7 @@ func (s *Server) getPod(c *gin.Context) {
 }
 
 func (s *Server) getPodLogs(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -82,7 +82,7 @@ func (s *Server) getPodLogs(c *gin.Context) {
 }
 
 func (s *Server) execPodCommand(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -115,7 +115,7 @@ func (s *Server) execPodCommand(c *gin.Context) {
 }
 
 func (s *Server) updatePodConfig(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -141,7 +141,7 @@ func (s *Server) updatePodConfig(c *gin.Context) {
 }
 
 func (s *Server) projectMetrics(c *gin.Context) {
-	project, ok := s.projectForRequest(c)
+	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
@@ -193,6 +193,9 @@ func (s *Server) clusterMetrics(c *gin.Context) {
 		writeRuntimeError(c, err)
 		return
 	}
+	if monitoring, monitoringErr := s.deps.Runtime.CheckMonitoring(c.Request.Context(), clusterID); monitoringErr == nil {
+		item.Monitoring = &monitoring
+	}
 	c.JSON(http.StatusOK, item)
 }
 
@@ -221,6 +224,12 @@ func writeRuntimeError(c *gin.Context, err error) {
 		status, code, message = http.StatusNotFound, "not_found", "集群不存在"
 	case errors.Is(err, runtime.ErrClusterManagementUnsupported):
 		status, code, message = http.StatusNotImplemented, "cluster_management_unsupported", "当前运行时不支持集群动态接入"
+	case errors.Is(err, runtime.ErrNamespaceManagementUnsupported):
+		status, code, message = http.StatusNotImplemented, "namespace_management_unsupported", "当前运行时不支持自动管理 Kubernetes namespace"
+	case errors.Is(err, runtime.ErrNamespaceOwnershipConflict):
+		status, code, message = http.StatusConflict, "namespace_ownership_conflict", "目标 namespace 或 TTP 配额对象已存在且不属于当前 TTP 空间/环境"
+	case errors.Is(err, runtime.ErrInvalidKubernetesInput):
+		status, code = http.StatusBadRequest, "invalid_request"
 	case errors.Is(err, runtime.ErrEnvironmentCleanupUnsupported):
 		status, code, message = http.StatusNotImplemented, "environment_cleanup_unsupported", "当前运行时不支持安全清理环境资源"
 	case errors.Is(err, runtime.ErrEnvironmentCleanupFailed):

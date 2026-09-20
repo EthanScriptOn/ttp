@@ -22,34 +22,60 @@ type membership struct {
 	JoinedAt time.Time
 }
 
+type namespaceQuotaConfig struct {
+	Namespace string
+	Quota     domain.NamespaceQuota
+	UpdatedAt time.Time
+}
+
+type projectMembership struct {
+	ProjectID string
+	SpaceID   string
+	UserID    uint64
+	RoleID    string
+	RoleKey   string
+	JoinedAt  time.Time
+	UpdatedAt time.Time
+}
+
 type Memory struct {
-	mu                sync.RWMutex
-	users             map[uint64]domain.User
-	spaces            map[string]domain.Space
-	memberships       map[string]membership
-	clusters          map[string]Cluster
-	projects          map[string]domain.Project
-	gitCredentials    map[string]ProjectGitCredential
-	deploymentTargets map[string]domain.DeploymentTarget
-	deploymentConfigs map[string]domain.DeploymentConfig
-	abExperiments     map[string]domain.ABExperiment
-	auditLogs         []domain.AuditLog
-	nextAuditID       uint64
+	mu                  sync.RWMutex
+	users               map[uint64]domain.User
+	spaces              map[string]domain.Space
+	memberships         map[string]membership
+	clusters            map[string]Cluster
+	projects            map[string]domain.Project
+	projectMembers      map[string]projectMembership
+	projectRoles        map[string]domain.ProjectRole
+	registryConnections map[string]domain.ImageRegistryConnection
+	gitCredentials      map[string]ProjectGitCredential
+	deploymentTargets   map[string]domain.DeploymentTarget
+	namespaceQuotas     map[string]namespaceQuotaConfig
+	deploymentConfigs   map[string]domain.DeploymentConfig
+	deploymentResources map[string]domain.DeploymentResourceFile
+	abExperiments       map[string]domain.ABExperiment
+	auditLogs           []domain.AuditLog
+	nextAuditID         uint64
 }
 
 // NewMemory returns an empty volatile store. It is intended for isolated unit
 // tests only; production startup always uses MySQL.
 func NewMemory() *Memory {
 	return &Memory{
-		users:             make(map[uint64]domain.User),
-		spaces:            make(map[string]domain.Space),
-		memberships:       make(map[string]membership),
-		clusters:          make(map[string]Cluster),
-		projects:          make(map[string]domain.Project),
-		gitCredentials:    make(map[string]ProjectGitCredential),
-		deploymentTargets: make(map[string]domain.DeploymentTarget),
-		deploymentConfigs: make(map[string]domain.DeploymentConfig),
-		abExperiments:     make(map[string]domain.ABExperiment),
+		users:               make(map[uint64]domain.User),
+		spaces:              make(map[string]domain.Space),
+		memberships:         make(map[string]membership),
+		clusters:            make(map[string]Cluster),
+		projects:            make(map[string]domain.Project),
+		projectMembers:      make(map[string]projectMembership),
+		projectRoles:        make(map[string]domain.ProjectRole),
+		registryConnections: make(map[string]domain.ImageRegistryConnection),
+		gitCredentials:      make(map[string]ProjectGitCredential),
+		deploymentTargets:   make(map[string]domain.DeploymentTarget),
+		namespaceQuotas:     make(map[string]namespaceQuotaConfig),
+		deploymentConfigs:   make(map[string]domain.DeploymentConfig),
+		deploymentResources: make(map[string]domain.DeploymentResourceFile),
+		abExperiments:       make(map[string]domain.ABExperiment),
 	}
 }
 
@@ -80,15 +106,25 @@ func NewMemoryWithFixtures() *Memory {
 		Stage: DeploymentStageUAT, SortOrder: 2, Enabled: true, Status: "active", Health: "unknown", CreatedAt: now, UpdatedAt: now,
 	}
 	return &Memory{
-		users:             map[uint64]domain.User{1: {ID: 1, Username: "admin", DisplayName: "平台管理员", PasswordHash: string(password), IsSuperAdmin: true}},
-		spaces:            map[string]domain.Space{space.ID: space},
-		memberships:       map[string]membership{"1\x00" + space.ID: {UserID: 1, SpaceID: space.ID, Role: "owner", JoinedAt: now}},
-		clusters:          map[string]Cluster{cluster.ID: cluster, uatCluster.ID: uatCluster},
-		projects:          map[string]domain.Project{project.ID: project},
-		gitCredentials:    make(map[string]ProjectGitCredential),
-		deploymentTargets: map[string]domain.DeploymentTarget{target.ID: target, uatTarget.ID: uatTarget},
-		deploymentConfigs: make(map[string]domain.DeploymentConfig),
-		abExperiments:     make(map[string]domain.ABExperiment),
+		users:       map[uint64]domain.User{1: {ID: 1, Username: "admin", DisplayName: "平台管理员", PasswordHash: string(password), IsSuperAdmin: true}},
+		spaces:      map[string]domain.Space{space.ID: space},
+		memberships: map[string]membership{"1\x00" + space.ID: {UserID: 1, SpaceID: space.ID, Role: "owner", JoinedAt: now}},
+		clusters:    map[string]Cluster{cluster.ID: cluster, uatCluster.ID: uatCluster},
+		projects:    map[string]domain.Project{project.ID: project},
+		projectMembers: map[string]projectMembership{
+			projectMemberKey(project.ID, 1): {ProjectID: project.ID, SpaceID: space.ID, UserID: 1, RoleKey: "project_maintainer", JoinedAt: now, UpdatedAt: now},
+		},
+		projectRoles:        make(map[string]domain.ProjectRole),
+		registryConnections: make(map[string]domain.ImageRegistryConnection),
+		gitCredentials:      make(map[string]ProjectGitCredential),
+		deploymentTargets:   map[string]domain.DeploymentTarget{target.ID: target, uatTarget.ID: uatTarget},
+		namespaceQuotas: map[string]namespaceQuotaConfig{
+			namespaceQuotaKey(space.ID, cluster.ID, target.Environment):       {Namespace: target.Namespace, Quota: DefaultNamespaceQuota(), UpdatedAt: now},
+			namespaceQuotaKey(space.ID, uatCluster.ID, uatTarget.Environment): {Namespace: uatTarget.Namespace, Quota: DefaultNamespaceQuota(), UpdatedAt: now},
+		},
+		deploymentConfigs:   make(map[string]domain.DeploymentConfig),
+		deploymentResources: make(map[string]domain.DeploymentResourceFile),
+		abExperiments:       make(map[string]domain.ABExperiment),
 	}
 }
 
@@ -371,12 +407,22 @@ func (m *Memory) CreateProject(ctx context.Context, spaceID string, input Create
 	if projectID == "" {
 		projectID = uuid.NewString()
 	}
-	project := domain.Project{ID: projectID, SpaceID: spaceID, Name: name, Description: strings.TrimSpace(input.Description), RepositoryID: repositoryID, RepositoryURL: repo, DefaultBranch: branch, ClusterID: cluster, Namespace: namespace, DeployStrategy: strategy, Replicas: replicas, ContainerPort: port, ImageRepository: strings.TrimSpace(input.ImageRepository), CreatedAt: now, UpdatedAt: now}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.spaces[spaceID]; !ok {
 		return domain.Project{}, ErrNotFound
 	}
+	registryConnectionID := strings.TrimSpace(input.RegistryConnectionID)
+	if registryConnectionID != "" {
+		connection, exists := m.registryConnections[registryConnectionID]
+		if !exists || connection.SpaceID != spaceID {
+			return domain.Project{}, ErrNotFound
+		}
+		if err := validateImageRepositoryRegistry(input.ImageRepository, connection.Registry); err != nil {
+			return domain.Project{}, err
+		}
+	}
+	project := domain.Project{ID: projectID, SpaceID: spaceID, Name: name, Description: strings.TrimSpace(input.Description), RepositoryID: repositoryID, RepositoryURL: repo, DefaultBranch: branch, ClusterID: cluster, Namespace: namespace, DeployStrategy: strategy, Replicas: replicas, ContainerPort: port, ImageRepository: strings.TrimSpace(input.ImageRepository), RegistryConnectionID: registryConnectionID, CreatedAt: now, UpdatedAt: now}
 	if selected, ok := m.clusters[cluster]; !ok || selected.SpaceID != spaceID {
 		return domain.Project{}, ErrNotFound
 	}
@@ -386,15 +432,6 @@ func (m *Memory) CreateProject(ctx context.Context, spaceID string, input Create
 		}
 	}
 	m.projects[project.ID] = project
-	target, err := newDeploymentTarget(spaceID, project.ID, CreateDeploymentTargetInput{
-		Name: "开发环境", Environment: "dev", ClusterID: project.ClusterID, Namespace: project.Namespace,
-		Stage: DeploymentStageDev, SortOrder: 1, Replicas: project.Replicas, ContainerPort: project.ContainerPort, DeployStrategy: project.DeployStrategy,
-	}, project)
-	if err != nil {
-		delete(m.projects, project.ID)
-		return domain.Project{}, err
-	}
-	m.deploymentTargets[target.ID] = target
 	return project, nil
 }
 
@@ -446,9 +483,146 @@ func (m *Memory) UpdateProject(ctx context.Context, spaceID, projectID string, i
 	if input.ImageRepository != nil {
 		project.ImageRepository = strings.TrimSpace(*input.ImageRepository)
 	}
+	if input.RegistryConnectionID != nil {
+		registryConnectionID := strings.TrimSpace(*input.RegistryConnectionID)
+		if registryConnectionID != "" {
+			connection, exists := m.registryConnections[registryConnectionID]
+			if !exists || connection.SpaceID != spaceID {
+				return domain.Project{}, ErrNotFound
+			}
+			// A managed registry owns the repository naming policy. Clear any
+			// legacy hand-entered path unless the caller explicitly supplied one;
+			// the builder will derive a stable path from the connection and project.
+			if input.ImageRepository == nil {
+				project.ImageRepository = ""
+			}
+		}
+		project.RegistryConnectionID = registryConnectionID
+	}
+	if project.RegistryConnectionID != "" {
+		if connection, exists := m.registryConnections[project.RegistryConnectionID]; !exists || connection.SpaceID != spaceID {
+			return domain.Project{}, ErrNotFound
+		} else if err := validateImageRepositoryRegistry(project.ImageRepository, connection.Registry); err != nil {
+			return domain.Project{}, err
+		}
+	}
 	project.UpdatedAt = time.Now().UTC()
 	m.projects[projectID] = project
 	return project, nil
+}
+
+func (m *Memory) ListImageRegistryConnections(ctx context.Context, spaceID string) ([]domain.ImageRegistryConnection, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]domain.ImageRegistryConnection, 0)
+	for _, item := range m.registryConnections {
+		if item.SpaceID == spaceID {
+			result = append(result, cloneImageRegistryConnection(item))
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if strings.EqualFold(result[i].Name, result[j].Name) {
+			return result[i].ID < result[j].ID
+		}
+		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
+	})
+	return result, nil
+}
+
+func (m *Memory) GetImageRegistryConnection(ctx context.Context, spaceID, connectionID string) (domain.ImageRegistryConnection, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.ImageRegistryConnection{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	item, ok := m.registryConnections[strings.TrimSpace(connectionID)]
+	if !ok || item.SpaceID != spaceID {
+		return domain.ImageRegistryConnection{}, ErrNotFound
+	}
+	return cloneImageRegistryConnection(item), nil
+}
+
+func (m *Memory) CreateImageRegistryConnection(ctx context.Context, spaceID string, input CreateImageRegistryConnectionInput) (domain.ImageRegistryConnection, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.ImageRegistryConnection{}, err
+	}
+	item, err := normalizeImageRegistryConnection(spaceID, input)
+	if err != nil {
+		return domain.ImageRegistryConnection{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.spaces[spaceID]; !exists {
+		return domain.ImageRegistryConnection{}, ErrNotFound
+	}
+	for _, existing := range m.registryConnections {
+		if existing.SpaceID == spaceID && (strings.EqualFold(existing.Name, item.Name) || strings.EqualFold(existing.Registry, item.Registry)) {
+			return domain.ImageRegistryConnection{}, ErrConflict
+		}
+	}
+	if _, exists := m.registryConnections[item.ID]; exists {
+		return domain.ImageRegistryConnection{}, ErrConflict
+	}
+	m.registryConnections[item.ID] = item
+	return cloneImageRegistryConnection(item), nil
+}
+
+func (m *Memory) UpdateImageRegistryConnection(ctx context.Context, spaceID, connectionID string, input UpdateImageRegistryConnectionInput) (domain.ImageRegistryConnection, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.ImageRegistryConnection{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := strings.TrimSpace(connectionID)
+	current, ok := m.registryConnections[id]
+	if !ok || current.SpaceID != spaceID {
+		return domain.ImageRegistryConnection{}, ErrNotFound
+	}
+	updated, err := updateImageRegistryConnection(current, input)
+	if err != nil {
+		return domain.ImageRegistryConnection{}, err
+	}
+	for _, existing := range m.registryConnections {
+		if existing.ID == id || existing.SpaceID != spaceID {
+			continue
+		}
+		if strings.EqualFold(existing.Name, updated.Name) || strings.EqualFold(existing.Registry, updated.Registry) {
+			return domain.ImageRegistryConnection{}, ErrConflict
+		}
+	}
+	m.registryConnections[id] = updated
+	return cloneImageRegistryConnection(updated), nil
+}
+
+func (m *Memory) DeleteImageRegistryConnection(ctx context.Context, spaceID, connectionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := strings.TrimSpace(connectionID)
+	item, ok := m.registryConnections[id]
+	if !ok || item.SpaceID != spaceID {
+		return ErrNotFound
+	}
+	for _, project := range m.projects {
+		if project.SpaceID == spaceID && project.RegistryConnectionID == id {
+			return ErrConflict
+		}
+	}
+	delete(m.registryConnections, id)
+	return nil
+}
+
+func cloneImageRegistryConnection(item domain.ImageRegistryConnection) domain.ImageRegistryConnection {
+	if item.LastCheckedAt != nil {
+		value := *item.LastCheckedAt
+		item.LastCheckedAt = &value
+	}
+	return item
 }
 
 func (m *Memory) GetProjectGitCredential(ctx context.Context, spaceID, projectID string) (ProjectGitCredential, error) {
@@ -683,6 +857,55 @@ func (m *Memory) DeleteDeploymentTarget(ctx context.Context, spaceID, projectID,
 	return nil
 }
 
+func (m *Memory) GetNamespaceQuota(ctx context.Context, spaceID, clusterID, environment string) (domain.NamespaceQuota, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.NamespaceQuota{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if _, ok := m.spaces[spaceID]; !ok {
+		return domain.NamespaceQuota{}, ErrNotFound
+	}
+	cluster, ok := m.clusters[normalizeClusterID(spaceID, clusterID)]
+	if !ok || cluster.SpaceID != spaceID {
+		return domain.NamespaceQuota{}, ErrNotFound
+	}
+	config, ok := m.namespaceQuotas[namespaceQuotaKey(spaceID, cluster.ID, environment)]
+	if !ok {
+		return domain.NamespaceQuota{}, ErrNotFound
+	}
+	return config.Quota, nil
+}
+
+func (m *Memory) UpsertNamespaceQuota(ctx context.Context, spaceID, clusterID, environment, namespace string, quota domain.NamespaceQuota) (domain.NamespaceQuota, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.NamespaceQuota{}, err
+	}
+	normalized, err := NormalizeNamespaceQuota(&quota)
+	if err != nil {
+		return domain.NamespaceQuota{}, err
+	}
+	clusterID = normalizeClusterID(spaceID, clusterID)
+	if strings.TrimSpace(environment) == "" || strings.TrimSpace(namespace) == "" {
+		return domain.NamespaceQuota{}, fmt.Errorf("%w: namespace quota identity is required", ErrInvalidInput)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.spaces[spaceID]; !ok {
+		return domain.NamespaceQuota{}, ErrNotFound
+	}
+	cluster, ok := m.clusters[clusterID]
+	if !ok || cluster.SpaceID != spaceID {
+		return domain.NamespaceQuota{}, ErrNotFound
+	}
+	m.namespaceQuotas[namespaceQuotaKey(spaceID, clusterID, environment)] = namespaceQuotaConfig{
+		Namespace: strings.TrimSpace(namespace),
+		Quota:     normalized,
+		UpdatedAt: time.Now().UTC(),
+	}
+	return normalized, nil
+}
+
 func (m *Memory) hasOtherStageLocked(projectID, excludedID, stage string) bool {
 	for id, target := range m.deploymentTargets {
 		if id != excludedID && target.ProjectID == projectID && target.Stage == stage {
@@ -740,8 +963,150 @@ func (m *Memory) SaveDeploymentConfig(ctx context.Context, spaceID, projectID st
 	return cloneDeploymentConfig(config), nil
 }
 
+func (m *Memory) ListDeploymentResourceFiles(ctx context.Context, spaceID, projectID string) ([]domain.DeploymentResourceFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	project, ok := m.projects[projectID]
+	if !ok || project.SpaceID != spaceID {
+		return nil, ErrNotFound
+	}
+	result := make([]domain.DeploymentResourceFile, 0)
+	for _, file := range m.deploymentResources {
+		if file.ProjectID == projectID {
+			result = append(result, file)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].SortOrder == result[j].SortOrder {
+			return result[i].Path < result[j].Path
+		}
+		return result[i].SortOrder < result[j].SortOrder
+	})
+	return result, nil
+}
+
+func (m *Memory) CreateDeploymentResourceFile(ctx context.Context, spaceID, projectID string, input SaveDeploymentResourceFileInput) (domain.DeploymentResourceFile, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DeploymentResourceFile{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	project, ok := m.projects[projectID]
+	if !ok || project.SpaceID != spaceID {
+		return domain.DeploymentResourceFile{}, ErrNotFound
+	}
+	if err := validateResourceFileInput(input); err != nil {
+		return domain.DeploymentResourceFile{}, err
+	}
+	fileCount := 0
+	for _, file := range m.deploymentResources {
+		if file.ProjectID == projectID {
+			fileCount++
+		}
+		if file.ProjectID == projectID && (file.Path == strings.TrimSpace(input.Path) || file.Name == strings.TrimSpace(input.Name)) {
+			return domain.DeploymentResourceFile{}, ErrConflict
+		}
+	}
+	if fileCount >= 100 {
+		return domain.DeploymentResourceFile{}, fmt.Errorf("%w: no more than 100 resource files are allowed", ErrInvalidInput)
+	}
+	id := strings.TrimSpace(input.ID)
+	if id == "" {
+		id = "resource-" + uuid.NewString()[:8]
+	}
+	now := time.Now().UTC()
+	file := domain.DeploymentResourceFile{ID: id, ProjectID: projectID, Name: strings.TrimSpace(input.Name), Path: strings.TrimSpace(input.Path), Format: strings.ToLower(strings.TrimSpace(input.Format)), Content: input.Content, APIVersion: input.APIVersion, Kind: input.Kind, ResourceName: input.ResourceName, Namespace: input.Namespace, SortOrder: input.SortOrder, Version: 1, ReleaseSupported: input.ReleaseSupported, UpdatedAt: now}
+	m.deploymentResources[id] = file
+	return file, nil
+}
+
+func (m *Memory) UpdateDeploymentResourceFile(ctx context.Context, spaceID, projectID, resourceID string, input SaveDeploymentResourceFileInput) (domain.DeploymentResourceFile, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DeploymentResourceFile{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	project, ok := m.projects[projectID]
+	if !ok || project.SpaceID != spaceID {
+		return domain.DeploymentResourceFile{}, ErrNotFound
+	}
+	current, ok := m.deploymentResources[resourceID]
+	if !ok || current.ProjectID != projectID {
+		return domain.DeploymentResourceFile{}, ErrNotFound
+	}
+	if err := validateResourceFileInput(input); err != nil {
+		return domain.DeploymentResourceFile{}, err
+	}
+	for id, file := range m.deploymentResources {
+		if id != resourceID && file.ProjectID == projectID && (file.Path == strings.TrimSpace(input.Path) || file.Name == strings.TrimSpace(input.Name)) {
+			return domain.DeploymentResourceFile{}, ErrConflict
+		}
+	}
+	current.Name = strings.TrimSpace(input.Name)
+	current.Path = strings.TrimSpace(input.Path)
+	current.Format = strings.ToLower(strings.TrimSpace(input.Format))
+	current.Content = input.Content
+	current.APIVersion = input.APIVersion
+	current.Kind = input.Kind
+	current.ResourceName = input.ResourceName
+	current.Namespace = input.Namespace
+	current.ReleaseSupported = input.ReleaseSupported
+	current.SortOrder = input.SortOrder
+	current.Version++
+	current.UpdatedAt = time.Now().UTC()
+	m.deploymentResources[resourceID] = current
+	return current, nil
+}
+
+func (m *Memory) DeleteDeploymentResourceFile(ctx context.Context, spaceID, projectID, resourceID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	project, ok := m.projects[projectID]
+	if !ok || project.SpaceID != spaceID {
+		return ErrNotFound
+	}
+	file, ok := m.deploymentResources[resourceID]
+	if !ok || file.ProjectID != projectID {
+		return ErrNotFound
+	}
+	delete(m.deploymentResources, resourceID)
+	return nil
+}
+
+func validateResourceFileInput(input SaveDeploymentResourceFileInput) error {
+	name := strings.TrimSpace(input.Name)
+	path := strings.TrimSpace(input.Path)
+	if name == "" || path == "" || strings.ContainsAny(name+path, "\x00\r\n") {
+		return fmt.Errorf("%w: resource file name and path are required", ErrInvalidInput)
+	}
+	if len(name) > 255 || len(path) > 500 || strings.Contains(path, "..") || strings.HasPrefix(path, "/") {
+		return fmt.Errorf("%w: resource file path is invalid", ErrInvalidInput)
+	}
+	if strings.TrimSpace(input.Content) == "" {
+		return fmt.Errorf("%w: resource file content is required", ErrInvalidInput)
+	}
+	if len([]byte(input.Content)) > 512<<10 {
+		return fmt.Errorf("%w: resource file is larger than 524288 bytes", ErrInvalidInput)
+	}
+	format := strings.ToLower(strings.TrimSpace(input.Format))
+	if format == "yml" {
+		format = "yaml"
+	}
+	if format != "yaml" && format != "json" {
+		return fmt.Errorf("%w: resource file format must be yaml or json", ErrInvalidInput)
+	}
+	return nil
+}
+
 func cloneDeploymentConfig(value domain.DeploymentConfig) domain.DeploymentConfig {
 	value.Resources = append([]domain.DeploymentResource(nil), value.Resources...)
+	value.Files = append([]domain.DeploymentResourceFile(nil), value.Files...)
 	return value
 }
 

@@ -418,6 +418,10 @@ func TestCreateProjectDerivesRepositoryIDServerSide(t *testing.T) {
 	if provider.registeredID != expectedID || provider.registeredURL != repositoryURL {
 		t.Fatalf("registrar received ID=%q URL=%q", provider.registeredID, provider.registeredURL)
 	}
+	targets := doRequest(t, server.Router(), http.MethodGet, "/api/projects/"+body.ID+"/deployment-targets", token, "")
+	if targets.Code != http.StatusOK || !strings.Contains(targets.Body.String(), `"total":0`) {
+		t.Fatalf("new project unexpectedly has deployment targets: %d %s", targets.Code, targets.Body.String())
+	}
 }
 
 func TestCreateProjectRejectsInvalidInputBeforeRepositoryRegistration(t *testing.T) {

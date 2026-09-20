@@ -97,14 +97,23 @@ function responseErrorMessage(payload) {
 const codeMessages = {
   unauthorized: '登录已失效，请重新登录',
   forbidden: '没有权限执行这个操作',
+  project_forbidden: '当前账号没有该项目的操作权限',
   git_write_access_denied: '项目仓库机器人没有目标仓库的写权限',
   git_access_check_timeout: '检查项目仓库机器人超时，请稍后重试',
   git_access_check_failed: '暂时无法检查项目仓库机器人，请稍后重试',
+  image_build_unsupported: '未配置可用的镜像构建器，发布已被阻止',
+  image_builder_unauthorized: 'TTP 无法认证 Builder，请检查 Builder 地址和访问令牌',
+  image_registry_preflight_failed: '镜像仓库预检失败，请检查仓库地址、凭证和推送权限',
+  registry_connection_test_failed: '镜像仓库连接测试失败，请检查地址和凭证',
+  kubernetes_release_access_denied: 'TTP 使用的 Kubernetes 身份没有目标环境的发布权限，请检查 RoleBinding',
   provider_timeout: 'Git 服务响应超时，请稍后重试',
   provider_error: 'Git 服务暂时不可用，请稍后重试',
+  git_credential_invalid: '项目仓库机器人授权已失效，请在项目设置中重新保存',
   repository_conflict: '这个仓库地址已经绑定到其他项目，请检查项目配置',
   space_required: '请先选择空间',
   invalid_credentials: '用户名或密码错误',
+  git_credential_required: '请先配置并验证仓库机器人',
+  image_registry_connection_required: '请选择镜像仓库连接',
   not_found: '找不到请求的资源',
   conflict: '当前状态不允许执行这个操作',
   invalid_request: '提交的内容不正确',
@@ -247,6 +256,60 @@ export function normalizeSpacePermissions(value) {
   }
 }
 
+export function normalizeProjectRole(value) {
+  const source = isRecord(value?.role) ? value.role : isRecord(value) ? value : {}
+  const rawPermissions = firstValue(source, 'permissions', 'permission_keys', 'permissionKeys')
+  return {
+    ...source,
+    id: asString(firstValue(source, 'id', 'role_id', 'roleId')),
+    space_id: asString(firstValue(source, 'space_id', 'spaceId')),
+    key: asString(firstValue(source, 'key', 'role_key', 'roleKey')),
+    name: asString(firstValue(source, 'name', 'label')),
+    description: asString(firstValue(source, 'description', 'detail')),
+    is_system: asBoolean(firstValue(source, 'is_system', 'isSystem')),
+    permissions: Array.isArray(rawPermissions) ? rawPermissions.map((item) => asString(item)).filter(Boolean) : [],
+    created_at: firstValue(source, 'created_at', 'createdAt'),
+    updated_at: firstValue(source, 'updated_at', 'updatedAt'),
+  }
+}
+
+export function normalizeProjectMember(value) {
+  const source = isRecord(value?.member) ? value.member : isRecord(value) ? value : {}
+  const rawPermissions = firstValue(source, 'permissions', 'permission_keys', 'permissionKeys')
+  return {
+    ...source,
+    project_id: asString(firstValue(source, 'project_id', 'projectId')),
+    space_id: asString(firstValue(source, 'space_id', 'spaceId')),
+    user_id: asNumber(firstValue(source, 'user_id', 'userId', 'id'), 0),
+    username: asString(firstValue(source, 'username', 'user_name', 'userName')),
+    display_name: asString(firstValue(source, 'display_name', 'displayName', 'name')),
+    role_id: asString(firstValue(source, 'role_id', 'roleId')),
+    role_key: asString(firstValue(source, 'role_key', 'roleKey')),
+    role_name: asString(firstValue(source, 'role_name', 'roleName')),
+    permissions: Array.isArray(rawPermissions) ? rawPermissions.map((item) => asString(item)).filter(Boolean) : [],
+    is_current_user: asBoolean(firstValue(source, 'is_current_user', 'isCurrentUser')),
+    is_super_admin: asBoolean(firstValue(source, 'is_super_admin', 'isSuperAdmin')),
+    joined_at: firstValue(source, 'joined_at', 'joinedAt', 'created_at', 'createdAt'),
+    updated_at: firstValue(source, 'updated_at', 'updatedAt'),
+  }
+}
+
+export function normalizeProjectAccess(value) {
+  const source = isRecord(value?.access) ? value.access : isRecord(value) ? value : {}
+  const rawPermissions = firstValue(source, 'permissions', 'permission_keys', 'permissionKeys')
+  return {
+    ...source,
+    project_id: asString(firstValue(source, 'project_id', 'projectId')),
+    space_id: asString(firstValue(source, 'space_id', 'spaceId')),
+    role_id: asString(firstValue(source, 'role_id', 'roleId')),
+    role_key: asString(firstValue(source, 'role_key', 'roleKey')),
+    role_name: asString(firstValue(source, 'role_name', 'roleName')),
+    permissions: Array.isArray(rawPermissions) ? rawPermissions.map((item) => asString(item)).filter(Boolean) : [],
+    is_space_admin: asBoolean(firstValue(source, 'is_space_admin', 'isSpaceAdmin')),
+    is_super_admin: asBoolean(firstValue(source, 'is_super_admin', 'isSuperAdmin')),
+  }
+}
+
 export function normalizeSpaces(payload) {
   return responseItems(payload).map(normalizeSpace).filter((item) => item.id)
 }
@@ -303,6 +366,7 @@ export function normalizeGitCredential(value) {
     provider: asString(firstValue(source, 'provider'), 'auto'),
     username: asString(firstValue(source, 'username', 'user_name', 'userName')),
     configured: asBoolean(firstValue(source, 'configured', 'is_configured', 'isConfigured')),
+    invalid: asBoolean(firstValue(source, 'invalid', 'is_invalid', 'isInvalid')),
     updated_at: firstValue(source, 'updated_at', 'updatedAt'),
   }
 }
@@ -358,13 +422,41 @@ export function normalizeProject(value) {
     deploy_strategy: asString(firstValue(source, 'deploy_strategy', 'deployStrategy', 'strategy'), 'rolling'),
     replicas: asNumber(firstValue(source, 'replicas', 'replica_count', 'replicaCount'), 1),
     container_port: asNumber(firstValue(source, 'container_port', 'containerPort', 'port'), 8080),
+    image_repository: asString(firstValue(source, 'image_repository', 'imageRepository')),
+    registry_connection_id: asString(firstValue(source, 'registry_connection_id', 'registryConnectionId')),
     health: asString(firstValue(source, 'health', 'status'), 'unknown'),
     pod_count: asNumber(firstValue(source, 'pod_count', 'podCount'), 0),
+    pods: Array.isArray(firstValue(source, 'pods')) ? firstValue(source, 'pods').map((pod) => normalizePod(pod)).filter((pod) => pod.name) : [],
     healthy_pod_count: asNumber(firstValue(source, 'healthy_pod_count', 'healthyPodCount'), 0),
     deployment_target_count: asNumber(firstValue(source, 'deployment_target_count', 'deploymentTargetCount'), 0),
     default_target_id: asString(firstValue(source, 'default_target_id', 'defaultTargetId')),
     last_release: asString(firstValue(source, 'last_release', 'lastRelease')),
     last_commit: asString(firstValue(source, 'last_commit', 'lastCommit')),
+    created_at: firstValue(source, 'created_at', 'createdAt'),
+    updated_at: firstValue(source, 'updated_at', 'updatedAt'),
+  }
+}
+
+export function normalizeImageRegistryConnection(value) {
+  const source = isRecord(value?.connection)
+    ? value.connection
+    : isRecord(value?.data?.connection)
+      ? value.data.connection
+      : isRecord(value)
+        ? value
+        : {}
+  return {
+    ...source,
+    id: asString(firstValue(source, 'id', 'connection_id', 'connectionId')),
+    space_id: asString(firstValue(source, 'space_id', 'spaceId')),
+    name: asString(firstValue(source, 'name', 'connection_name')),
+    registry: asString(firstValue(source, 'registry', 'registry_host')),
+    auth_type: asString(firstValue(source, 'auth_type', 'authType'), 'basic').toLowerCase(),
+    username: asString(firstValue(source, 'username', 'user_name', 'userName')),
+    pull_secret_name: asString(firstValue(source, 'pull_secret_name', 'pullSecretName')),
+    configured: asBoolean(firstValue(source, 'configured', 'is_configured', 'isConfigured')),
+    status: asString(firstValue(source, 'status', 'state'), 'unverified'),
+    last_checked_at: firstValue(source, 'last_checked_at', 'lastCheckedAt'),
     created_at: firstValue(source, 'created_at', 'createdAt'),
     updated_at: firstValue(source, 'updated_at', 'updatedAt'),
   }
@@ -393,6 +485,7 @@ export function normalizeDeploymentTarget(value) {
     container_port: asNumber(firstValue(source, 'container_port', 'containerPort', 'port'), 8080),
     deploy_strategy: asString(firstValue(source, 'deploy_strategy', 'deployStrategy', 'strategy'), 'rolling'),
     enabled: asBoolean(firstValue(source, 'enabled', 'is_enabled', 'isEnabled'), true),
+    resource_quota: normalizeNamespaceQuota(firstValue(source, 'resource_quota', 'resourceQuota')),
     status: asString(firstValue(source, 'status', 'state'), 'active'),
     health: asString(firstValue(source, 'health', 'health_status', 'healthStatus'), 'unknown'),
     pod_count: asNumber(firstValue(source, 'pod_count', 'podCount'), 0),
@@ -404,62 +497,75 @@ export function normalizeDeploymentTarget(value) {
   }
 }
 
-export function normalizeDeploymentConfig(value) {
-  const source = isRecord(value?.config)
-    ? value.config
-    : isRecord(value?.data?.config)
-      ? value.data.config
+export const DEFAULT_NAMESPACE_QUOTA = Object.freeze({
+  cpu_request: '2',
+  cpu_limit: '4',
+  memory_request: '2Gi',
+  memory_limit: '4Gi',
+  ephemeral_storage_request: '10Gi',
+  ephemeral_storage_limit: '20Gi',
+  storage: '50Gi',
+  pods: 20,
+  persistent_volume_claims: 10,
+  default_cpu_request: '100m',
+  default_cpu_limit: '500m',
+  default_memory_request: '128Mi',
+  default_memory_limit: '512Mi',
+  default_ephemeral_storage_request: '256Mi',
+  default_ephemeral_storage_limit: '1Gi',
+})
+
+export function normalizeNamespaceQuota(value) {
+  const source = isRecord(value) ? value : {}
+  return {
+    cpu_request: asString(firstValue(source, 'cpu_request', 'cpuRequest'), DEFAULT_NAMESPACE_QUOTA.cpu_request),
+    cpu_limit: asString(firstValue(source, 'cpu_limit', 'cpuLimit'), DEFAULT_NAMESPACE_QUOTA.cpu_limit),
+    memory_request: asString(firstValue(source, 'memory_request', 'memoryRequest'), DEFAULT_NAMESPACE_QUOTA.memory_request),
+    memory_limit: asString(firstValue(source, 'memory_limit', 'memoryLimit'), DEFAULT_NAMESPACE_QUOTA.memory_limit),
+    ephemeral_storage_request: asString(firstValue(source, 'ephemeral_storage_request', 'ephemeralStorageRequest'), DEFAULT_NAMESPACE_QUOTA.ephemeral_storage_request),
+    ephemeral_storage_limit: asString(firstValue(source, 'ephemeral_storage_limit', 'ephemeralStorageLimit'), DEFAULT_NAMESPACE_QUOTA.ephemeral_storage_limit),
+    storage: asString(firstValue(source, 'storage', 'persistent_storage', 'persistentStorage'), DEFAULT_NAMESPACE_QUOTA.storage),
+    pods: asNumber(firstValue(source, 'pods', 'pod_limit', 'podLimit'), DEFAULT_NAMESPACE_QUOTA.pods),
+    persistent_volume_claims: asNumber(firstValue(source, 'persistent_volume_claims', 'persistentVolumeClaims', 'pvc_limit', 'pvcLimit'), DEFAULT_NAMESPACE_QUOTA.persistent_volume_claims),
+    default_cpu_request: asString(firstValue(source, 'default_cpu_request', 'defaultCpuRequest'), DEFAULT_NAMESPACE_QUOTA.default_cpu_request),
+    default_cpu_limit: asString(firstValue(source, 'default_cpu_limit', 'defaultCpuLimit'), DEFAULT_NAMESPACE_QUOTA.default_cpu_limit),
+    default_memory_request: asString(firstValue(source, 'default_memory_request', 'defaultMemoryRequest'), DEFAULT_NAMESPACE_QUOTA.default_memory_request),
+    default_memory_limit: asString(firstValue(source, 'default_memory_limit', 'defaultMemoryLimit'), DEFAULT_NAMESPACE_QUOTA.default_memory_limit),
+    default_ephemeral_storage_request: asString(firstValue(source, 'default_ephemeral_storage_request', 'defaultEphemeralStorageRequest'), DEFAULT_NAMESPACE_QUOTA.default_ephemeral_storage_request),
+    default_ephemeral_storage_limit: asString(firstValue(source, 'default_ephemeral_storage_limit', 'defaultEphemeralStorageLimit'), DEFAULT_NAMESPACE_QUOTA.default_ephemeral_storage_limit),
+  }
+}
+
+export function normalizeDeploymentResource(value) {
+  const source = isRecord(value?.resource)
+    ? value.resource
+    : isRecord(value?.data?.resource)
+      ? value.data.resource
       : isRecord(value)
         ? value
         : {}
-  const rawResources = firstValue(source, 'resources', 'resource_list', 'resourceList')
-  const resources = Array.isArray(rawResources)
-    ? rawResources.map((item) => {
-      const resource = isRecord(item) ? item : {}
-      return {
-        ...resource,
-        api_version: asString(firstValue(resource, 'api_version', 'apiVersion')),
-        kind: asString(firstValue(resource, 'kind')),
-        name: asString(firstValue(resource, 'name')),
-        namespace: asString(firstValue(resource, 'namespace')),
-        release_supported: asBoolean(firstValue(resource, 'release_supported', 'releaseSupported')),
-      }
-    }).filter((item) => item.kind && item.name)
-    : []
-  const rawCapabilities = isRecord(firstValue(source, 'capabilities')) ? firstValue(source, 'capabilities') : {}
-  const rawUnsupported = firstValue(rawCapabilities, 'unsupported_resources', 'unsupportedResources')
-  const unsupportedResources = Array.isArray(rawUnsupported)
-    ? rawUnsupported.map((item) => {
-      const resource = isRecord(item) ? item : {}
-      return {
-        ...resource,
-        api_version: asString(firstValue(resource, 'api_version', 'apiVersion')),
-        kind: asString(firstValue(resource, 'kind')),
-        name: asString(firstValue(resource, 'name')),
-        namespace: asString(firstValue(resource, 'namespace')),
-        release_supported: false,
-      }
-    }).filter((item) => item.kind && item.name)
-    : []
   return {
     ...source,
+    id: asString(firstValue(source, 'id', 'resource_id')),
     project_id: asString(firstValue(source, 'project_id', 'projectId')),
-    namespace: asString(firstValue(source, 'namespace'), 'default'),
+    name: asString(firstValue(source, 'name')),
+    path: asString(firstValue(source, 'path', 'file_path', 'filePath')),
     format: asString(firstValue(source, 'format'), 'yaml').toLowerCase() === 'json' ? 'json' : 'yaml',
-    manifest: asString(firstValue(source, 'manifest', 'content')),
+    content: asString(firstValue(source, 'content', 'manifest')),
+    api_version: asString(firstValue(source, 'api_version', 'apiVersion')),
+    kind: asString(firstValue(source, 'kind')),
+    resource_name: asString(firstValue(source, 'resource_name', 'resourceName', 'name')),
+    namespace: asString(firstValue(source, 'namespace')),
+    sort_order: asNumber(firstValue(source, 'sort_order', 'sortOrder'), 0),
     version: asNumber(firstValue(source, 'version'), 0),
-    resource_count: asNumber(firstValue(source, 'resource_count', 'resourceCount'), resources.length),
-    resources,
-    capabilities: {
-      ...rawCapabilities,
-      supported_kinds: Array.isArray(firstValue(rawCapabilities, 'supported_kinds', 'supportedKinds'))
-        ? firstValue(rawCapabilities, 'supported_kinds', 'supportedKinds').map((item) => asString(item)).filter(Boolean)
-        : [],
-      unsupported_resources: unsupportedResources,
-    },
-    is_default: asBoolean(firstValue(source, 'is_default', 'isDefault')),
+    release_supported: asBoolean(firstValue(source, 'release_supported', 'releaseSupported')),
     updated_at: firstValue(source, 'updated_at', 'updatedAt'),
   }
+}
+
+export function normalizeDeploymentResources(payload) {
+  const raw = firstValue(payload, 'resources', 'files', 'items')
+  return Array.isArray(raw) ? raw.map(normalizeDeploymentResource).filter((item) => item.id || item.path) : []
 }
 
 export function normalizeCommit(value) {
@@ -660,9 +766,36 @@ export function normalizeMetrics(value) {
     deployment_desired: asNumber(firstValue(source, 'deployment_desired', 'deploymentDesired'), 0),
     deployment_available: asNumber(firstValue(source, 'deployment_available', 'deploymentAvailable'), 0),
     metrics_source: asString(firstValue(source, 'metrics_source', 'metricsSource')),
+    monitoring: normalizeMonitoring(firstValue(source, 'monitoring')),
     observed_at: firstValue(source, 'observed_at', 'observedAt'),
     series: Array.isArray(seriesSource) ? seriesSource.map(normalizeMetricPoint).filter((item) => item.timestamp) : [],
     nodes: Array.isArray(nodesSource) ? nodesSource.map(normalizeNodeMetric).filter((item) => item.name) : [],
+  }
+}
+
+export function normalizeMonitoring(value) {
+  const source = isRecord(value) ? value : {}
+  return {
+    ...source,
+    available: asBoolean(firstValue(source, 'available')),
+    component: asString(firstValue(source, 'component')),
+    display_name: asString(firstValue(source, 'display_name', 'displayName')),
+    installable: asBoolean(firstValue(source, 'installable')),
+    installed: asBoolean(firstValue(source, 'installed')),
+    install_version: asString(firstValue(source, 'install_version', 'installVersion')),
+    message: asString(firstValue(source, 'message')),
+    history_available: asBoolean(firstValue(source, 'history_available', 'historyAvailable')),
+    retention_days: asNumber(firstValue(source, 'retention_days', 'retentionDays'), 0),
+    dependencies: Array.isArray(firstValue(source, 'dependencies')) ? firstValue(source, 'dependencies').map((item) => ({
+      ...item,
+      component: asString(item?.component),
+      display_name: asString(firstValue(item, 'display_name', 'displayName')),
+      available: asBoolean(item?.available),
+      installed: asBoolean(item?.installed),
+      installable: asBoolean(item?.installable),
+      install_version: asString(firstValue(item, 'install_version', 'installVersion')),
+      message: asString(item?.message),
+    })) : [],
   }
 }
 
@@ -703,7 +836,11 @@ function normalizeNodeMetric(value) {
     memory_used_percent: nullableNumber(firstValue(source, 'memory_used_percent', 'memoryUsedPercent')),
     swap_used_percent: nullableNumber(firstValue(source, 'swap_used_percent', 'swapUsedPercent')),
     disk_used_percent: nullableNumber(firstValue(source, 'disk_used_percent', 'diskUsedPercent')),
+    disk_read_mbps: nullableNumber(firstValue(source, 'disk_read_mbps', 'diskReadMbps')),
+    disk_write_mbps: nullableNumber(firstValue(source, 'disk_write_mbps', 'diskWriteMbps')),
     load_1m: nullableNumber(firstValue(source, 'load_1m', 'load1')),
+    load_5m: nullableNumber(firstValue(source, 'load_5m', 'load5')),
+    load_15m: nullableNumber(firstValue(source, 'load_15m', 'load15')),
     network_receive_mbps: nullableNumber(firstValue(source, 'network_receive_mbps', 'networkReceiveMbps')),
     network_transmit_mbps: nullableNumber(firstValue(source, 'network_transmit_mbps', 'networkTransmitMbps')),
     pod_count: asNumber(firstValue(source, 'pod_count', 'podCount'), 0),
@@ -789,6 +926,8 @@ export function normalizeRelease(value) {
     id: asString(firstValue(source, 'id', 'release_id', 'releaseId')),
     project_id: asString(firstValue(source, 'project_id', 'projectId')),
     repository_id: asString(firstValue(source, 'repository_id', 'repositoryId')),
+    created_by: asNumber(firstValue(source, 'created_by', 'createdBy'), 0),
+    created_by_name: asString(firstValue(source, 'created_by_name', 'createdByName')),
     branch: asString(firstValue(source, 'branch', 'branch_name', 'branchName')),
     commits,
     targets,

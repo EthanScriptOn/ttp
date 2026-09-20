@@ -92,6 +92,51 @@ func (r *Remote) Build(ctx context.Context, request Request) (Result, error) {
 	return payload.Result, nil
 }
 
+func (r *Remote) Preflight(ctx context.Context, request Request) error {
+	if r == nil || r.client == nil {
+		return ErrNotConfigured
+	}
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	body, err := json.Marshal(struct {
+		Request Request `json:"request"`
+	}{Request: request})
+	if err != nil {
+		return fmt.Errorf("encode builder preflight request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/v1/preflight", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create builder preflight request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	response, err := r.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("call image builder preflight: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+		return fmt.Errorf("decode image builder preflight response: %w", err)
+	}
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return ErrUnauthorized
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		if strings.TrimSpace(payload.Error) != "" {
+			return fmt.Errorf("%w: %s", ErrRegistryPreflightFailed, payload.Error)
+		}
+		return fmt.Errorf("%w: image builder preflight failed", ErrRegistryPreflightFailed)
+	}
+	return nil
+}
+
 func errorsFromBuilder(message string) error {
 	message = strings.TrimSpace(message)
 	if message == "" {

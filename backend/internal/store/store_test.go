@@ -116,6 +116,13 @@ func TestMemoryProjectSettingsNormalizeDefaultsAndRejectInvalidUpdates(t *testin
 	if created.DefaultBranch != "main" || created.Namespace != "lab" || created.DeployStrategy != "rolling" || created.Replicas != 1 || created.ContainerPort != 8080 {
 		t.Fatalf("normalized project = %#v", created)
 	}
+	targets, err := data.ListDeploymentTargets(context.Background(), "space-lab", created.ID)
+	if err != nil {
+		t.Fatalf("list targets for newly created project: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("new project unexpectedly created deployment targets: %#v", targets)
+	}
 
 	badBranch := ""
 	badNamespace := "Bad_Ns"
@@ -171,6 +178,44 @@ func TestMemoryProjectImageRepositoryRoundTrip(t *testing.T) {
 	updated, err = data.UpdateProject(context.Background(), "space-lab", created.ID, UpdateProjectInput{ImageRepository: &cleared})
 	if err != nil || updated.ImageRepository != "" {
 		t.Fatalf("clear image_repository: %v %#v", err, updated.ImageRepository)
+	}
+}
+
+func TestMemoryImageRegistryConnectionLifecycleAndProjectBinding(t *testing.T) {
+	data := NewMemoryWithFixtures()
+	created, err := data.CreateImageRegistryConnection(context.Background(), "space-lab", CreateImageRegistryConnectionInput{
+		ID: "acr-main", Name: "阿里云 ACR", Registry: "Registry.Example.com/", AuthType: "basic", Username: "robot", CredentialCiphertext: "encrypted",
+	})
+	if err != nil {
+		t.Fatalf("create registry connection: %v", err)
+	}
+	if created.Registry != "registry.example.com" || !created.Configured || created.PullSecretName == "" || created.CredentialCiphertext != "encrypted" {
+		t.Fatalf("normalized connection = %#v", created)
+	}
+	if _, err := data.CreateImageRegistryConnection(context.Background(), "space-lab", CreateImageRegistryConnectionInput{Name: "duplicate", Registry: "registry.example.com", AuthType: "token", CredentialCiphertext: "other"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate registry error = %v, want conflict", err)
+	}
+	project, err := data.CreateProject(context.Background(), "space-lab", CreateProjectInput{Name: "registry-bound", RepositoryURL: "https://example.invalid/registry-bound", ClusterID: "demo-cluster", ImageRepository: "registry.example.com/team/app", RegistryConnectionID: created.ID})
+	if err != nil {
+		t.Fatalf("create bound project: %v", err)
+	}
+	if project.RegistryConnectionID != created.ID {
+		t.Fatalf("project registry connection = %q", project.RegistryConnectionID)
+	}
+	withoutPath, err := data.CreateProject(context.Background(), "space-lab", CreateProjectInput{Name: "registry-bound-auto", RepositoryURL: "https://example.invalid/registry-bound-auto", ClusterID: "demo-cluster", RegistryConnectionID: created.ID})
+	if err != nil || withoutPath.ImageRepository != "" {
+		t.Fatalf("managed registry should allow an omitted image repository path: %#v, %v", withoutPath, err)
+	}
+	if err := data.DeleteImageRegistryConnection(context.Background(), "space-lab", created.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("delete bound connection error = %v, want conflict", err)
+	}
+	otherSpace, err := data.GetImageRegistryConnection(context.Background(), "space-other", created.ID)
+	if !errors.Is(err, ErrNotFound) || otherSpace.ID != "" {
+		t.Fatalf("cross-space lookup = %#v, %v", otherSpace, err)
+	}
+	wrongRepository := "other.example.com/team/app"
+	if _, err := data.UpdateProject(context.Background(), "space-lab", project.ID, UpdateProjectInput{ImageRepository: &wrongRepository}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("mismatched repository error = %v, want invalid input", err)
 	}
 }
 

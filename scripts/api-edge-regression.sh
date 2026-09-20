@@ -9,6 +9,8 @@ base_url="${CICD_BASE_URL:-http://127.0.0.1:8790}"
 username="${CICD_REGRESSION_USERNAME:-admin}"
 password="${CICD_REGRESSION_PASSWORD:-ttp}"
 repository_url="${CICD_EDGE_REPOSITORY_URL:-https://github.com/octocat/Hello-World.git}"
+kubeconfig_path="${CICD_EDGE_KUBECONFIG:-${CICD_KUBECONFIG:-$HOME/.kube/config}}"
+kube_context="${CICD_EDGE_KUBE_CONTEXT:-${CICD_KUBE_CONTEXT:-}}"
 requested_branch="${CICD_EDGE_BRANCH:-master}"
 cluster_id="${CICD_KUBE_CLUSTER_ID:-local}"
 compose_project="${COMPOSE_PROJECT_NAME:-cicd-platform}"
@@ -58,6 +60,7 @@ DELETE FROM project_git_credentials WHERE space_id IN ('$space_id', '$second_spa
 DELETE FROM project_deployment_targets WHERE space_id IN ('$space_id', '$second_space_id');
 DELETE FROM audit_logs WHERE space_id IN ('$space_id', '$second_space_id');
 DELETE FROM projects WHERE space_id IN ('$space_id', '$second_space_id');
+DELETE FROM image_registry_connections WHERE space_id IN ('$space_id', '$second_space_id');
 DELETE FROM clusters WHERE space_id IN ('$space_id', '$second_space_id');
 DELETE FROM space_members WHERE space_id IN ('$space_id', '$second_space_id');
 DELETE FROM spaces WHERE id IN ('$space_id', '$second_space_id');
@@ -240,7 +243,7 @@ expect_status 200 'space permission catalog endpoint'
 expect_json 'any(.roles[]; .key == "viewer") and any(.permissions[]; .key == "release:publish")' 'permission catalog contains release controls'
 
 cluster_id_for_cleanup="$cluster_id"
-api_call POST /api/clusters "$(jq -nc --arg id "$cluster_id" --arg name "TTP edge cluster $suffix" '{id:$id,name:$name,provider:"kubernetes",connection_mode:"kubeconfig"}')"
+api_call POST /api/clusters "$(jq -nc --arg id "$cluster_id" --arg name "TTP edge cluster $suffix" --arg path "$kubeconfig_path" --arg context "$kube_context" '{id:$id,name:$name,provider:"kubernetes",connection_mode:"kubeconfig",kubeconfig_path:$path,kube_context:$context}')"
 expect_status 201 'register temporary Kubernetes cluster'
 expect_json '.cluster.id == $id and (.cluster | has("kubeconfig_path") | not)' 'cluster connection material is private' --arg id "$cluster_id"
 expect_json '.connected == true' 'temporary cluster connects to the configured Kubernetes client'

@@ -94,6 +94,10 @@ func normalizeCreateProjectInput(input CreateProjectInput) (CreateProjectInput, 
 	if err := validateImageRepository(input.ImageRepository); err != nil {
 		return CreateProjectInput{}, err
 	}
+	input.RegistryConnectionID = strings.TrimSpace(input.RegistryConnectionID)
+	if input.RegistryConnectionID != "" && !validRegistryConnectionID(input.RegistryConnectionID) {
+		return CreateProjectInput{}, fmt.Errorf("%w: registry connection id is invalid", ErrInvalidInput)
+	}
 	return input, nil
 }
 
@@ -116,10 +120,27 @@ func validateImageRepository(value string) error {
 	if host != parts[0] || (host != "localhost" && !strings.ContainsAny(host, ".:")) {
 		return fmt.Errorf("%w: image_repository must include an explicit registry host", ErrInvalidInput)
 	}
-	for _, part := range parts {
-		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, ".") || strings.ContainsAny(part, "ABCDEFGHIJKLMNOPQRSTUVWXYZ:") {
+	if _, err := normalizeRegistryHost(parts[0]); err != nil {
+		return fmt.Errorf("%w: image_repository registry host is invalid", ErrInvalidInput)
+	}
+	for index, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, ".") || strings.ContainsAny(part, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") || (index > 0 && strings.Contains(part, ":")) {
 			return fmt.Errorf("%w: image_repository is invalid", ErrInvalidInput)
 		}
+	}
+	return nil
+}
+
+func validateImageRepositoryRegistry(imageRepository string, registry string) error {
+	if strings.TrimSpace(registry) == "" {
+		return nil
+	}
+	if strings.TrimSpace(imageRepository) == "" {
+		return nil
+	}
+	host := strings.ToLower(strings.SplitN(strings.TrimSpace(imageRepository), "/", 2)[0])
+	if host != strings.ToLower(strings.TrimSpace(registry)) {
+		return fmt.Errorf("%w: image repository host must match the selected registry connection", ErrInvalidInput)
 	}
 	return nil
 }
@@ -164,6 +185,12 @@ func validateProjectUpdateInput(input UpdateProjectInput) error {
 	if input.ImageRepository != nil {
 		if err := validateImageRepository(strings.TrimSpace(*input.ImageRepository)); err != nil {
 			return err
+		}
+	}
+	if input.RegistryConnectionID != nil {
+		value := strings.TrimSpace(*input.RegistryConnectionID)
+		if value != "" && !validRegistryConnectionID(value) {
+			return fmt.Errorf("%w: registry connection id is invalid", ErrInvalidInput)
 		}
 	}
 	return nil

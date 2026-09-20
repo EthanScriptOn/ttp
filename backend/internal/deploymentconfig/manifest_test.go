@@ -106,6 +106,25 @@ metadata:
 	}
 }
 
+func TestRetargetNamespacePreservesAlreadyTargetedManifest(t *testing.T) {
+	manifest := `apiVersion: v1
+kind: Service
+metadata:
+  name: checkout
+  namespace: lab
+spec:
+  ports:
+    - port: 80
+`
+	retargeted, err := RetargetNamespace(manifest, "lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retargeted != strings.TrimSpace(manifest) {
+		t.Fatalf("already-targeted manifest was reformatted: %q", retargeted)
+	}
+}
+
 func TestValidateRejectsTooManyResources(t *testing.T) {
 	var builder strings.Builder
 	for index := 0; index < 101; index++ {

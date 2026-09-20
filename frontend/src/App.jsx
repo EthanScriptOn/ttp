@@ -1,7 +1,6 @@
 import {
   App as AntApp,
   Avatar,
-  Badge,
   Button,
   Card,
   Col,
@@ -46,13 +45,15 @@ import SpacePicker from './components/SpacePicker'
 import ProjectForm from './components/ProjectForm'
 import PodDrawer from './components/PodDrawer'
 import PodTerminal from './components/PodTerminal'
-import ClusterOverview from './components/ClusterOverview'
+import InfrastructureConnections from './components/InfrastructureConnections'
 import ProjectSettings from './components/ProjectSettings'
 import MonitorDashboard from './components/MonitorDashboard'
 import ReleaseFlow from './components/ReleaseFlow'
 import DeploymentConfigEditor from './components/DeploymentConfigEditor'
 import SpaceSettingsPage from './components/SpaceSettingsPage'
 import SpaceMembersPage from './components/SpaceMembersPage'
+import ProjectMembersPage from './components/ProjectMembersPage'
+import ClusterMonitorOverview from './components/ClusterMonitorOverview'
 import DeploymentTargets, { DeploymentTargetSelect } from './components/DeploymentTargets'
 import ABExperiment from './components/ABExperiment'
 import BrandLogo from './components/BrandLogo'
@@ -66,9 +67,11 @@ import {
   getCommits,
   getCurrentUser,
   getClusters,
+  getImageRegistryConnections,
   getDeploymentTargets,
   getGitAccess,
   getProjectGitCredential,
+  getProjectAccess,
   saveProjectGitCredential,
   deleteProjectGitCredential,
   getAuditLogs,
@@ -236,7 +239,8 @@ function ConsoleLayout({ spaces, spaceId, onSpaceChange, onOpenSpaces, switching
   const can = (permission) => hasPermission(role, permission, user?.is_super_admin)
   const menuItems = [
     { key: 'projects', icon: <AppstoreOutlined />, label: '项目' },
-    can(PERMISSIONS.CLUSTER_READ) && { key: 'clusters', icon: <ClusterOutlined />, label: '集群管理' },
+    (can(PERMISSIONS.CLUSTER_READ) || can(PERMISSIONS.REGISTRY_READ)) && { key: 'infrastructure', icon: <ClusterOutlined />, label: '连接管理' },
+    can(PERMISSIONS.CLUSTER_READ) && { key: 'cluster-monitor', icon: <DashboardOutlined />, label: '集群监控' },
     can(PERMISSIONS.AUDIT_READ) && { key: 'activity', icon: <DashboardOutlined />, label: '操作记录' },
     can(PERMISSIONS.SPACE_READ) && { key: 'settings', icon: <SettingOutlined />, label: '空间设置' },
     can(PERMISSIONS.MEMBER_READ) && { key: 'members', icon: <TeamOutlined />, label: '成员与权限' },
@@ -247,7 +251,7 @@ function ConsoleLayout({ spaces, spaceId, onSpaceChange, onOpenSpaces, switching
   }, [availableSections, section])
   const sectionTitle = selectedProject
     ? '项目详情'
-    : ({ clusters: '集群管理', activity: '操作记录', settings: '空间设置', members: '成员与权限', projects: '项目' }[section] || '项目')
+    : ({ infrastructure: '连接管理', 'cluster-monitor': '集群监控', activity: '操作记录', settings: '空间设置', members: '成员与权限', projects: '项目' }[section] || '项目')
   const spaceMenuItems = [
     ...spaces.map((space) => ({
       key: space.id,
@@ -276,7 +280,7 @@ function ConsoleLayout({ spaces, spaceId, onSpaceChange, onOpenSpaces, switching
         <div className="header-user"><Dropdown trigger={['click']} placement="bottomRight" menu={{ className: 'space-switcher-menu', items: spaceMenuItems, selectable: false, onClick: handleSpaceMenuClick }}><Button type="text" className="space-switcher" aria-label={`切换空间，当前空间 ${currentSpace?.name || '未选择'}`} loading={switchingSpace}><TeamOutlined /><span className="space-switcher-copy"><small>当前空间</small><strong>{currentSpace?.name || '未选择'}</strong></span><DownOutlined className="space-switcher-arrow" /></Button></Dropdown><Avatar size={32} className="user-avatar">{(user?.display_name || user?.username || '管')[0]}</Avatar><span className="user-name">{user?.display_name || user?.username || '管理员'}</span><Button type="text" aria-label="退出登录" icon={<LogoutOutlined />} onClick={onLogout} /></div>
       </Header>
       <Content className="console-content">
-        {selectedProject ? <ProjectDetail key={selectedProject.id} project={selectedProject} spaceName={currentSpace?.name} userName={user?.display_name || user?.username} permissions={{ canUpdateProject: can(PERMISSIONS.PROJECT_UPDATE), canCreateRelease: can(PERMISSIONS.RELEASE_CREATE), canUpdateRelease: can(PERMISSIONS.RELEASE_UPDATE), canPublishRelease: can(PERMISSIONS.RELEASE_PUBLISH), canRuntimeConfig: can(PERMISSIONS.RUNTIME_CONFIG), canRuntimeTerminal: can(PERMISSIONS.RUNTIME_TERMINAL) }} onBack={() => setSelectedProject(null)} onOpenCluster={() => { setSelectedProject(null); setSection('clusters') }} /> : section === 'clusters' ? <ClusterOverview canManageClusters={can(PERMISSIONS.CLUSTER_MANAGE)} onOpenProjects={() => setSection('projects')} /> : section === 'activity' ? <ActivityPage /> : section === 'settings' ? <SpaceSettingsPage role={role} user={user} onSpaceUpdated={onSpaceUpdated} /> : section === 'members' ? <SpaceMembersPage role={role} user={user} /> : <ProjectsPage canCreateProject={can(PERMISSIONS.PROJECT_CREATE)} onOpen={setSelectedProject} />}
+        {selectedProject ? <ProjectDetail key={selectedProject.id} project={selectedProject} spaceName={currentSpace?.name} userName={user?.display_name || user?.username} permissions={{ canUpdateProject: can(PERMISSIONS.PROJECT_UPDATE), canCreateRelease: can(PERMISSIONS.RELEASE_CREATE), canUpdateRelease: can(PERMISSIONS.RELEASE_UPDATE), canPublishRelease: can(PERMISSIONS.RELEASE_PUBLISH), canRuntimeConfig: can(PERMISSIONS.RUNTIME_CONFIG), canRuntimeTerminal: can(PERMISSIONS.RUNTIME_TERMINAL) }} onBack={() => setSelectedProject(null)} onOpenCluster={() => { setSelectedProject(null); setSection('cluster-monitor') }} /> : section === 'infrastructure' ? <InfrastructureConnections canReadClusters={can(PERMISSIONS.CLUSTER_READ)} canManageClusters={can(PERMISSIONS.CLUSTER_MANAGE)} canReadRegistry={can(PERMISSIONS.REGISTRY_READ)} canManageRegistry={can(PERMISSIONS.REGISTRY_MANAGE)} /> : section === 'cluster-monitor' ? <ClusterMonitorOverview onOpenConnections={() => setSection('infrastructure')} /> : section === 'activity' ? <ActivityPage /> : section === 'settings' ? <SpaceSettingsPage role={role} user={user} onSpaceUpdated={onSpaceUpdated} /> : section === 'members' ? <SpaceMembersPage role={role} user={user} /> : <ProjectsPage canCreateProject={can(PERMISSIONS.PROJECT_CREATE)} onOpen={setSelectedProject} />}
       </Content>
     </Layout>
   </Layout>
@@ -290,6 +294,7 @@ function ProjectsPage({ onOpen, canCreateProject = true }) {
   const [createLoading, setCreateLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [clusters, setClusters] = useState([])
+  const [registryConnections, setRegistryConnections] = useState([])
   const [keyword, setKeyword] = useState('')
   const [projectPage, setProjectPage] = useState(1)
   const [projectPageSize, setProjectPageSize] = useState(9)
@@ -308,6 +313,8 @@ function ProjectsPage({ onOpen, canCreateProject = true }) {
       if (clusterResult.status === 'rejected') failures.push(`集群：${clusterResult.reason?.message || '加载失败'}`)
       setProjects(nextProjects)
       setClusters(nextClusters)
+      const registryResult = await getImageRegistryConnections().catch(() => [])
+      setRegistryConnections(registryResult || [])
       const targetResults = await Promise.allSettled(nextProjects.map((project) => getDeploymentTargets(project.id)))
       setTargetsByProject(Object.fromEntries(nextProjects.map((project, index) => [
         project.id,
@@ -339,7 +346,7 @@ function ProjectsPage({ onOpen, canCreateProject = true }) {
       const projectTargets = await getDeploymentTargets(project.id).catch(() => null)
       setTargetsByProject((old) => ({ ...old, [project.id]: projectTargets }))
       setCreateOpen(false)
-      message.success('项目创建成功，正在检查 Git 仓库权限')
+      message.success('项目创建成功，仓库机器人已验证')
       onOpen?.(project)
     } catch (projectError) {
       message.error(projectError.message || '创建项目失败')
@@ -354,7 +361,7 @@ function ProjectsPage({ onOpen, canCreateProject = true }) {
     {!loading && !visible.length && <Card className="empty-panel"><Empty description={keyword ? '没有匹配的项目' : canCreateProject ? '还没有项目，先创建一个吧' : '当前空间还没有项目'}>{canCreateProject && <Button type="primary" onClick={() => setCreateOpen(true)}>创建项目</Button>}</Empty></Card>}
     {loading && <div className="loading-placeholder">加载项目中...</div>}
     {!loading && loadError && <div className="loading-placeholder">{loadError}</div>}
-    {canCreateProject && <ProjectForm open={createOpen} onCancel={() => setCreateOpen(false)} onSubmit={submit} loading={createLoading} clusters={clusters} />}
+    {canCreateProject && <ProjectForm open={createOpen} onCancel={() => setCreateOpen(false)} onSubmit={submit} loading={createLoading} clusters={clusters} registryConnections={registryConnections} />}
   </div>
 }
 
@@ -377,11 +384,19 @@ function ProjectCard({ project, targets, onClick }) {
 
 function ProjectDetail({ project: initialProject, spaceName, userName, permissions = {}, onBack, onOpenCluster }) {
   const [project, setProject] = useState(initialProject)
-  const canUpdateProject = permissions.canUpdateProject !== false
-  const canCreateRelease = permissions.canCreateRelease !== false
-  const canPublishRelease = permissions.canPublishRelease !== false
-  const canRuntimeConfig = permissions.canRuntimeConfig !== false
-  const canRuntimeTerminal = permissions.canRuntimeTerminal !== false
+  const [projectAccess, setProjectAccess] = useState(null)
+  const projectCan = (permission, fallback = false) => {
+    if (!projectAccess) return fallback
+    return projectAccess.is_space_admin || projectAccess.is_super_admin || projectAccess.permissions?.includes(permission) === true
+  }
+  const canUpdateProject = projectCan(PERMISSIONS.PROJECT_SETTINGS, permissions.canUpdateProject !== false)
+  const canCreateRelease = projectCan(PERMISSIONS.PROJECT_RELEASE_CREATE, permissions.canCreateRelease !== false)
+  const canPublishRelease = projectCan(PERMISSIONS.PROJECT_RELEASE_PUBLISH, permissions.canPublishRelease !== false)
+  const canRuntimeConfig = projectCan(PERMISSIONS.PROJECT_RUNTIME_CONFIG, permissions.canRuntimeConfig !== false)
+  const canRuntimeTerminal = projectCan(PERMISSIONS.PROJECT_RUNTIME_TERMINAL, permissions.canRuntimeTerminal !== false)
+  const canManageGit = projectCan(PERMISSIONS.PROJECT_GIT_MANAGE, false)
+  const canViewProjectMembers = projectCan(PERMISSIONS.PROJECT_MEMBERS_READ, false)
+  const canManageProjectMembers = projectCan(PERMISSIONS.PROJECT_MEMBERS_MANAGE, false)
   const initialBranch = project.default_branch || 'main'
   const [branch, setBranch] = useState(initialBranch)
   const [branches, setBranches] = useState([])
@@ -410,10 +425,12 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
   const [candidate, setCandidate] = useState(1)
   const trafficCandidate = strategy === 'rolling' ? 0 : candidate
   const [releaseSaving, setReleaseSaving] = useState(false)
+  const publishRequestRef = useRef(false)
   const [releaseTarget, setReleaseTarget] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [clusters, setClusters] = useState([])
+  const [registryConnections, setRegistryConnections] = useState([])
   const [cancellingRelease, setCancellingRelease] = useState('')
   const [retryingTarget, setRetryingTarget] = useState('')
   const [gitCredential, setGitCredential] = useState(null)
@@ -450,6 +467,15 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     setGitAccessLoading(false)
   }
 
+  const loadProjectAccess = async () => {
+    try {
+      setProjectAccess(await getProjectAccess(project.id))
+    } catch (error) {
+      setProjectAccess(null)
+      if (error?.code !== 'forbidden') message.warning(error.message || '项目权限加载失败')
+    }
+  }
+
   const loadRuntime = async (targetId = selectedTarget?.id) => {
     if (!targetId) {
       setPods([])
@@ -462,7 +488,15 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     ])
     const [podResult, metricResult] = runtimeResults
     if (podResult.status === 'fulfilled') setPods(podResult.value || [])
-    if (metricResult.status === 'fulfilled') setMetrics(metricResult.value || null)
+    if (metricResult.status === 'fulfilled') {
+      setMetrics((previous) => {
+        const next = metricResult.value || null
+        if (!next || !Array.isArray(next.series) || next.series.length === 0) return next
+        const history = [...(Array.isArray(previous?.series) ? previous.series : []), ...next.series]
+        const unique = new Map(history.map((point) => [String(point.timestamp), point]))
+        return { ...next, series: [...unique.values()].slice(-120) }
+      })
+    }
     return runtimeResults
   }
 
@@ -494,6 +528,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     setLoading(true)
     setTargetLoading(true)
     try {
+      getImageRegistryConnections().then((items) => setRegistryConnections(items || [])).catch(() => {})
       const results = await Promise.allSettled([
         getBranches(project.id),
         getCommits(project.id, branchName),
@@ -504,9 +539,9 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       const failures = []
       const [branchResult, commitResult, releaseResult, targetResult, experimentResult] = results
       if (branchResult.status === 'fulfilled') setBranches(branchResult.value || [])
-      else failures.push(`分支：${branchResult.reason?.message || '加载失败'}`)
+      else if (branchResult.reason?.code !== 'git_credential_invalid') failures.push(`分支：${branchResult.reason?.message || '加载失败'}`)
       if (commitResult.status === 'fulfilled') setCommits(commitResult.value || [])
-      else failures.push(`提交：${commitResult.reason?.message || '加载失败'}`)
+      else if (commitResult.reason?.code !== 'git_credential_invalid') failures.push(`提交：${commitResult.reason?.message || '加载失败'}`)
       if (releaseResult.status === 'fulfilled') setReleases(normalizeReleases(releaseResult.value || []))
       else failures.push(`发布记录：${releaseResult.reason?.message || '加载失败'}`)
       if (experimentResult.status === 'fulfilled') setExperiments(experimentResult.value || [])
@@ -542,6 +577,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
   }
   useEffect(() => {
     load(initialBranch)
+    loadProjectAccess()
     loadGitAccess()
     loadClusters()
   }, [project.id])
@@ -756,6 +792,12 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       message.warning('当前角色没有创建发布单的权限')
       return null
     }
+    const targetIds = availableTargets.filter((target) => target.enabled).map((target) => target.id)
+    if (!targetIds.length) {
+      message.warning('请先在“发布环境”中添加并启用 DEV 环境；部署配置资源文件不等于发布目标')
+      setTab('targets')
+      return null
+    }
     try {
       const nextBranch = sourceBranch || branch
       const latestCommits = (await getCommits(project.id, nextBranch)) || []
@@ -767,7 +809,6 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       setBranch(nextBranch)
       setCommits(latestCommits)
       setSelected([latestCommit])
-      const targetIds = availableTargets.filter((target) => target.enabled).map((target) => target.id)
       const created = await createRelease(project.id, {
         branch: nextBranch,
         commit_shas: [latestCommit.sha],
@@ -796,13 +837,25 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       message.warning(gitAccess?.message || '请先在项目设置中完成仓库机器人授权')
       return null
     }
+    if (publishRequestRef.current) {
+      message.info('发布请求正在提交，请稍候')
+      return null
+    }
+    publishRequestRef.current = true
     setReleaseSaving(true)
+    const environmentName = environment?.label || '环境'
+    const messageKey = `release-publish-${release.id}-${environment?.key || environment?.id || 'environment'}`
+    message.open({ key: messageKey, type: 'loading', content: `正在提交${environmentName}发布请求，请稍候...`, duration: 0 })
     try {
       const updated = await publishRelease(project.id, release.id)
       const next = upsertRelease(updated)
-      message.success(`${environment?.label || '环境'} 环境发布已提交`)
+      message.success({ key: messageKey, content: `${environmentName}环境发布已提交`, duration: 3 })
       return next
+    } catch (error) {
+      message.error({ key: messageKey, content: error.message || `${environmentName}环境发布提交失败`, duration: 4 })
+      return null
     } finally {
+      publishRequestRef.current = false
       setReleaseSaving(false)
     }
   }
@@ -832,7 +885,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       message.info('这个发布已经是草稿，点击“开始发布”即可继续')
       return
     }
-    if (!releaseTarget && !releaseTargetIds.length) { message.warning('至少选择一个发布环境'); return }
+    if (!releaseTarget && !releaseTargetIds.length) { message.warning('请先在“发布环境”中添加并启用 DEV 环境'); setTab('targets'); return }
     if (publish && !canPublish) {
       message.warning(gitAccess?.message || '请先在项目设置中完成仓库机器人授权')
       return
@@ -973,6 +1026,14 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     }
   }
   const saveSettings = async (values) => {
+    if (gitAccessLoading) {
+      message.warning('正在检查仓库机器人，请稍后再保存')
+      return
+    }
+    if (gitCredential?.configured !== true) {
+      message.warning('请先在项目设置中配置并验证仓库机器人')
+      return
+    }
     setSettingsLoading(true)
     try {
       const updated = await updateProject(project.id, values)
@@ -991,7 +1052,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     <div className="detail-shell">
       <button type="button" className="back-link" onClick={onBack}>← 返回项目列表</button>
       <div className="detail-heading"><div className="detail-project-title"><div className="project-icon large"><CodeOutlined /></div><div><Typography.Title level={2}>{project.name}</Typography.Title><Typography.Paragraph type="secondary"><CodeOutlined /> {project.repository_url} <span className="heading-separator">·</span> 分支 <strong>{branch}</strong></Typography.Paragraph></div></div><Space wrap>{canUpdateProject && <Button icon={<SettingOutlined />} onClick={openSettings}>项目设置</Button>}</Space></div>
-      <div className="detail-tabs"><button className={tab === 'release' ? 'active' : ''} onClick={() => setTab('release')} type="button"><CloudUploadOutlined /> 发布</button><button className={tab === 'experiments' ? 'active' : ''} onClick={() => setTab('experiments')} type="button"><ExperimentOutlined /> A/B 实验 <Badge count={experiments.filter((item) => item.status === 'running').length || 0} size="small" /></button><button className={tab === 'targets' ? 'active' : ''} onClick={() => setTab('targets')} type="button"><EnvironmentOutlined /> 发布环境 <Badge count={availableTargets.length} size="small" /></button><button className={tab === 'config' ? 'active' : ''} onClick={() => setTab('config')} type="button"><FileTextOutlined /> 部署配置</button><button className={tab === 'runtime' ? 'active' : ''} onClick={() => setTab('runtime')} type="button"><DeploymentUnitOutlined /> Pod 运行态 <Badge count={pods.length} size="small" /></button><button className={tab === 'monitor' ? 'active' : ''} onClick={() => setTab('monitor')} type="button"><DashboardOutlined /> 监控</button></div>
+      <div className="detail-tabs"><button className={tab === 'release' ? 'active' : ''} onClick={() => setTab('release')} type="button"><CloudUploadOutlined /> 发布</button><button className={tab === 'experiments' ? 'active' : ''} onClick={() => setTab('experiments')} type="button"><ExperimentOutlined /> A/B 实验</button><button className={tab === 'targets' ? 'active' : ''} onClick={() => setTab('targets')} type="button"><EnvironmentOutlined /> 发布环境</button><button className={tab === 'config' ? 'active' : ''} onClick={() => setTab('config')} type="button"><FileTextOutlined /> 部署配置</button><button className={tab === 'runtime' ? 'active' : ''} onClick={() => setTab('runtime')} type="button"><DeploymentUnitOutlined /> Pod 运行态</button><button className={tab === 'monitor' ? 'active' : ''} onClick={() => setTab('monitor')} type="button"><DashboardOutlined /> 监控</button>{canViewProjectMembers && <button className={tab === 'members' ? 'active' : ''} onClick={() => setTab('members')} type="button"><TeamOutlined /> 成员权限</button>}</div>
     </div>
     {tab === 'release' && <ReleaseFlow
       embedded
@@ -999,6 +1060,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       spaceName={spaceName}
       userName={userName}
       onBack={() => setTab('targets')}
+      onOpenTargets={() => setTab('targets')}
       branch={branch}
       branches={branches}
       branchLoading={branchLoading}
@@ -1007,6 +1069,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       onRefresh={() => load(branch)}
       onCreateRelease={createReleaseOrder}
       onPublishEnvironment={publishEnvironment}
+      publishing={releaseSaving}
       onRetryTarget={retryTarget}
       onLoadReleaseTargetLogs={loadReleaseTargetLogs}
       onEnvironmentChange={changeReleaseDetailEnvironment}
@@ -1038,7 +1101,8 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     {tab === 'config' && <DeploymentConfigEditor project={project} readOnly={!canUpdateProject} />}
     {tab === 'runtime' && <RuntimeTab project={project} targets={availableTargets} clusters={clusters} selectedTargetId={selectedTarget?.id} onTargetChange={changeTarget} pods={pods} loading={loading} onRefresh={() => loadRuntime(selectedTarget?.id)} onOpenPod={(podValue) => openDetailPod(podValue, selectedTarget)} onOpenMonitor={(podValue) => openPodMonitor(podValue, selectedTarget)} onOpenTerminal={(podValue) => openPodTerminal(podValue, selectedTarget)} canOpenTerminal={canRuntimeTerminal} />}
     {tab === 'monitor' && <MonitorTab metrics={metrics} pods={pods} project={project} targets={availableTargets} selectedTargetId={selectedTarget?.id} onTargetChange={changeTarget} onRefresh={() => loadRuntime(selectedTarget?.id)} onOpenCluster={onOpenCluster} focusPod={monitorPod} onClearPod={() => setMonitorPod(null)} />}
-    <ProjectSettings project={project} open={settingsOpen} loading={settingsLoading} onCancel={() => setSettingsOpen(false)} onSubmit={saveSettings} onGoTargets={() => { setSettingsOpen(false); setTab('targets') }} gitCredential={gitCredential} gitCredentialLoading={gitAccessLoading} onSaveGitCredential={saveGitCredential} onDeleteGitCredential={deleteGitCredential} />
+    {tab === 'members' && canViewProjectMembers && <ProjectMembersPage project={project} canManage={canManageProjectMembers} />}
+    <ProjectSettings project={project} open={settingsOpen} loading={settingsLoading} onCancel={() => setSettingsOpen(false)} onSubmit={saveSettings} gitCredential={gitCredential} gitCredentialLoading={gitAccessLoading} onSaveGitCredential={saveGitCredential} onDeleteGitCredential={deleteGitCredential} registryConnections={registryConnections} canManageGit={canManageGit} />
     <PodDrawer project={project} pod={pod} target={podTarget || selectedTarget} targetId={(podTarget || selectedTarget)?.id} open={Boolean(pod)} onClose={() => setPod(null)} canEdit={canRuntimeConfig} />
     <PodTerminal project={project} pod={terminalPod} target={podTarget || selectedTarget} targetId={(podTarget || selectedTarget)?.id} open={Boolean(terminalPod)} onClose={() => setTerminalPod(null)} canExecute={canRuntimeTerminal} />
   </div>

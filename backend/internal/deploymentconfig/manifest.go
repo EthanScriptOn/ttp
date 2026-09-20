@@ -32,6 +32,48 @@ type Validation struct {
 	Resources []Resource
 }
 
+// ValidateResourceFile validates one independently applicable Kubernetes file.
+// Unlike Validate, it deliberately rejects YAML document streams and JSON
+// arrays: one file must contain exactly one object that kubectl can apply.
+func ValidateResourceFile(content, format, expectedNamespace string) (Validation, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return Validation{}, fmt.Errorf("%w: resource file cannot be empty", ErrInvalidManifest)
+	}
+	requestedFormat, err := NormalizeFormat(format)
+	if err != nil {
+		return Validation{}, err
+	}
+	if strings.TrimSpace(format) == "" {
+		requestedFormat = DetectFormat(content)
+	} else if requestedFormat != DetectFormat(content) {
+		return Validation{}, fmt.Errorf("%w: resource file format does not match content", ErrInvalidManifest)
+	}
+	values, err := decodeDocuments(content)
+	if err != nil {
+		return Validation{}, err
+	}
+	if len(values) != 1 {
+		return Validation{}, fmt.Errorf("%w: each resource file must contain exactly one Kubernetes object", ErrInvalidManifest)
+	}
+	if _, ok := values[0].([]any); ok {
+		return Validation{}, fmt.Errorf("%w: JSON arrays are not allowed in a resource file", ErrInvalidManifest)
+	}
+	validated, err := Validate(content, expectedNamespace)
+	if err != nil {
+		return Validation{}, err
+	}
+	if len(validated.Resources) != 1 {
+		return Validation{}, fmt.Errorf("%w: each resource file must contain exactly one Kubernetes object", ErrInvalidManifest)
+	}
+	resource := validated.Resources[0]
+	if clusterScopedKinds[resource.Kind] {
+		return Validation{}, fmt.Errorf("%w: cluster-scoped resource %s is not allowed in a project resource file", ErrInvalidManifest, resource.Kind)
+	}
+	validated.Format = requestedFormat
+	return validated, nil
+}
+
 func NormalizeFormat(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "yaml", "yml":
@@ -178,6 +220,7 @@ func RetargetNamespace(manifest, namespace string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	changed := false
 	for _, object := range objects {
 		kind, _ := stringField(object, "kind")
 		if clusterScopedKinds[strings.TrimSpace(kind)] {
@@ -187,7 +230,17 @@ func RetargetNamespace(manifest, namespace string) (string, error) {
 		if !ok {
 			continue
 		}
-		metadata["namespace"] = namespace
+		currentNamespace, _ := stringField(metadata, "namespace")
+		if currentNamespace != namespace {
+			metadata["namespace"] = namespace
+			changed = true
+		}
+	}
+	if !changed {
+		// Keep the user's original formatting when the target namespace is
+		// already correct. Re-render only when TTP actually has to retarget a
+		// namespaced object.
+		return strings.TrimSpace(manifest), nil
 	}
 	format := DetectFormat(manifest)
 	if format == "json" {

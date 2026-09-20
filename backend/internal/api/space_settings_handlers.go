@@ -194,10 +194,12 @@ func (s *Server) getSpacePermissions(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"role":        role,
-		"role_name":   permissions.RoleName(role),
-		"roles":       permissions.RoleDefinitions(),
-		"permissions": permissions.PermissionDefinitions(),
+		"role":                role,
+		"role_name":           permissions.RoleName(role),
+		"roles":               permissions.RoleDefinitions(),
+		"permissions":         permissions.PermissionDefinitions(),
+		"project_roles":       permissions.ProjectRoleDefinitions(),
+		"project_permissions": permissions.ProjectPermissionDefinitions(),
 	})
 }
 

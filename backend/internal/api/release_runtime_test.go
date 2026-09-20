@@ -27,7 +27,9 @@ func TestPublishExecutesRuntimeDeployment(t *testing.T) {
 	}
 	var createdBody struct {
 		Release struct {
-			ID string `json:"id"`
+			ID            string `json:"id"`
+			CreatedBy     uint64 `json:"created_by"`
+			CreatedByName string `json:"created_by_name"`
 		} `json:"release"`
 	}
 	if err := json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil {
@@ -35,6 +37,9 @@ func TestPublishExecutesRuntimeDeployment(t *testing.T) {
 	}
 	if createdBody.Release.ID == "" {
 		t.Fatal("release id is empty")
+	}
+	if createdBody.Release.CreatedBy != 1 || createdBody.Release.CreatedByName != "平台管理员" {
+		t.Fatalf("release creator = %d/%q, want 1/平台管理员", createdBody.Release.CreatedBy, createdBody.Release.CreatedByName)
 	}
 	releasePath := "/api/projects/reverse-lab/releases/" + createdBody.Release.ID
 
@@ -339,53 +344,15 @@ func TestProductionPublishDoesNotInventImage(t *testing.T) {
 	}
 	releasePath := "/api/projects/reverse-lab/releases/" + body.Release.ID
 	started := doRequest(t, handler, http.MethodPost, releasePath+"/publish", token, "")
-	if started.Code != http.StatusAccepted {
-		t.Fatalf("publish: expected 202, got %d: %s", started.Code, started.Body.String())
+	if started.Code != http.StatusNotImplemented || !strings.Contains(started.Body.String(), `"code":"image_build_unsupported"`) {
+		t.Fatalf("publish should be blocked before queueing without a builder, got %d: %s", started.Code, started.Body.String())
 	}
-
-	deadline := time.Now().Add(7 * time.Second)
-	for {
-		response := doRequest(t, handler, http.MethodGet, releasePath, token, "")
-		if response.Code != http.StatusOK {
-			t.Fatalf("read release: expected 200, got %d, %s", response.Code, response.Body.String())
-		}
-		if strings.Contains(response.Body.String(), `"status":"failed"`) {
-			if !strings.Contains(response.Body.String(), "image build and push provider is not configured") {
-				t.Fatalf("unexpected production publish failure: %s", response.Body.String())
-			}
-			var failedBody struct {
-				Release struct {
-					Targets []struct {
-						Logs []struct {
-							Level string `json:"level"`
-							Line  string `json:"line"`
-						} `json:"logs"`
-					} `json:"targets"`
-				} `json:"release"`
-			}
-			if err := json.Unmarshal(response.Body.Bytes(), &failedBody); err != nil {
-				t.Fatal(err)
-			}
-			loggedFailure := false
-			for _, target := range failedBody.Release.Targets {
-				for _, entry := range target.Logs {
-					if entry.Level == "ERROR" && strings.Contains(entry.Line, "image build and push provider is not configured") {
-						loggedFailure = true
-					}
-				}
-			}
-			if !loggedFailure {
-				t.Fatalf("image builder failure was not persisted as an execution log: %s", response.Body.String())
-			}
-			if recorder.deploymentCount() != 0 {
-				t.Fatalf("runtime was called without a real image: %d call(s)", recorder.deploymentCount())
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("production publish did not fail in time: %s", response.Body.String())
-		}
-		time.Sleep(100 * time.Millisecond)
+	response := doRequest(t, handler, http.MethodGet, releasePath, token, "")
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `"status":"running"`) {
+		t.Fatalf("blocked publish must not mutate release state: %s", response.Body.String())
+	}
+	if recorder.deploymentCount() != 0 {
+		t.Fatalf("runtime was called without a real image: %d call(s)", recorder.deploymentCount())
 	}
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -31,7 +32,7 @@ func (s *Server) getDeploymentConfig(c *gin.Context) {
 
 	targetFormat := strings.TrimSpace(c.Query("format"))
 	if targetFormat != "" && strings.TrimSpace(config.Manifest) != "" && !strings.EqualFold(targetFormat, config.Format) {
-		converted, convertedValidation, convertErr := deploymentconfig.Convert(config.Manifest, targetFormat, project.Namespace)
+		converted, convertedValidation, convertErr := deploymentconfig.Convert(config.Manifest, targetFormat, config.Namespace)
 		if convertErr != nil {
 			writeDeploymentConfigError(c, convertErr)
 			return
@@ -142,6 +143,44 @@ func (s *Server) resolveDeploymentConfigWithContext(ctx context.Context, project
 }
 
 func (s *Server) resolveDeploymentConfigForTargetWithContext(ctx context.Context, project domain.Project, target domain.DeploymentTarget) (domain.DeploymentConfig, deploymentconfig.Validation, error) {
+	resourceFiles, filesErr := s.deps.Store.ListDeploymentResourceFiles(ctx, project.SpaceID, project.ID)
+	if filesErr == nil && len(resourceFiles) > 0 {
+		resolved := domain.DeploymentConfig{ProjectID: project.ID, Namespace: target.Namespace, Format: "yaml", Version: 1, Files: make([]domain.DeploymentResourceFile, 0, len(resourceFiles))}
+		validated := deploymentconfig.Validation{Format: "yaml", Resources: make([]deploymentconfig.Resource, 0, len(resourceFiles))}
+		for _, file := range resourceFiles {
+			content := file.Content
+			if strings.TrimSpace(content) != "" {
+				retargeted, err := deploymentconfig.RetargetNamespace(content, target.Namespace)
+				if err != nil {
+					return domain.DeploymentConfig{}, deploymentconfig.Validation{}, err
+				}
+				content = retargeted
+			}
+			file.Content = content
+			file.Namespace = target.Namespace
+			fileValidation, err := deploymentconfig.ValidateResourceFile(content, file.Format, target.Namespace)
+			if err != nil {
+				return domain.DeploymentConfig{}, deploymentconfig.Validation{}, fmt.Errorf("资源文件 %s 校验失败：%w", file.Path, err)
+			}
+			file.APIVersion = fileValidation.Resources[0].APIVersion
+			file.Kind = fileValidation.Resources[0].Kind
+			file.ResourceName = fileValidation.Resources[0].Name
+			file.ReleaseSupported = deploymentconfig.IsReleaseSupportedKind(file.Kind)
+			resolved.Files = append(resolved.Files, file)
+			if file.Version > resolved.Version {
+				resolved.Version = file.Version
+			}
+			validated.Resources = append(validated.Resources, fileValidation.Resources...)
+		}
+		resolved.ResourceCount = len(validated.Resources)
+		resolved.Resources = deploymentResources(validated.Resources)
+		resolved.Capabilities = deploymentCapabilities(validated.Resources)
+		resolved.IsDefault = false
+		return resolved, validated, nil
+	}
+	if filesErr != nil && !errors.Is(filesErr, store.ErrNotFound) {
+		return domain.DeploymentConfig{}, deploymentconfig.Validation{}, filesErr
+	}
 	stored, err := s.deps.Store.GetDeploymentConfig(ctx, project.SpaceID, project.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		// An empty configuration is a valid project setup state. Return it so
@@ -155,7 +194,7 @@ func (s *Server) resolveDeploymentConfigForTargetWithContext(ctx context.Context
 		return domain.DeploymentConfig{}, deploymentconfig.Validation{}, err
 	}
 	manifest := stored.Manifest
-	if strings.TrimSpace(target.Namespace) != strings.TrimSpace(project.Namespace) {
+	if strings.TrimSpace(manifest) != "" {
 		manifest, err = deploymentconfig.RetargetNamespace(manifest, target.Namespace)
 		if err != nil {
 			return domain.DeploymentConfig{}, deploymentconfig.Validation{}, err
@@ -222,4 +261,18 @@ func writeDeploymentConfigError(c *gin.Context, err error) {
 		return
 	}
 	writeError(c, http.StatusBadRequest, "invalid_manifest", err.Error())
+}
+
+func deploymentConfigReady(config domain.DeploymentConfig) bool {
+	return config.Version >= 1 && (len(config.Files) > 0 || strings.TrimSpace(config.Manifest) != "")
+}
+
+func deploymentResourceContents(files []domain.DeploymentResourceFile) []string {
+	result := make([]string, 0, len(files))
+	for _, file := range files {
+		if strings.TrimSpace(file.Content) != "" {
+			result = append(result, file.Content)
+		}
+	}
+	return result
 }

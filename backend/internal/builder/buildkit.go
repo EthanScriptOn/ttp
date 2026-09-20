@@ -7,10 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +35,7 @@ type BuildKitConfig struct {
 	BuildctlPath            string
 	BuildkitAddr            string
 	RegistryCredentialsFile string
+	InsecureRegistries      []string
 	AllowedSourceHosts      []string
 	ImageRepositoryPrefix   string
 	RegistryCredentialRef   string
@@ -40,6 +45,7 @@ type BuildKitConfig struct {
 
 type RegistryCredential struct {
 	Registry string `json:"registry"`
+	AuthType string `json:"auth_type,omitempty"`
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
@@ -51,10 +57,117 @@ type BuildKitExecutor struct {
 	buildkitAddr          string
 	allowedSourceHosts    map[string]struct{}
 	registryCredentials   map[string]RegistryCredential
+	insecureRegistries    map[string]struct{}
 	imageRepositoryPrefix string
 	registryCredentialRef string
 	platforms             []string
 	timeout               time.Duration
+}
+
+func (e *BuildKitExecutor) Preflight(ctx context.Context, request imagebuild.Request) error {
+	if e == nil {
+		return imagebuild.ErrNotConfigured
+	}
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	if err := e.validateSourceHost(request.RepositoryURL); err != nil {
+		return err
+	}
+	imageRepository, credential, err := e.resolveImageRepository(request)
+	if err != nil {
+		return err
+	}
+	host, err := imagebuild.RegistryHost(imageRepository)
+	if err != nil {
+		return err
+	}
+	// /v2/ verifies that the configured identity can authenticate to the
+	// registry. Repository-level push policy is still confirmed by BuildKit's
+	// actual upload and returned as a release error.
+	requestContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	registryURL := "https://" + host + "/v2/"
+	if e.isInsecureRegistry(host) {
+		registryURL = "http://" + host + "/v2/"
+	}
+	req, err := http.NewRequestWithContext(requestContext, http.MethodGet, registryURL, nil)
+	if err != nil {
+		return fmt.Errorf("registry preflight request failed: %w", err)
+	}
+	setRegistryAuth(req, credential)
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("registry %s is unreachable: %w", host, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized && strings.Contains(strings.ToLower(response.Header.Get("WWW-Authenticate")), "bearer") {
+		if err := e.verifyRegistryBearer(requestContext, response.Header.Get("WWW-Authenticate"), host, imageRepository, credential); err != nil {
+			return err
+		}
+		return nil
+	}
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("builder registry credential has no access to %s (HTTP %d)", host, response.StatusCode)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("builder registry preflight failed for %s (HTTP %d)", host, response.StatusCode)
+	}
+	return nil
+}
+
+var bearerChallengeAttribute = regexp.MustCompile(`(?i)([a-z][a-z0-9_-]*)="([^"]*)"`)
+
+func (e *BuildKitExecutor) verifyRegistryBearer(ctx context.Context, challenge, host, repository string, credential RegistryCredential) error {
+	attributes := make(map[string]string)
+	for _, match := range bearerChallengeAttribute.FindAllStringSubmatch(challenge, -1) {
+		attributes[strings.ToLower(match[1])] = match[2]
+	}
+	realm := strings.TrimSpace(attributes["realm"])
+	if realm == "" {
+		return fmt.Errorf("registry %s returned an invalid bearer challenge", host)
+	}
+	parsed, err := url.Parse(realm)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.User != nil {
+		return fmt.Errorf("registry %s returned an invalid bearer realm", host)
+	}
+	query := parsed.Query()
+	if service := strings.TrimSpace(attributes["service"]); service != "" {
+		query.Set("service", service)
+	}
+	parts := strings.SplitN(repository, "/", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("registry %s returned an invalid repository challenge", host)
+	}
+	query.Set("scope", "repository:"+parts[1]+":pull,push")
+	parsed.RawQuery = query.Encode()
+	tokenRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return fmt.Errorf("registry bearer token request failed: %w", err)
+	}
+	setRegistryAuth(tokenRequest, credential)
+	tokenResponse, err := (&http.Client{Timeout: 15 * time.Second}).Do(tokenRequest)
+	if err != nil {
+		return fmt.Errorf("registry bearer token request failed: %w", err)
+	}
+	defer tokenResponse.Body.Close()
+	if tokenResponse.StatusCode == http.StatusUnauthorized || tokenResponse.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("builder registry credential has no push access to %s (HTTP %d)", host, tokenResponse.StatusCode)
+	}
+	if tokenResponse.StatusCode < 200 || tokenResponse.StatusCode >= 300 {
+		return fmt.Errorf("registry bearer token request failed for %s (HTTP %d)", host, tokenResponse.StatusCode)
+	}
+	var payload struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(tokenResponse.Body, 1<<20)).Decode(&payload); err != nil {
+		return fmt.Errorf("decode registry bearer token response: %w", err)
+	}
+	if strings.TrimSpace(payload.Token) == "" && strings.TrimSpace(payload.AccessToken) == "" {
+		return fmt.Errorf("registry %s returned no bearer token", host)
+	}
+	return nil
 }
 
 func NewBuildKitExecutor(config BuildKitConfig) (*BuildKitExecutor, error) {
@@ -86,6 +199,15 @@ func NewBuildKitExecutor(config BuildKitConfig) (*BuildKitExecutor, error) {
 	if len(allowedHosts) == 0 {
 		return nil, errors.New("at least one allowed source host is required")
 	}
+	insecureRegistries := make(map[string]struct{}, len(config.InsecureRegistries))
+	for _, value := range config.InsecureRegistries {
+		host := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(value, "/")))
+		normalized, normalizeErr := imagebuild.NormalizeImageRepositoryPrefix(host)
+		if normalizeErr != nil || strings.Contains(normalized, "/") {
+			return nil, errors.New("insecure registry host is invalid")
+		}
+		insecureRegistries[normalized] = struct{}{}
+	}
 	imageRepositoryPrefix, err := imagebuild.NormalizeImageRepositoryPrefix(config.ImageRepositoryPrefix)
 	if err != nil {
 		return nil, err
@@ -116,9 +238,26 @@ func NewBuildKitExecutor(config BuildKitConfig) (*BuildKitExecutor, error) {
 	}
 	return &BuildKitExecutor{
 		workDir: workDir, gitPath: gitPath, buildctlPath: buildctlPath, buildkitAddr: strings.TrimSpace(config.BuildkitAddr),
-		allowedSourceHosts: allowedHosts, registryCredentials: credentials,
+		allowedSourceHosts: allowedHosts, registryCredentials: credentials, insecureRegistries: insecureRegistries,
 		imageRepositoryPrefix: imageRepositoryPrefix, registryCredentialRef: registryCredentialRef, platforms: platforms, timeout: timeout,
 	}, nil
+}
+
+func (e *BuildKitExecutor) isInsecureRegistry(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if _, ok := e.insecureRegistries[host]; ok {
+		return true
+	}
+	parsed, err := url.Parse("https://" + host)
+	if err != nil {
+		return false
+	}
+	hostname := strings.Trim(parsed.Hostname(), "[]")
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
 }
 
 func executablePath(value, fallback string) (string, error) {
@@ -161,13 +300,23 @@ func loadRegistryCredentials(path string) (map[string]RegistryCredential, error)
 	}
 	result := make(map[string]RegistryCredential, len(values))
 	for reference, value := range values {
-		if strings.TrimSpace(reference) == "" || strings.TrimSpace(value.Registry) == "" || strings.TrimSpace(value.Username) == "" || strings.TrimSpace(value.Password) == "" {
+		if strings.TrimSpace(reference) == "" || strings.TrimSpace(value.Registry) == "" || strings.TrimSpace(value.Password) == "" {
 			return nil, errors.New("registry credential entry is incomplete")
 		}
 		if strings.ContainsAny(value.Registry, "\x00\r\n/ ") {
 			return nil, errors.New("registry credential host is invalid")
 		}
 		value.Registry = strings.ToLower(strings.TrimSpace(value.Registry))
+		if strings.TrimSpace(value.AuthType) == "" {
+			value.AuthType = "basic"
+		}
+		value.AuthType = strings.ToLower(strings.TrimSpace(value.AuthType))
+		if value.AuthType != "basic" && value.AuthType != "token" {
+			return nil, errors.New("registry credential auth type is invalid")
+		}
+		if value.AuthType == "basic" && strings.TrimSpace(value.Username) == "" {
+			return nil, errors.New("registry credential username is required for basic auth")
+		}
 		result[reference] = value
 	}
 	return result, nil
@@ -315,12 +464,33 @@ func (e *BuildKitExecutor) runGitWithRetry(ctx context.Context, workDir string, 
 }
 
 // resolveImageRepository picks the push target for one build. A project may
-// specify its own repository; the registry host must then match one of the
-// credentials mapped on this builder. Without a project override the
-// platform-owned prefix naming and its configured credential reference are
-// used. Registry passwords never leave this process in either path.
+// retain an explicit repository for API compatibility; otherwise a managed
+// connection derives a stable path from its registry host and project ID.
+// Without a managed connection the platform-owned prefix naming and its
+// configured credential reference are used. Registry passwords never leave
+// this process in any path.
 func (e *BuildKitExecutor) resolveImageRepository(request imagebuild.Request) (string, RegistryCredential, error) {
 	empty := RegistryCredential{}
+	if request.RegistryCredential != (imagebuild.PushCredential{}) {
+		override := strings.TrimSpace(request.ImageRepository)
+		host := strings.ToLower(strings.TrimSpace(request.RegistryCredential.Registry))
+		if override == "" {
+			var err error
+			override, err = imagebuild.ImageRepositoryForProject(host, request.ProjectID)
+			if err != nil {
+				return "", empty, err
+			}
+		} else {
+			if err := imagebuild.ValidateImageRepository(override); err != nil {
+				return "", empty, errors.New("image_repository is invalid")
+			}
+			actualHost, err := imagebuild.RegistryHost(override)
+			if err != nil || host != actualHost {
+				return "", empty, errors.New("registry credential does not match image_repository")
+			}
+		}
+		return override, RegistryCredential{Registry: host, AuthType: request.RegistryCredential.AuthType, Username: request.RegistryCredential.Username, Password: request.RegistryCredential.Secret}, nil
+	}
 	if override := strings.TrimSpace(request.ImageRepository); override != "" {
 		if err := imagebuild.ValidateImageRepository(override); err != nil {
 			return "", empty, errors.New("image_repository is invalid")
@@ -331,6 +501,9 @@ func (e *BuildKitExecutor) resolveImageRepository(request imagebuild.Request) (s
 		}
 		for _, candidate := range e.registryCredentials {
 			if candidate.Registry == host {
+				if candidate.AuthType == "" {
+					candidate.AuthType = "basic"
+				}
 				return override, candidate, nil
 			}
 		}
@@ -343,6 +516,9 @@ func (e *BuildKitExecutor) resolveImageRepository(request imagebuild.Request) (s
 	credential, ok := e.registryCredentials[e.registryCredentialRef]
 	if !ok {
 		return "", empty, errors.New("configured registry credential reference was not found")
+	}
+	if credential.AuthType == "" {
+		credential.AuthType = "basic"
 	}
 	return imageRepository, credential, nil
 }
@@ -409,12 +585,26 @@ func writeDockerConfig(workDir string, credential RegistryCredential) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
-	auth := base64.StdEncoding.EncodeToString([]byte(credential.Username + ":" + credential.Password))
-	payload, err := json.Marshal(map[string]any{"auths": map[string]any{credential.Registry: map[string]string{"auth": auth}}})
+	entry := map[string]string{}
+	if credential.AuthType == "token" {
+		entry["identitytoken"] = credential.Password
+	} else {
+		auth := base64.StdEncoding.EncodeToString([]byte(credential.Username + ":" + credential.Password))
+		entry["auth"] = auth
+	}
+	payload, err := json.Marshal(map[string]any{"auths": map[string]any{credential.Registry: entry}})
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(directory, "config.json"), payload, 0o600)
+}
+
+func setRegistryAuth(request *http.Request, credential RegistryCredential) {
+	if credential.AuthType == "token" {
+		request.Header.Set("Authorization", "Bearer "+credential.Password)
+		return
+	}
+	request.SetBasicAuth(credential.Username, credential.Password)
 }
 
 func readImageDigest(path string) (string, error) {

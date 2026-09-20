@@ -98,8 +98,13 @@ has_resource() {
 }
 
 has_resource "deployments" "apps" && pass "apps/deployments API" || fail "apps/deployments API is unavailable"
+has_resource "statefulsets" "apps" && pass "apps/statefulsets API" || fail "apps/statefulsets API is unavailable"
+has_resource "daemonsets" "apps" && pass "apps/daemonsets API" || fail "apps/daemonsets API is unavailable"
+has_resource "jobs" "batch" && pass "batch/jobs API" || fail "batch/jobs API is unavailable"
+has_resource "cronjobs" "batch" && pass "batch/cronjobs API" || fail "batch/cronjobs API is unavailable"
 has_resource "ingresses" "networking.k8s.io" && pass "networking.k8s.io/ingresses API" || fail "networking.k8s.io/ingresses API is unavailable"
 has_resource "horizontalpodautoscalers" "autoscaling" && pass "autoscaling/horizontalpodautoscalers API" || fail "autoscaling/horizontalpodautoscalers API is unavailable"
+has_resource "rolebindings" "rbac.authorization.k8s.io" && pass "rbac.authorization.k8s.io/rolebindings API" || fail "rbac.authorization.k8s.io/rolebindings API is unavailable"
 
 check_can_i() {
   local verb="$1"
@@ -108,6 +113,16 @@ check_can_i() {
     pass "can-i $verb $resource in $namespace"
   else
     fail "can-i $verb $resource in $namespace"
+  fi
+}
+
+check_cluster_can_i() {
+  local verb="$1"
+  local resource="$2"
+  if k_with_subject auth can-i "$verb" "$resource" --all-namespaces --quiet >/dev/null 2>&1; then
+    pass "can-i $verb $resource cluster-wide"
+  else
+    fail "can-i $verb $resource cluster-wide"
   fi
 }
 
@@ -126,12 +141,28 @@ for permission in \
   'get deployments.apps' 'list deployments.apps' 'watch deployments.apps' \
   'create deployments.apps' 'update deployments.apps' 'patch deployments.apps' 'delete deployments.apps' \
   'get replicasets.apps' 'list replicasets.apps' 'delete replicasets.apps' \
+  'get statefulsets.apps' 'list statefulsets.apps' 'watch statefulsets.apps' \
+  'create statefulsets.apps' 'update statefulsets.apps' 'patch statefulsets.apps' 'delete statefulsets.apps' \
+  'get daemonsets.apps' 'list daemonsets.apps' 'watch daemonsets.apps' \
+  'create daemonsets.apps' 'update daemonsets.apps' 'patch daemonsets.apps' 'delete daemonsets.apps' \
+  'get jobs.batch' 'list jobs.batch' 'watch jobs.batch' \
+  'create jobs.batch' 'update jobs.batch' 'patch jobs.batch' 'delete jobs.batch' \
+  'get cronjobs.batch' 'list cronjobs.batch' 'watch cronjobs.batch' \
+  'create cronjobs.batch' 'update cronjobs.batch' 'patch cronjobs.batch' 'delete cronjobs.batch' \
   'get services' 'list services' 'watch services' \
   'create services' 'update services' 'patch services' 'delete services' \
   'get configmaps' 'list configmaps' 'watch configmaps' \
   'create configmaps' 'update configmaps' 'patch configmaps' 'delete configmaps' \
   'get secrets' 'list secrets' 'watch secrets' \
   'create secrets' 'update secrets' 'patch secrets' 'delete secrets' \
+  'get persistentvolumeclaims' 'list persistentvolumeclaims' 'watch persistentvolumeclaims' \
+  'create persistentvolumeclaims' 'update persistentvolumeclaims' 'patch persistentvolumeclaims' 'delete persistentvolumeclaims' \
+  'get resourcequotas' 'list resourcequotas' 'watch resourcequotas' \
+  'create resourcequotas' 'update resourcequotas' 'patch resourcequotas' 'delete resourcequotas' \
+  'get limitranges' 'list limitranges' 'watch limitranges' \
+  'create limitranges' 'update limitranges' 'patch limitranges' 'delete limitranges' \
+  'get rolebindings.rbac.authorization.k8s.io' 'list rolebindings.rbac.authorization.k8s.io' 'watch rolebindings.rbac.authorization.k8s.io' \
+  'create rolebindings.rbac.authorization.k8s.io' 'update rolebindings.rbac.authorization.k8s.io' 'patch rolebindings.rbac.authorization.k8s.io' 'delete rolebindings.rbac.authorization.k8s.io' \
   'get ingresses.networking.k8s.io' 'list ingresses.networking.k8s.io' \
   'create ingresses.networking.k8s.io' 'update ingresses.networking.k8s.io' 'patch ingresses.networking.k8s.io' 'delete ingresses.networking.k8s.io' \
   'get horizontalpodautoscalers.autoscaling' 'list horizontalpodautoscalers.autoscaling' \
@@ -140,23 +171,30 @@ for permission in \
   check_can_i "$verb" "$resource"
 done
 
+for permission in \
+  'get namespaces' 'list namespaces' 'watch namespaces' \
+  'create namespaces' 'update namespaces' 'patch namespaces' \
+  'bind clusterroles.rbac.authorization.k8s.io/ttp-runtime-namespace-access'; do
+  read -r verb resource <<<"$permission"
+  check_cluster_can_i "$verb" "$resource"
+done
+
 if k_with_subject auth can-i list nodes --all-namespaces --quiet >/dev/null 2>&1; then
   pass 'can-i list nodes'
 else
   warn 'cannot list nodes; cluster-level node status will be unavailable'
 fi
 
-if k_with_subject get --raw /apis/metrics.k8s.io/v1beta1 >/dev/null 2>&1; then
-  pass 'metrics.k8s.io API (metrics-server)'
-else
-  warn 'metrics.k8s.io API is unavailable; current CPU/memory metrics will be unavailable'
-fi
-
-if k_with_subject get --raw /apis/custom.metrics.k8s.io/v1beta1 >/dev/null 2>&1; then
-  pass 'custom.metrics.k8s.io API'
-else
-  warn 'custom.metrics.k8s.io API is unavailable; application metrics still require Prometheus integration'
-fi
+for monitoring_resource in \
+  'deployment/prometheus' \
+  'deployment/kube-state-metrics' \
+  'daemonset/node-exporter'; do
+  if k_with_subject get "$monitoring_resource" --namespace ttp-monitoring >/dev/null 2>&1; then
+    pass "$monitoring_resource in ttp-monitoring"
+  else
+    warn "$monitoring_resource is unavailable; install Prometheus monitoring from TTP"
+  fi
+done
 
 if [[ -n "${PROMETHEUS_URL:-}" ]]; then
   command -v curl >/dev/null 2>&1 || { printf 'curl is required when PROMETHEUS_URL is set\n' >&2; exit 127; }

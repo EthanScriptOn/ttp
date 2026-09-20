@@ -8,8 +8,11 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/yuebuy/cicd-platform/backend/internal/domain"
 )
 
 func TestKubernetesProviderListsGetsLogsAndMetrics(t *testing.T) {
@@ -181,6 +184,146 @@ func TestKubernetesProviderValidationAndErrors(t *testing.T) {
 	_, err = provider.GetPodLogs(context.Background(), PodLogRequest{PodRef: PodRef{ClusterID: "cluster-a", Namespace: "lab", Name: "api"}, TailLines: -1})
 	if !errors.Is(err, ErrInvalidKubernetesInput) {
 		t.Fatalf("invalid tail error = %v", err)
+	}
+}
+
+func TestKubernetesProviderEnsuresOwnedNamespace(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	provider := NewKubernetesProvider()
+	if err := provider.RegisterClient("cluster-a", client); err != nil {
+		t.Fatal(err)
+	}
+	labels := NamespaceLabels("space-lab", "dev")
+	if err := provider.EnsureNamespace(context.Background(), "cluster-a", "ttp-lab-dev", labels); err != nil {
+		t.Fatal(err)
+	}
+	created, err := client.CoreV1().Namespaces().Get(context.Background(), "ttp-lab-dev", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !namespaceLabelsMatch(created.Labels, labels) {
+		t.Fatalf("namespace labels = %#v, want %#v", created.Labels, labels)
+	}
+	if err := provider.EnsureNamespace(context.Background(), "cluster-a", "ttp-lab-dev", labels); err != nil {
+		t.Fatalf("re-ensuring owned namespace: %v", err)
+	}
+	if err := provider.EnsureNamespace(context.Background(), "cluster-a", "ttp-lab-dev", NamespaceLabels("space-other", "dev")); !errors.Is(err, ErrNamespaceOwnershipConflict) {
+		t.Fatalf("foreign namespace ownership error = %v", err)
+	}
+}
+
+func TestKubernetesProviderEnsuresNamespaceQuotaAndLimitRange(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	provider := NewKubernetesProvider(WithKubernetesRuntimeServiceAccount("platform-system", "platform-runtime"))
+	if err := provider.RegisterClient("cluster-a", client); err != nil {
+		t.Fatal(err)
+	}
+	quota := testNamespaceQuota()
+	labels := NamespaceLabels("space-lab", "dev")
+	if err := provider.EnsureNamespaceWithQuota(context.Background(), "cluster-a", "ttp-lab-dev", labels, quota); err != nil {
+		t.Fatal(err)
+	}
+
+	resourceQuota, err := client.CoreV1().ResourceQuotas("ttp-lab-dev").Get(context.Background(), namespaceResourceQuotaName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpuLimit := resourceQuota.Spec.Hard[corev1.ResourceLimitsCPU]
+	if got := cpuLimit.String(); got != "4" {
+		t.Fatalf("cpu limit = %q, want 4", got)
+	}
+	storageQuota := resourceQuota.Spec.Hard[corev1.ResourceRequestsStorage]
+	if got := storageQuota.String(); got != "50Gi" {
+		t.Fatalf("storage quota = %q, want 50Gi", got)
+	}
+	podQuota := resourceQuota.Spec.Hard[corev1.ResourcePods]
+	if got := podQuota.Value(); got != 20 {
+		t.Fatalf("pod quota = %d, want 20", got)
+	}
+	if !namespaceLabelsMatch(resourceQuota.Labels, labels) {
+		t.Fatalf("resource quota labels = %#v, want %#v", resourceQuota.Labels, labels)
+	}
+	roleBinding, err := client.RbacV1().RoleBindings("ttp-lab-dev").Get(context.Background(), namespaceAccessRoleBindingName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !namespaceLabelsMatch(roleBinding.Labels, labels) {
+		t.Fatalf("role binding labels = %#v, want %#v", roleBinding.Labels, labels)
+	}
+	if roleBinding.RoleRef.Kind != "ClusterRole" || roleBinding.RoleRef.Name != namespaceAccessClusterRoleName {
+		t.Fatalf("role binding roleRef = %#v", roleBinding.RoleRef)
+	}
+	if len(roleBinding.Subjects) != 1 || roleBinding.Subjects[0].Namespace != "platform-system" || roleBinding.Subjects[0].Name != "platform-runtime" {
+		t.Fatalf("role binding subjects = %#v", roleBinding.Subjects)
+	}
+
+	limitRange, err := client.CoreV1().LimitRanges("ttp-lab-dev").Get(context.Background(), namespaceLimitRangeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limitRange.Spec.Limits) != 1 {
+		t.Fatalf("limit range entries = %d, want 1", len(limitRange.Spec.Limits))
+	}
+	item := limitRange.Spec.Limits[0]
+	defaultCPULimit := item.Default[corev1.ResourceCPU]
+	if got := defaultCPULimit.String(); got != "500m" {
+		t.Fatalf("default cpu limit = %q, want 500m", got)
+	}
+	defaultMemoryRequest := item.DefaultRequest[corev1.ResourceMemory]
+	if got := defaultMemoryRequest.String(); got != "128Mi" {
+		t.Fatalf("default memory request = %q, want 128Mi", got)
+	}
+
+	updated := quota
+	updated.CPULimit = "6"
+	if err := provider.EnsureNamespaceWithQuota(context.Background(), "cluster-a", "ttp-lab-dev", labels, updated); err != nil {
+		t.Fatal(err)
+	}
+	resourceQuota, err = client.CoreV1().ResourceQuotas("ttp-lab-dev").Get(context.Background(), namespaceResourceQuotaName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpuLimit = resourceQuota.Spec.Hard[corev1.ResourceLimitsCPU]
+	if got := cpuLimit.String(); got != "6" {
+		t.Fatalf("updated cpu limit = %q, want 6", got)
+	}
+}
+
+func TestKubernetesProviderRefusesForeignNamespaceRuntimeBinding(t *testing.T) {
+	labels := NamespaceLabels("space-lab", "dev")
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ttp-lab-dev", Labels: labels}}
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: namespaceAccessRoleBindingName, Namespace: "ttp-lab-dev"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "other"},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Namespace: "other", Name: "other"}},
+	}
+	client := fake.NewSimpleClientset(namespace, binding)
+	provider := NewKubernetesProvider()
+	if err := provider.RegisterClient("cluster-a", client); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.EnsureNamespaceWithQuota(context.Background(), "cluster-a", "ttp-lab-dev", labels, testNamespaceQuota()); !errors.Is(err, ErrNamespaceOwnershipConflict) {
+		t.Fatalf("foreign role binding error = %v, want ownership conflict", err)
+	}
+}
+
+func testNamespaceQuota() domain.NamespaceQuota {
+	return domain.NamespaceQuota{
+		CPURequest:                     "2",
+		CPULimit:                       "4",
+		MemoryRequest:                  "2Gi",
+		MemoryLimit:                    "4Gi",
+		EphemeralStorageRequest:        "10Gi",
+		EphemeralStorageLimit:          "20Gi",
+		Storage:                        "50Gi",
+		Pods:                           20,
+		PersistentVolumeClaims:         10,
+		DefaultCPURequest:              "100m",
+		DefaultCPULimit:                "500m",
+		DefaultMemoryRequest:           "128Mi",
+		DefaultMemoryLimit:             "512Mi",
+		DefaultEphemeralStorageRequest: "256Mi",
+		DefaultEphemeralStorageLimit:   "1Gi",
 	}
 }
 

@@ -389,7 +389,7 @@ func TestPersistentServiceRestoresReleaseExecutionState(t *testing.T) {
 		t.Fatal(err)
 	}
 	item, _, err := service.Create(context.Background(), CreateInput{
-		SpaceID: "space-lab", ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
+		SpaceID: "space-lab", ProjectID: "reverse-lab", RepositoryID: "demo-repo", CreatedBy: 7, CreatedByName: "发布管理员", Branch: "main",
 		CommitSHAs: []string{"a1b2c3d4e5f6", "f6e5d4c3b2a1"},
 		Targets:    []TargetInput{{ID: "target-dev", Name: "开发环境", EnvironmentStage: "dev", SortOrder: 1}},
 	})
@@ -420,7 +420,7 @@ func TestPersistentServiceRestoresReleaseExecutionState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restored.Status != StatusRunning || restored.Progress != 82 || len(restored.Commits) != 2 || len(restored.Targets) != 1 || restored.Artifact == nil {
+	if restored.Status != StatusRunning || restored.Progress != 82 || restored.CreatedBy != 7 || restored.CreatedByName != "发布管理员" || len(restored.Commits) != 2 || len(restored.Targets) != 1 || restored.Artifact == nil {
 		t.Fatalf("persistent service did not restore release state: %#v", restored)
 	}
 	if len(restored.Targets[0].Logs) != 1 || restored.Targets[0].Logs[0].Line != "deployment.apps/reverse-lab-api waiting for rollout" {

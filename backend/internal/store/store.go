@@ -21,18 +21,38 @@ var (
 )
 
 type CreateProjectInput struct {
-	ID              string `json:"-"`
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	RepositoryID    string `json:"repository_id"`
-	RepositoryURL   string `json:"repository_url"`
-	DefaultBranch   string `json:"default_branch"`
-	ClusterID       string `json:"cluster_id"`
-	Namespace       string `json:"namespace"`
-	DeployStrategy  string `json:"deploy_strategy"`
-	Replicas        int    `json:"replicas"`
-	ContainerPort   int    `json:"container_port"`
-	ImageRepository string `json:"image_repository"`
+	ID                   string `json:"-"`
+	Name                 string `json:"name"`
+	Description          string `json:"description"`
+	RepositoryID         string `json:"repository_id"`
+	RepositoryURL        string `json:"repository_url"`
+	DefaultBranch        string `json:"default_branch"`
+	ClusterID            string `json:"cluster_id"`
+	Namespace            string `json:"namespace"`
+	DeployStrategy       string `json:"deploy_strategy"`
+	Replicas             int    `json:"replicas"`
+	ContainerPort        int    `json:"container_port"`
+	ImageRepository      string `json:"image_repository"`
+	RegistryConnectionID string `json:"registry_connection_id"`
+}
+
+type CreateImageRegistryConnectionInput struct {
+	ID                   string
+	Name                 string
+	Registry             string
+	AuthType             string
+	Username             string
+	CredentialCiphertext string
+}
+
+type UpdateImageRegistryConnectionInput struct {
+	Name                 *string
+	Registry             *string
+	AuthType             *string
+	Username             *string
+	CredentialCiphertext *string
+	Status               *string
+	LastCheckedAt        *time.Time
 }
 
 // ProjectGitCredential is the safe project-level Git identity. The encrypted
@@ -235,47 +255,87 @@ type UpdateSpaceMemberInput struct {
 	Role string `json:"role"`
 }
 
+type CreateProjectMemberInput struct {
+	UserID  uint64 `json:"user_id"`
+	RoleID  string `json:"role_id"`
+	RoleKey string `json:"role_key"`
+}
+
+type UpdateProjectMemberInput struct {
+	RoleID  string `json:"role_id"`
+	RoleKey string `json:"role_key"`
+}
+
+type CreateProjectRoleInput struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
+}
+
+type UpdateProjectRoleInput struct {
+	Name        *string   `json:"name"`
+	Description *string   `json:"description"`
+	Permissions *[]string `json:"permissions"`
+}
+
 type UpdateProjectInput struct {
-	RepositoryURL   *string `json:"repository_url"`
-	RepositoryID    *string `json:"-"`
-	Description     *string `json:"description"`
-	DefaultBranch   *string `json:"default_branch"`
-	ClusterID       *string `json:"cluster_id"`
-	Namespace       *string `json:"namespace"`
-	Replicas        *int    `json:"replicas"`
-	ContainerPort   *int    `json:"container_port"`
-	ImageRepository *string `json:"image_repository"`
+	RepositoryURL        *string `json:"repository_url"`
+	RepositoryID         *string `json:"-"`
+	Description          *string `json:"description"`
+	DefaultBranch        *string `json:"default_branch"`
+	ClusterID            *string `json:"cluster_id"`
+	Namespace            *string `json:"namespace"`
+	Replicas             *int    `json:"replicas"`
+	ContainerPort        *int    `json:"container_port"`
+	ImageRepository      *string `json:"image_repository"`
+	RegistryConnectionID *string `json:"registry_connection_id"`
 }
 
 type CreateDeploymentTargetInput struct {
-	Name           string `json:"name"`
-	Environment    string `json:"environment"`
-	Stage          string `json:"stage"`
-	SortOrder      int    `json:"sort_order"`
-	ClusterID      string `json:"cluster_id"`
-	Namespace      string `json:"namespace"`
-	Replicas       int    `json:"replicas"`
-	ContainerPort  int    `json:"container_port"`
-	DeployStrategy string `json:"deploy_strategy"`
-	Enabled        *bool  `json:"enabled"`
+	Name           string                 `json:"name"`
+	Environment    string                 `json:"environment"`
+	Stage          string                 `json:"stage"`
+	SortOrder      int                    `json:"sort_order"`
+	ClusterID      string                 `json:"cluster_id"`
+	Namespace      string                 `json:"namespace"`
+	ResourceQuota  *domain.NamespaceQuota `json:"resource_quota,omitempty"`
+	Replicas       int                    `json:"replicas"`
+	ContainerPort  int                    `json:"container_port"`
+	DeployStrategy string                 `json:"deploy_strategy"`
+	Enabled        *bool                  `json:"enabled"`
 }
 
 type UpdateDeploymentTargetInput struct {
-	Name           *string `json:"name"`
-	Environment    *string `json:"environment"`
-	Stage          *string `json:"stage"`
-	SortOrder      *int    `json:"sort_order"`
-	ClusterID      *string `json:"cluster_id"`
-	Namespace      *string `json:"namespace"`
-	Replicas       *int    `json:"replicas"`
-	ContainerPort  *int    `json:"container_port"`
-	DeployStrategy *string `json:"deploy_strategy"`
-	Enabled        *bool   `json:"enabled"`
+	Name           *string                `json:"name"`
+	Environment    *string                `json:"environment"`
+	Stage          *string                `json:"stage"`
+	SortOrder      *int                   `json:"sort_order"`
+	ClusterID      *string                `json:"cluster_id"`
+	Namespace      *string                `json:"namespace"`
+	ResourceQuota  *domain.NamespaceQuota `json:"resource_quota,omitempty"`
+	Replicas       *int                   `json:"replicas"`
+	ContainerPort  *int                   `json:"container_port"`
+	DeployStrategy *string                `json:"deploy_strategy"`
+	Enabled        *bool                  `json:"enabled"`
 }
 
 type SaveDeploymentConfigInput struct {
 	Manifest string `json:"manifest"`
 	Format   string `json:"format"`
+}
+
+type SaveDeploymentResourceFileInput struct {
+	ID               string `json:"-"`
+	Name             string `json:"name"`
+	Path             string `json:"path"`
+	Format           string `json:"format"`
+	Content          string `json:"content"`
+	SortOrder        int    `json:"sort_order"`
+	APIVersion       string `json:"-"`
+	Kind             string `json:"-"`
+	ResourceName     string `json:"-"`
+	Namespace        string `json:"-"`
+	ReleaseSupported bool   `json:"-"`
 }
 
 type CreateABExperimentInput struct {
@@ -321,9 +381,26 @@ type Store interface {
 	CreateCluster(ctx context.Context, spaceID string, input CreateClusterInput) (Cluster, error)
 	UpdateCluster(ctx context.Context, spaceID, clusterID string, input UpdateClusterInput) (Cluster, error)
 	ListProjects(ctx context.Context, spaceID string) ([]domain.Project, error)
+	ListProjectsForUser(ctx context.Context, userID uint64, spaceID string) ([]domain.Project, error)
 	GetProject(ctx context.Context, spaceID, projectID string) (domain.Project, error)
 	CreateProject(ctx context.Context, spaceID string, input CreateProjectInput) (domain.Project, error)
 	UpdateProject(ctx context.Context, spaceID, projectID string, input UpdateProjectInput) (domain.Project, error)
+	GetProjectAccess(ctx context.Context, userID uint64, spaceID, projectID string) (domain.ProjectAccess, error)
+	HasProjectPermission(ctx context.Context, userID uint64, spaceID, projectID, permission string) (bool, error)
+	EnsureProjectMember(ctx context.Context, spaceID, projectID string, userID uint64, roleKey string) error
+	ListProjectMembers(ctx context.Context, spaceID, projectID string) ([]domain.ProjectMember, error)
+	CreateProjectMember(ctx context.Context, spaceID, projectID string, input CreateProjectMemberInput) (domain.ProjectMember, error)
+	UpdateProjectMember(ctx context.Context, spaceID, projectID string, userID uint64, input UpdateProjectMemberInput) (domain.ProjectMember, error)
+	RemoveProjectMember(ctx context.Context, spaceID, projectID string, userID uint64) error
+	ListProjectRoles(ctx context.Context, spaceID string) ([]domain.ProjectRole, error)
+	CreateProjectRole(ctx context.Context, spaceID string, createdBy uint64, input CreateProjectRoleInput) (domain.ProjectRole, error)
+	UpdateProjectRole(ctx context.Context, spaceID, roleID string, input UpdateProjectRoleInput) (domain.ProjectRole, error)
+	DeleteProjectRole(ctx context.Context, spaceID, roleID string) error
+	ListImageRegistryConnections(ctx context.Context, spaceID string) ([]domain.ImageRegistryConnection, error)
+	GetImageRegistryConnection(ctx context.Context, spaceID, connectionID string) (domain.ImageRegistryConnection, error)
+	CreateImageRegistryConnection(ctx context.Context, spaceID string, input CreateImageRegistryConnectionInput) (domain.ImageRegistryConnection, error)
+	UpdateImageRegistryConnection(ctx context.Context, spaceID, connectionID string, input UpdateImageRegistryConnectionInput) (domain.ImageRegistryConnection, error)
+	DeleteImageRegistryConnection(ctx context.Context, spaceID, connectionID string) error
 	GetProjectGitCredential(ctx context.Context, spaceID, projectID string) (ProjectGitCredential, error)
 	SaveProjectGitCredential(ctx context.Context, spaceID, projectID string, input SaveProjectGitCredentialInput) (ProjectGitCredential, error)
 	DeleteProjectGitCredential(ctx context.Context, spaceID, projectID string) error
@@ -332,8 +409,14 @@ type Store interface {
 	CreateDeploymentTarget(ctx context.Context, spaceID, projectID string, input CreateDeploymentTargetInput) (domain.DeploymentTarget, error)
 	UpdateDeploymentTarget(ctx context.Context, spaceID, projectID, targetID string, input UpdateDeploymentTargetInput) (domain.DeploymentTarget, error)
 	DeleteDeploymentTarget(ctx context.Context, spaceID, projectID, targetID string) error
+	GetNamespaceQuota(ctx context.Context, spaceID, clusterID, environment string) (domain.NamespaceQuota, error)
+	UpsertNamespaceQuota(ctx context.Context, spaceID, clusterID, environment, namespace string, quota domain.NamespaceQuota) (domain.NamespaceQuota, error)
 	GetDeploymentConfig(ctx context.Context, spaceID, projectID string) (domain.DeploymentConfig, error)
 	SaveDeploymentConfig(ctx context.Context, spaceID, projectID string, input SaveDeploymentConfigInput) (domain.DeploymentConfig, error)
+	ListDeploymentResourceFiles(ctx context.Context, spaceID, projectID string) ([]domain.DeploymentResourceFile, error)
+	CreateDeploymentResourceFile(ctx context.Context, spaceID, projectID string, input SaveDeploymentResourceFileInput) (domain.DeploymentResourceFile, error)
+	UpdateDeploymentResourceFile(ctx context.Context, spaceID, projectID, resourceID string, input SaveDeploymentResourceFileInput) (domain.DeploymentResourceFile, error)
+	DeleteDeploymentResourceFile(ctx context.Context, spaceID, projectID, resourceID string) error
 	AppendAuditLog(ctx context.Context, entry domain.AuditLog) error
 	ListAuditLogs(ctx context.Context, spaceID string, limit int) ([]domain.AuditLog, error)
 	ListABExperiments(ctx context.Context, spaceID, projectID string) ([]domain.ABExperiment, error)

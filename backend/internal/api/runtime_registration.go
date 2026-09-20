@@ -27,6 +27,38 @@ func (s *Server) ensureRuntimeCluster(ctx context.Context, spaceID, clusterID st
 	return s.registerRuntimeCluster(ctx, cluster)
 }
 
+// ensureRuntimeNamespace is intentionally optional for observation-only
+// providers. It reuses the persisted namespace budget when one exists and
+// falls back to the bounded default profile for legacy environments.
+func (s *Server) ensureRuntimeNamespace(ctx context.Context, spaceID, environment, clusterID, namespace string) error {
+	quota := store.DefaultNamespaceQuota()
+	if s.deps.Store != nil {
+		persisted, err := s.deps.Store.GetNamespaceQuota(ctx, spaceID, clusterID, environment)
+		switch {
+		case err == nil:
+			quota = persisted
+		case errors.Is(err, store.ErrNotFound):
+			// Legacy targets may not have a quota row yet. The next target
+			// create/update persists it; release-time reconciliation still
+			// applies the bounded default to the live namespace.
+		default:
+			return err
+		}
+	}
+	return s.ensureRuntimeNamespaceWithQuota(ctx, spaceID, environment, clusterID, namespace, quota)
+}
+
+func (s *Server) ensureRuntimeNamespaceWithQuota(ctx context.Context, spaceID, environment, clusterID, namespace string, quota domain.NamespaceQuota) error {
+	if s.deps.Runtime == nil {
+		return nil
+	}
+	err := s.deps.Runtime.EnsureNamespaceWithQuota(ctx, clusterID, namespace, runtime.NamespaceLabels(spaceID, environment), quota)
+	if errors.Is(err, runtime.ErrNamespaceManagementUnsupported) {
+		return nil
+	}
+	return err
+}
+
 func (s *Server) registerRuntimeCluster(ctx context.Context, cluster store.Cluster) error {
 	if s.deps.Runtime == nil {
 		return runtime.ErrClusterManagementUnsupported

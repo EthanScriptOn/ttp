@@ -99,6 +99,69 @@ func TestProjectGitCredentialIsVerifiedStoredEncryptedAndBoundToProject(t *testi
 	}
 }
 
+func TestProjectGitCredentialCanReplaceCiphertextFromPreviousKey(t *testing.T) {
+	provider := &credentialRegistryProvider{Provider: git.NewDemoProvider()}
+	projectStore := store.NewMemoryWithFixtures()
+	oldServer := New(Dependencies{
+		Config:  config.Config{JWTSecret: "test-secret", GitCredentialKey: "old-credential-key", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   projectStore,
+		Auth:    auth.NewManager("test-secret", 60),
+		Git:     provider,
+		Release: release.NewService(provider),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
+	})
+	oldCiphertext, err := oldServer.credentialCipher.seal("old-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projectStore.SaveProjectGitCredential(context.Background(), "space-lab", "reverse-lab", store.SaveProjectGitCredentialInput{
+		Provider: "github", Username: "old-bot", TokenCiphertext: oldCiphertext,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A restarted server has a different key and cannot restore the old token.
+	server := New(Dependencies{
+		Config:  config.Config{JWTSecret: "test-secret", GitCredentialKey: "new-credential-key", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   projectStore,
+		Auth:    auth.NewManager("test-secret", 60),
+		Git:     provider,
+		Release: release.NewService(provider),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
+	})
+	token := loginForTest(t, server.Router())
+	metadata := doRequest(t, server.Router(), http.MethodGet, "/api/projects/reverse-lab/git/credential", token, "")
+	if metadata.Code != http.StatusOK {
+		t.Fatalf("stale project credential metadata: expected 200, got %d: %s", metadata.Code, metadata.Body.String())
+	}
+	var metadataBody struct {
+		Credential struct {
+			Configured bool `json:"configured"`
+			Invalid    bool `json:"invalid"`
+		} `json:"credential"`
+	}
+	if err := json.Unmarshal(metadata.Body.Bytes(), &metadataBody); err != nil {
+		t.Fatal(err)
+	}
+	if metadataBody.Credential.Configured || !metadataBody.Credential.Invalid {
+		t.Fatalf("stale credential was not exposed as replaceable: %s", metadata.Body.String())
+	}
+	saved := doRequest(t, server.Router(), http.MethodPut, "/api/projects/reverse-lab/git/credential", token, `{"provider":"github","username":"release-bot","token":"project-token-secret"}`)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("replace project credential: expected 200, got %d: %s", saved.Code, saved.Body.String())
+	}
+	stored, err := projectStore.GetProjectGitCredential(context.Background(), "space-lab", "reverse-lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Username != "release-bot" || stored.TokenCiphertext == oldCiphertext {
+		t.Fatalf("old credential was not replaced: %#v", stored)
+	}
+	if provider.configuredUsername != "release-bot" || provider.configuredToken != "project-token-secret" {
+		t.Fatalf("new credential was not configured: username=%q tokenConfigured=%v", provider.configuredUsername, provider.configuredToken != "")
+	}
+}
+
 func TestChangingProjectRepositoryRemovesCredentialAndOldBinding(t *testing.T) {
 	provider := &trackingRepositoryProvider{Provider: git.NewDemoProvider()}
 	server := New(Dependencies{
@@ -143,6 +206,36 @@ func TestChangingProjectRepositoryRemovesCredentialAndOldBinding(t *testing.T) {
 	}
 }
 
+func TestUpdateProjectRequiresVerifiedCredential(t *testing.T) {
+	provider := &credentialRegistryProvider{Provider: git.NewDemoProvider()}
+	server := New(Dependencies{
+		Config:  config.Config{JWTSecret: "test-secret", GitCredentialKey: "credential-test-key", JWTMinutes: 60, AllowedOrigin: "*"},
+		Store:   store.NewMemoryWithFixtures(),
+		Auth:    auth.NewManager("test-secret", 60),
+		Git:     provider,
+		Release: release.NewService(provider),
+		Runtime: runtime.NewService(runtime.NewDemoProvider()),
+	})
+	token := loginForTest(t, server.Router())
+
+	response := doRequest(t, server.Router(), http.MethodPatch, "/api/projects/reverse-lab", token, `{"description":"should not save"}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("update project without credential: expected 400, got %d: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"code":"git_credential_required"`) {
+		t.Fatalf("unexpected missing credential response: %s", response.Body.String())
+	}
+
+	saved := doRequest(t, server.Router(), http.MethodPut, "/api/projects/reverse-lab/git/credential", token, `{"provider":"github","username":"release-bot","token":"project-token-secret"}`)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save project credential: expected 200, got %d: %s", saved.Code, saved.Body.String())
+	}
+	response = doRequest(t, server.Router(), http.MethodPatch, "/api/projects/reverse-lab", token, `{"description":"saved after credential"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("update project with credential: expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestProjectsUsingSameRepositoryKeepIndependentCredentials(t *testing.T) {
 	provider := &trackingRepositoryProvider{Provider: git.NewDemoProvider()}
 	server := New(Dependencies{
@@ -160,7 +253,7 @@ func TestProjectsUsingSameRepositoryKeepIndependentCredentials(t *testing.T) {
 		RepositoryID string `json:"repository_id"`
 	}, 2)
 	for index, name := range []string{"Shared Repository One", "Shared Repository Two"} {
-		created := doRequest(t, server.Router(), http.MethodPost, "/api/projects", token, `{"name":"`+name+`","repository_url":"`+repositoryURL+`","cluster_id":"demo-cluster"}`)
+		created := doRequest(t, server.Router(), http.MethodPost, "/api/projects", token, `{"name":"`+name+`","repository_url":"`+repositoryURL+`","cluster_id":"demo-cluster","git_provider":"auto","git_username":"create-bot","git_token":"create-token"}`)
 		if created.Code != http.StatusCreated {
 			t.Fatalf("create project %d: expected 201, got %d: %s", index, created.Code, created.Body.String())
 		}

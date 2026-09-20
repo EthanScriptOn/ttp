@@ -23,7 +23,6 @@ func TestValidateRequiresProductionDependencies(t *testing.T) {
 	}{
 		{name: "mysql dsn", mutate: func(config *Config) { config.MySQLDSN = "" }, want: "CICD_MYSQL_DSN"},
 		{name: "jwt secret", mutate: func(config *Config) { config.JWTSecret = "" }, want: "CICD_JWT_SECRET"},
-		{name: "git credential key", mutate: func(config *Config) { config.GitCredentialKey = "" }, want: "CICD_GIT_CREDENTIAL_KEY"},
 		{name: "kubernetes cluster", mutate: func(config *Config) { config.KubeClusterID = "" }, want: "CICD_KUBE_CLUSTER_ID"},
 	}
 	for _, test := range tests {

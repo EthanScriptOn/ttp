@@ -62,6 +62,13 @@ type RepositoryCredentialRegistry interface {
 	ClearRepositoryCredential(repositoryID, repositoryURL string) error
 }
 
+// ImageRegistryRequirement identifies providers whose projects must use a
+// space-scoped image registry connection. It is optional so demo and read-only
+// providers can retain their legacy behavior.
+type ImageRegistryRequirement interface {
+	RequiresImageRegistryConnection() bool
+}
+
 // TagProvider is optional so existing custom read-only providers remain
 // source-compatible. Built-in GitHub and GitLab providers implement it.
 type TagProvider interface {

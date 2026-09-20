@@ -6,6 +6,7 @@ import {
   CodeOutlined,
   DashboardOutlined,
   DeleteOutlined,
+  EnvironmentOutlined,
   EyeOutlined,
   LockOutlined,
   PlayCircleOutlined,
@@ -142,15 +143,16 @@ function BranchPage({ project, branches, releases, search, onSearch, onCreate, o
   </>
 }
 
-function CreateReleasePage({ branch, project, environments, submitting, onBack, onSubmit, canCreateRelease }) {
+function CreateReleasePage({ branch, project, environments, submitting, onBack, onOpenTargets, onSubmit, canCreateRelease }) {
   const releaseEnvironments = (environments || []).filter(Boolean)
+  const hasReleaseEnvironment = releaseEnvironments.length > 0
   return <>
     <header className="release-flow-heading release-flow-heading-no-title"><div><p>确认发布来源后提交，环境发布在下一步单独配置。</p></div></header>
     <div className="release-flow-create-grid">
-      <section className="release-flow-section release-flow-card"><div className="release-flow-section-head"><div><h2>发布来源</h2><p>本次发布使用分支当前版本。</p></div></div><div className="release-flow-source-grid"><div><span className="release-flow-label">发布分支</span><strong>{branch?.name || '-'}</strong></div><div><span className="release-flow-label">当前版本</span><code>{branchVersion(branch)}</code></div><div><span className="release-flow-label">最近提交</span><strong>{branchMessage(branch)}</strong></div><div><span className="release-flow-label">提交人</span><strong>{branch?.author || branch?.owner || '仓库提交人'}</strong></div></div><div className="release-flow-environment-route"><div className="release-flow-route-head"><strong>发布环境</strong><span>{releaseEnvironments.length} 个，按顺序推进</span></div><div className="release-flow-environment-sequence">{releaseEnvironments.length ? releaseEnvironments.map((environment, index) => { const target = environmentTarget(environment); const displayName = target?.name || environment.name || environment.label; const stage = target?.environment_stage || target?.stage || target?.environment || environment.label; const destination = target ? `${target.cluster_id || '未配置集群'} / ${target.namespace || '未配置命名空间'}` : '未配置发布目标'; return <div className="release-flow-environment-sequence-row" key={environment.key || target?.id || displayName}><span className="release-flow-sequence-number">{index + 1}</span><div className="release-flow-sequence-name"><strong>{displayName}</strong><small>{stage}</small></div><span className="release-flow-sequence-target">{destination}</span><span className="release-flow-sequence-state">{index === 0 ? '首个环境' : `等待第 ${index} 个环境完成`}</span></div> }) : <div className="release-flow-sequence-empty">暂无已配置的发布环境</div>}</div></div></section>
-      <aside className="release-flow-section release-flow-card release-flow-permission-card"><h2>提交发布单</h2><p>提交后进入当前开放批次。</p><div className="release-flow-permission"><div><strong>当前账号</strong><span>可提交</span></div><small>执行发布需要“执行发布”权限。</small></div><div className="release-flow-batch"><span className="release-flow-label">加入批次</span><strong>提交后自动加入当前开放批次</strong></div></aside>
+      <section className="release-flow-section release-flow-card"><div className="release-flow-section-head"><div><h2>发布来源</h2><p>本次发布使用分支当前版本。</p></div></div><div className="release-flow-source-grid"><div><span className="release-flow-label">发布分支</span><strong>{branch?.name || '-'}</strong></div><div><span className="release-flow-label">当前版本</span><code>{branchVersion(branch)}</code></div><div><span className="release-flow-label">最近提交</span><strong>{branchMessage(branch)}</strong></div><div><span className="release-flow-label">提交人</span><strong>{branch?.author || branch?.owner || '仓库提交人'}</strong></div></div><div className="release-flow-environment-route"><div className="release-flow-route-head"><strong>发布环境</strong><span>{releaseEnvironments.length} 个，按顺序推进</span></div><div className="release-flow-environment-sequence">{hasReleaseEnvironment ? releaseEnvironments.map((environment, index) => { const target = environmentTarget(environment); const displayName = target?.name || environment.name || environment.label; const stage = target?.environment_stage || target?.stage || target?.environment || environment.label; const destination = target ? `${target.cluster_id || '未配置集群'} / ${target.namespace || '未配置命名空间'}` : '未配置发布目标'; return <div className="release-flow-environment-sequence-row" key={environment.key || target?.id || displayName}><span className="release-flow-sequence-number">{index + 1}</span><div className="release-flow-sequence-name"><strong>{displayName}</strong><small>{stage}</small></div><span className="release-flow-sequence-target">{destination}</span><span className="release-flow-sequence-state">{index === 0 ? '首个环境' : `等待第 ${index} 个环境完成`}</span></div> }) : <div className="release-flow-sequence-empty">暂无已配置的发布环境</div>}</div></div></section>
+      <aside className="release-flow-section release-flow-card release-flow-permission-card"><h2>提交发布单</h2>{hasReleaseEnvironment ? <><p>提交后进入当前开放批次。</p><div className="release-flow-permission"><div><strong>当前账号</strong><span>可提交</span></div><small>执行发布需要“执行发布”权限。</small></div></> : <div className="release-flow-missing-target"><EnvironmentOutlined /><strong>还没有可用的发布环境</strong><span>部署配置中的资源文件不会自动创建发布环境，请先添加并启用 DEV 环境。</span><button className="release-flow-button" type="button" onClick={onOpenTargets}><EnvironmentOutlined />去配置发布环境</button></div>}</aside>
     </div>
-    <div className="release-flow-footer"><button className="release-flow-button primary" type="button" onClick={onSubmit} disabled={submitting || !canCreateRelease}>{submitting ? '创建中...' : '提交发布单'}</button></div>
+    <div className="release-flow-footer"><button className="release-flow-button primary" type="button" onClick={onSubmit} disabled={submitting || !canCreateRelease || !hasReleaseEnvironment}>{submitting ? '创建中...' : '提交发布单'}</button></div>
   </>
 }
 
@@ -163,26 +165,41 @@ function OrderPage({ project, release, environments, removed, onOpenEnvironment,
   </>
 }
 
-function EnvironmentConfigPage({ release, environment, config, onConfigChange, onSubmit, submitting, canPublishRelease }) {
+function EnvironmentConfigPage({ release, environment, config, onConfigChange, onSubmit, submitting, publishing, canPublishRelease }) {
   const target = environmentTarget(environment)
   const activeStrategy = strategyOf(release, environment)
   return <>
-    <section className="release-flow-order-summary release-flow-config-summary"><div className="release-flow-summary-content"><div className="release-flow-summary-primary"><div className="release-flow-order-title"><h2>{release.id}</h2><span className="release-flow-status active">待提交</span></div><p><code>{release.branch || '未命名分支'}</code>　·　当前版本 <code>{commitOf(release)}</code>　·　{releaseOwner(release)}</p></div><div className="release-flow-summary-meta"><span>目标环境 <strong>{environment.label}</strong></span><span>发布方式 <strong>{strategyLabel(activeStrategy)}</strong></span><span>所属批次 <strong>{batchIdOf(release)}</strong></span></div></div><div className="release-flow-heading-actions release-flow-order-actions"><button className="release-flow-button primary" type="button" onClick={onSubmit} disabled={submitting || !canPublishRelease}>{submitting ? '提交中...' : '提交环境发布单'}</button></div></section>
-    <div className="release-flow-config-grid"><section className="release-flow-section release-flow-card"><div className="release-flow-section-head"><div><h2>发布目标</h2><p>目标集群和命名空间来自环境配置。</p></div></div><div className="release-flow-target-grid"><div><span className="release-flow-label">环境发布单</span><strong>{target?.release_id || `${release.id}-${environment.label}`}</strong></div><div><span className="release-flow-label">集群</span><strong>{target?.cluster_id || '未配置集群'}</strong></div><div><span className="release-flow-label">命名空间</span><strong>{target?.namespace || '未配置命名空间'}</strong></div><div><span className="release-flow-label">副本数</span><strong>{target?.replicas || 1} 个 Pod</strong></div></div><div className="release-flow-mode-panel"><div className="release-flow-mode-head"><strong>发布方式</strong><span>来自环境配置</span></div><div className="release-flow-mode-readonly"><strong>{strategyLabel(activeStrategy)}</strong><span>{STRATEGY_COPY[activeStrategy]}</span></div><div className="release-flow-config-fields"><div className={`release-flow-traffic ${activeStrategy === 'rolling' ? 'disabled' : ''}`}><div><span>新版本流量</span><strong>{activeStrategy === 'rolling' ? '不涉及' : `${config.traffic}%`}</strong></div><input type="range" min="1" max="100" value={activeStrategy === 'rolling' ? 1 : config.traffic} disabled={activeStrategy === 'rolling'} onChange={(event) => onConfigChange({ traffic: Number(event.target.value) })} /><small><span>新版本 {activeStrategy === 'rolling' ? '—' : `${config.traffic}%`}</span><span>旧版本 {activeStrategy === 'rolling' ? '—' : `${100 - config.traffic}%`}</span></small></div></div></div></section><aside className="release-flow-section release-flow-card release-flow-review-card"><h2>提交前确认</h2><p>提交后生成 {environment.label} 环境发布单。</p><div><span>代码版本</span><strong>{commitOf(release)}</strong></div><div><span>目标环境</span><strong>{environment.label}</strong></div><div><span>发布方式</span><strong>{strategyLabel(activeStrategy)}</strong></div><div><span>起始流量</span><strong>{activeStrategy === 'rolling' ? '不涉及' : `${config.traffic}%`}</strong></div><div className="release-flow-submit-note">当前账号可提交；没有执行权限时，提交后等待发布员执行。</div></aside></div>
+    <section className="release-flow-order-summary release-flow-config-summary"><div className="release-flow-summary-content"><div className="release-flow-summary-primary"><div className="release-flow-order-title"><h2>{release.id}</h2><span className="release-flow-status active">待提交</span></div><p><code>{release.branch || '未命名分支'}</code>　·　当前版本 <code>{commitOf(release)}</code>　·　{releaseOwner(release)}</p></div><div className="release-flow-summary-meta"><span>目标环境 <strong>{environment.label}</strong></span><span>发布方式 <strong>{strategyLabel(activeStrategy)}</strong></span><span>所属批次 <strong>{batchIdOf(release)}</strong></span></div></div><div className="release-flow-heading-actions release-flow-order-actions"><button className="release-flow-button primary" type="button" onClick={onSubmit} disabled={submitting || publishing || !canPublishRelease}>{submitting || publishing ? '提交中...' : '提交环境发布单'}</button></div></section>
+    <div className="release-flow-config-grid"><section className="release-flow-section release-flow-card"><div className="release-flow-section-head"><div><h2>发布目标</h2><p>目标集群和命名空间来自环境配置，副本、端口和探针等工作负载规格来自资源文件。</p></div></div><div className="release-flow-target-grid"><div><span className="release-flow-label">环境发布单</span><strong>{target?.release_id || `${release.id}-${environment.label}`}</strong></div><div><span className="release-flow-label">集群</span><strong>{target?.cluster_id || '未配置集群'}</strong></div><div><span className="release-flow-label">命名空间</span><strong>{target?.namespace || '未配置命名空间'}</strong></div><div><span className="release-flow-label">工作负载规格</span><strong>资源文件决定</strong></div></div><div className="release-flow-mode-panel"><div className="release-flow-mode-head"><strong>发布方式</strong><span>来自环境配置</span></div><div className="release-flow-mode-readonly"><strong>{strategyLabel(activeStrategy)}</strong><span>{STRATEGY_COPY[activeStrategy]}</span></div><div className="release-flow-config-fields"><div className={`release-flow-traffic ${activeStrategy === 'rolling' ? 'disabled' : ''}`}><div><span>新版本流量</span><strong>{activeStrategy === 'rolling' ? '不涉及' : `${config.traffic}%`}</strong></div><input type="range" min="1" max="100" value={activeStrategy === 'rolling' ? 1 : config.traffic} disabled={activeStrategy === 'rolling'} onChange={(event) => onConfigChange({ traffic: Number(event.target.value) })} /><small><span>新版本 {activeStrategy === 'rolling' ? '—' : `${config.traffic}%`}</span><span>旧版本 {activeStrategy === 'rolling' ? '—' : `${100 - config.traffic}%`}</span></small></div></div></div></section><aside className="release-flow-section release-flow-card release-flow-review-card"><h2>提交前确认</h2><p>提交后生成 {environment.label} 环境发布单。</p><div><span>代码版本</span><strong>{commitOf(release)}</strong></div><div><span>目标环境</span><strong>{environment.label}</strong></div><div><span>发布方式</span><strong>{strategyLabel(activeStrategy)}</strong></div><div><span>起始流量</span><strong>{activeStrategy === 'rolling' ? '不涉及' : `${config.traffic}%`}</strong></div><div className="release-flow-submit-note">当前账号可提交；没有执行权限时，提交后等待发布员执行。</div></aside></div>
   </>
 }
 
-function EnvironmentDetailPage({ project, release, environment, status, logs, logsLoading, logsError, pods, activeTab, onTabChange, onBack, onRefresh, onRepublish, onRetryTarget, retryingTarget, canPublishRelease, onOpenPod, onOpenMonitor, onOpenTerminal, canOpenTerminal, loading }) {
+function EnvironmentDetailPage({ project, release, environment, status, logs, logsLoading, logsError, pods, activeTab, onTabChange, onBack, onRefresh, onRepublish, onRetryTarget, retryingTarget, publishing, canPublishRelease, onOpenPod, onOpenMonitor, onOpenTerminal, canOpenTerminal, loading }) {
   const target = status.target || environmentTarget(environment)
   const commit = targetCommit(target, release)
   const strategy = strategyOf(release, environment)
   const traffic = strategy === 'rolling' ? { primary: 100, secondary: 0, primaryLabel: '当前服务', secondaryLabel: '新 Pod' } : strategy === 'blue_green' ? { primary: 100 - (release.plan?.traffic?.green_percent || 1), secondary: release.plan?.traffic?.green_percent || 1, primaryLabel: '蓝版本', secondaryLabel: '绿版本' } : { primary: 100 - (release.plan?.traffic?.candidate_percent || 1), secondary: release.plan?.traffic?.candidate_percent || 1, primaryLabel: '稳定版本', secondaryLabel: '灰度版本' }
   const actionLabel = status.state === 'failed' ? `重试 ${environment.label}` : status.state === 'done' ? '重新发布' : `发布 ${environment.label}`
-  const runAction = () => status.state === 'failed' && status.target ? onRetryTarget?.(release, status.target) : onRepublish?.(release, environment)
+  const [actionSubmitting, setActionSubmitting] = useState(false)
+  const actionSubmittingRef = useRef(false)
+  const canAction = canPublishRelease && status.state !== 'active' && !['queued', 'running'].includes(release.status)
+  const actionBusy = publishing || actionSubmitting || Boolean(retryingTarget)
+  const runAction = async () => {
+    if (!canAction || loading || actionBusy || actionSubmittingRef.current) return
+    actionSubmittingRef.current = true
+    setActionSubmitting(true)
+    try {
+      if (status.state === 'failed' && status.target) await onRetryTarget?.(release, status.target)
+      else await onRepublish?.(release, environment)
+    } finally {
+      actionSubmittingRef.current = false
+      setActionSubmitting(false)
+    }
+  }
   return <>
     <section className="release-flow-environment-overview">
       <div className="release-flow-environment-overview-copy"><h2>{release.id} · {strategyLabel(strategy)}发布</h2><p className="release-flow-environment-release-meta"><code>{release.branch}</code>　·　当前版本 <code>{commit}</code>　·　{releaseOwner(release)}</p></div>
-      <div className="release-flow-environment-overview-actions"><button className="release-flow-button primary" type="button" disabled={!canPublishRelease || loading || Boolean(retryingTarget)} onClick={runAction}>{status.state === 'failed' ? <WarningOutlined /> : status.state === 'done' ? <ReloadOutlined /> : <PlayCircleOutlined />}{retryingTarget ? '处理中...' : actionLabel}</button><button className="release-flow-button" type="button" onClick={onRefresh} disabled={loading}><ReloadOutlined />刷新</button></div>
+      <div className="release-flow-environment-overview-actions"><button className="release-flow-button primary" type="button" disabled={!canAction || loading || actionBusy} onClick={runAction}>{actionBusy ? <ReloadOutlined spin /> : status.state === 'failed' ? <WarningOutlined /> : status.state === 'done' ? <ReloadOutlined /> : <PlayCircleOutlined />}{actionSubmitting || publishing ? '提交中...' : retryingTarget ? '处理中...' : actionLabel}</button><button className="release-flow-button" type="button" onClick={onRefresh} disabled={loading || actionBusy}><ReloadOutlined />{loading ? '刷新中' : '刷新'}</button></div>
     </section>
     <section className={`release-flow-section release-flow-runtime-card is-${activeTab}`}><nav className="release-flow-detail-tabs"><button className={activeTab === 'logs' ? 'active' : ''} type="button" onClick={() => onTabChange('logs')}>执行日志</button><button className={activeTab === 'pods' ? 'active' : ''} type="button" onClick={() => onTabChange('pods')}>Pod 列表 <span>{pods.length}</span></button><button className={activeTab === 'traffic' ? 'active' : ''} type="button" onClick={() => onTabChange('traffic')}>流量变化</button></nav>{activeTab === 'logs' && <ReleaseLogTerminal logs={logs} emptyText={logsLoading ? '正在读取执行日志...' : logsError ? '执行日志暂时无法加载' : '尚未产生执行输出'} />}{activeTab === 'pods' && <PodList pods={pods} release={release} onOpenPod={onOpenPod} onOpenMonitor={onOpenMonitor} onOpenTerminal={onOpenTerminal} canOpenTerminal={canOpenTerminal} />}{activeTab === 'traffic' && <TrafficView traffic={traffic} strategy={strategy} />}</section>
   </>
@@ -201,6 +218,7 @@ export default function ReleaseFlow({
   spaceName = '',
   userName = '平台管理员',
   onBack,
+  onOpenTargets,
   branch,
   branches = [],
   branchLoading = false,
@@ -220,6 +238,7 @@ export default function ReleaseFlow({
   retryingTarget = '',
   canCreateRelease = true,
   canPublishRelease = true,
+  publishing = false,
   targets = [],
   embedded = false,
 }) {
@@ -251,6 +270,11 @@ export default function ReleaseFlow({
   const openRelease = (release, environment = 'dev', nextPage = 'order') => { setSelectedReleaseId(release.id); setSelectedEnvironmentKey(environment.key || environment); setActiveDetailTab('logs'); onEnvironmentChange?.(environment.key || environment); setPage(nextPage) }
   const submitCreate = async () => {
     if (!selectedBranch || !onCreateRelease) return
+    if (!environments.length) {
+      message.warning('请先添加并启用 DEV 发布环境，再创建发布单')
+      onOpenTargets?.()
+      return
+    }
     setSubmitting(true)
     try {
       const created = await onCreateRelease({ branch: selectedBranch.name })
@@ -290,6 +314,8 @@ export default function ReleaseFlow({
         setSelectedReleaseId(updated.id)
         setPage('deploy')
       }
+    } catch (error) {
+      message.error(error.message || '提交环境发布单失败')
     } finally { setSubmitting(false) }
   }
   const removeFromBatch = (release) => { setRemovedIds((old) => new Set([...old, release.id])); message.success(`${release.branch || '这个分支'} 已移出批次，发布记录仍保留`) }
@@ -320,10 +346,10 @@ export default function ReleaseFlow({
       ? <FlowUnavailablePage title="还没有环境发布详情" message="当前环境还没有执行记录。先从发布单详情配置并发布，完成后这里才会有日志、Pod 和流量信息。" onGoBranches={() => setPage('branches')} />
       : <>
         {page === 'branches' && <BranchPage project={project} branches={visibleBranches} releases={releases.filter((item) => !removedIds.has(item.id))} search={branchSearch} onSearch={setBranchSearch} onCreate={openCreate} onOpen={openRelease} canCreateRelease={canCreateRelease} branchLoading={branchLoading} />}
-        {page === 'create' && <CreateReleasePage project={project} branch={selectedBranch} environments={environments} submitting={submitting} onBack={() => setPage('branches')} onSubmit={submitCreate} canCreateRelease={canCreateRelease} />}
+        {page === 'create' && <CreateReleasePage project={project} branch={selectedBranch} environments={environments} submitting={submitting} onBack={() => setPage('branches')} onOpenTargets={onOpenTargets || onBack} onSubmit={submitCreate} canCreateRelease={canCreateRelease} />}
         {page === 'order' && <OrderPage project={project} release={selectedRelease} environments={environments} removed={selectedRelease ? removedIds.has(selectedRelease.id) : false} onOpenEnvironment={openEnvironment} onBack={() => setPage('branches')} onRefresh={onRefresh} loading={loading} onRemove={removeFromBatch} />}
-        {page === 'config' && selectedRelease && selectedEnvironment && <EnvironmentConfigPage release={selectedRelease} environment={selectedEnvironment} config={environmentConfig} onConfigChange={(next) => setEnvironmentConfig((old) => ({ ...old, ...next }))} onSubmit={submitEnvironment} submitting={submitting} canPublishRelease={canPublishRelease} />}
-        {page === 'deploy' && selectedRelease && selectedEnvironment && <EnvironmentDetailPage project={project} release={selectedRelease} environment={selectedEnvironment} status={selectedStatus} logs={environmentLogs} logsLoading={environmentLogsLoading} logsError={environmentLogsError} pods={pods} activeTab={activeDetailTab} onTabChange={setActiveDetailTab} onBack={() => setPage('order')} onRefresh={onRefresh} onRepublish={onPublishEnvironment} onRetryTarget={onRetryTarget} retryingTarget={retryingTarget} canPublishRelease={canPublishRelease} onOpenPod={onOpenPod} onOpenMonitor={onOpenMonitor} onOpenTerminal={onOpenTerminal} canOpenTerminal={canOpenTerminal} loading={loading} />}
+        {page === 'config' && selectedRelease && selectedEnvironment && <EnvironmentConfigPage release={selectedRelease} environment={selectedEnvironment} config={environmentConfig} onConfigChange={(next) => setEnvironmentConfig((old) => ({ ...old, ...next }))} onSubmit={submitEnvironment} submitting={submitting} publishing={publishing} canPublishRelease={canPublishRelease} />}
+        {page === 'deploy' && selectedRelease && selectedEnvironment && <EnvironmentDetailPage project={project} release={selectedRelease} environment={selectedEnvironment} status={selectedStatus} logs={environmentLogs} logsLoading={environmentLogsLoading} logsError={environmentLogsError} pods={pods} activeTab={activeDetailTab} onTabChange={setActiveDetailTab} onBack={() => setPage('order')} onRefresh={onRefresh} onRepublish={onPublishEnvironment} onRetryTarget={onRetryTarget} retryingTarget={retryingTarget} publishing={publishing} canPublishRelease={canPublishRelease} onOpenPod={onOpenPod} onOpenMonitor={onOpenMonitor} onOpenTerminal={onOpenTerminal} canOpenTerminal={canOpenTerminal} loading={loading} />}
       </>
 
   return <div className={`release-flow-portal${embedded ? ' is-embedded' : ''}`}>

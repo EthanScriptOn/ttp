@@ -80,6 +80,7 @@ export default function SpaceSettingsPage({ role, user, onSpaceUpdated }) {
       {error && <Alert className="space-settings-alert" type="warning" showIcon message={error} />}
 
       {loading && !settings ? <div className="space-settings-loading"><Spin /><Typography.Text type="secondary">加载空间资料...</Typography.Text></div> : (
+        <>
         <section className="space-settings-section space-settings-profile">
           {!canUpdateSpace && <div className="space-settings-section-head"><Tag>只读</Tag></div>}
           {!canUpdateSpace && <Alert type="info" showIcon message="当前角色只能查看空间资料，不能修改设置。" />}
@@ -90,9 +91,12 @@ export default function SpaceSettingsPage({ role, user, onSpaceUpdated }) {
             <Form.Item label="空间描述" name="description" rules={[{ max: 255, message: '空间描述最多 255 个字符' }]}>
               <Input.TextArea disabled={!canUpdateSpace} rows={4} showCount maxLength={255} placeholder="说明这个空间主要用于什么" />
             </Form.Item>
-            {canUpdateSpace && <Button type="primary" icon={<SaveOutlined />} htmlType="submit" loading={savingSettings}>保存空间设置</Button>}
           </Form>
         </section>
+        {canUpdateSpace && <div className="space-settings-actions">
+            <Button type="primary" icon={<SaveOutlined />} onClick={() => settingsForm.submit()} loading={savingSettings}>保存空间设置</Button>
+        </div>}
+        </>
       )}
     </div>
   )
