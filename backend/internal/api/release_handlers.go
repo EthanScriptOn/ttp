@@ -49,13 +49,115 @@ type releaseFailRequest struct {
 	Error string `json:"error"`
 }
 
+type releaseTrafficRequest struct {
+	Stable    int `json:"stable_percent"`
+	Candidate int `json:"candidate_percent"`
+	Blue      int `json:"blue_percent"`
+	Green     int `json:"green_percent"`
+}
+
 func (s *Server) listReleases(c *gin.Context) {
 	project, ok := s.projectMetadataForRequest(c)
 	if !ok {
 		return
 	}
 	items := s.deps.Release.List(project.ID)
-	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+	items = s.enrichReleaseCreatorUsernames(c.Request.Context(), items)
+	items = filterReleases(items, c.Query("q"))
+	total := len(items)
+	page, pageSize, paginated, ok := releasePagination(c)
+	if !ok {
+		return
+	}
+	if paginated {
+		start := (page - 1) * pageSize
+		if start >= total {
+			items = items[:0]
+		} else {
+			end := min(start+pageSize, total)
+			items = items[start:end]
+		}
+	} else {
+		pageSize = total
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
+}
+
+func (s *Server) getReleaseFlow(c *gin.Context) {
+	project, ok := s.projectMetadataForRequest(c)
+	if !ok {
+		return
+	}
+	flow, err := s.deps.Release.Flow(project.ID)
+	if errors.Is(err, release.ErrFlowNotFound) {
+		c.JSON(http.StatusOK, gin.H{"flow": nil})
+		return
+	}
+	if err != nil {
+		writeReleaseError(c, err)
+		return
+	}
+
+	items := s.enrichReleaseCreatorUsernames(c.Request.Context(), s.deps.Release.List(project.ID))
+	activeBranches := make(map[string]struct{}, len(flow.Participants))
+	for _, participant := range flow.Participants {
+		if participant.Active {
+			activeBranches[strings.ToLower(strings.TrimSpace(participant.Branch))] = struct{}{}
+		}
+	}
+	latestByBranch := make(map[string]release.Release, len(activeBranches))
+	var currentRelease *release.Release
+	for _, item := range items {
+		if item.ID == flow.CurrentReleaseID {
+			copy := item
+			currentRelease = &copy
+		}
+		branchKey := strings.ToLower(strings.TrimSpace(item.Branch))
+		legacyFlow := strings.HasPrefix(flow.ID, "legacy-")
+		if (!legacyFlow && item.FlowID != flow.ID) || branchKey == "" {
+			continue
+		}
+		if _, active := activeBranches[branchKey]; !active {
+			continue
+		}
+		if _, exists := latestByBranch[branchKey]; !exists {
+			latestByBranch[branchKey] = item
+		}
+	}
+	participantReleases := make([]release.Release, 0, len(latestByBranch))
+	for _, participant := range flow.Participants {
+		if !participant.Active {
+			continue
+		}
+		if item, exists := latestByBranch[strings.ToLower(strings.TrimSpace(participant.Branch))]; exists {
+			participantReleases = append(participantReleases, item)
+		}
+	}
+	response := gin.H{"flow": flow, "participant_releases": participantReleases}
+	if currentRelease != nil {
+		response["current_release"] = *currentRelease
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+func (s *Server) enrichReleaseCreatorUsernames(ctx context.Context, items []release.Release) []release.Release {
+	usernames := make(map[uint64]string)
+	for index := range items {
+		creatorID := items[index].CreatedBy
+		if creatorID == 0 || items[index].CreatedByUsername != "" {
+			continue
+		}
+		username, cached := usernames[creatorID]
+		if !cached {
+			user, err := s.deps.Store.User(ctx, creatorID)
+			if err == nil {
+				username = strings.TrimSpace(user.Username)
+			}
+			usernames[creatorID] = username
+		}
+		items[index].CreatedByUsername = username
+	}
+	return items
 }
 
 func (s *Server) getRelease(c *gin.Context) {
@@ -124,7 +226,7 @@ func (s *Server) createRelease(c *gin.Context) {
 			createdByName = strings.TrimSpace(user.Username)
 		}
 	}
-	created, duplicate, err := s.deps.Release.Create(c.Request.Context(), release.CreateInput{SpaceID: project.SpaceID, ProjectID: project.ID, RepositoryID: project.RepositoryID, CreatedBy: claims.UserID, CreatedByName: createdByName, Branch: branch, Name: strings.TrimSpace(request.Name), CommitSHAs: request.CommitSHAs, Targets: targets, Strategy: release.Strategy(request.Strategy), Traffic: release.TrafficSplit{StablePercent: request.Stable, CandidatePercent: request.Candidate, BluePercent: request.Blue, GreenPercent: request.Green}})
+	created, duplicate, err := s.deps.Release.Create(c.Request.Context(), release.CreateInput{SpaceID: project.SpaceID, ProjectID: project.ID, RepositoryID: project.RepositoryID, CreatedBy: claims.UserID, CreatedByName: createdByName, Branch: branch, BaseBranch: project.DefaultBranch, Name: strings.TrimSpace(request.Name), CommitSHAs: request.CommitSHAs, Targets: targets, Strategy: release.Strategy(request.Strategy), Traffic: release.TrafficSplit{StablePercent: request.Stable, CandidatePercent: request.Candidate, BluePercent: request.Blue, GreenPercent: request.Green}})
 	if err != nil {
 		writeReleaseError(c, err)
 		return
@@ -181,6 +283,63 @@ func (s *Server) publishRelease(c *gin.Context) {
 	}
 	s.recordAudit(c, "再次发布", project.Name+" · "+item.Branch)
 	c.JSON(http.StatusAccepted, gin.H{"release": item})
+}
+
+func (s *Server) updateReleaseTraffic(c *gin.Context) {
+	project, ok := s.projectForRequest(c)
+	if !ok {
+		return
+	}
+	item, err := s.deps.Release.Get(c.Param("releaseID"))
+	if err != nil {
+		writeReleaseError(c, err)
+		return
+	}
+	if item.ProjectID != project.ID {
+		writeError(c, http.StatusNotFound, "not_found", "发布记录不存在")
+		return
+	}
+	targetID := strings.TrimSpace(c.Param("targetID"))
+	target, found := releaseTargetByID(item, targetID)
+	if !found {
+		writeError(c, http.StatusNotFound, "not_found", "发布环境不存在")
+		return
+	}
+	if item.Plan.Strategy == release.StrategyRolling {
+		writeError(c, http.StatusConflict, "traffic_not_adjustable", "当前发布单实际采用滚动发布，不支持调整流量")
+		return
+	}
+	if target.Status != release.TargetRunning && target.Status != release.TargetSucceeded {
+		writeReleaseError(c, fmt.Errorf("%w: traffic can only be adjusted for a running or completed environment", release.ErrInvalidStatusFlow))
+		return
+	}
+	var request releaseTrafficRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request", "流量配置格式不正确")
+		return
+	}
+	previousTraffic := item.Plan.Traffic
+	updated, err := s.deps.Release.UpdateTraffic(item.ID, release.TrafficSplit{
+		StablePercent: request.Stable, CandidatePercent: request.Candidate,
+		BluePercent: request.Blue, GreenPercent: request.Green,
+	})
+	if err != nil {
+		writeReleaseError(c, err)
+		return
+	}
+	update := runtime.ReleaseTrafficUpdate{
+		ClusterID: target.ClusterID, Namespace: target.Namespace, ProjectID: project.ID,
+		ReleaseID: item.ID, TargetID: target.ID, Strategy: string(updated.Plan.Strategy),
+		StablePercent: updated.Plan.Traffic.StablePercent, CandidatePercent: updated.Plan.Traffic.CandidatePercent,
+		BluePercent: updated.Plan.Traffic.BluePercent, GreenPercent: updated.Plan.Traffic.GreenPercent,
+	}
+	if err := s.deps.Runtime.UpdateReleaseTraffic(c.Request.Context(), update); err != nil {
+		_, _ = s.deps.Release.UpdateTraffic(item.ID, previousTraffic)
+		writeReleaseError(c, err)
+		return
+	}
+	s.recordAudit(c, "调整发布流量", project.Name+" · "+target.Name)
+	c.JSON(http.StatusOK, gin.H{"release": updated})
 }
 
 func (s *Server) retryReleaseTarget(c *gin.Context) {
@@ -299,6 +458,154 @@ func (s *Server) cancelRelease(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"release": updated})
 }
 
+func (s *Server) removeRelease(c *gin.Context) {
+	project, ok := s.projectMetadataForRequest(c)
+	if !ok {
+		return
+	}
+	item, err := s.deps.Release.Get(c.Param("releaseID"))
+	if err != nil {
+		writeReleaseError(c, err)
+		return
+	}
+	if item.ProjectID != project.ID {
+		writeError(c, http.StatusNotFound, "not_found", "发布记录不存在")
+		return
+	}
+	if item.Status == release.StatusQueued || item.Status == release.StatusRunning {
+		writeError(c, http.StatusConflict, "conflict", "运行中的发布单不能直接移除，请先取消发布")
+		return
+	}
+	if item.Status != release.StatusDraft {
+		writeError(c, http.StatusConflict, "conflict", "已发布发布单不能直接移除，请使用“移除发布单”操作")
+		return
+	}
+	claims, _ := auth.ClaimsFrom(c)
+	removed, err := s.deps.Release.Remove(item.ID, claims.UserID)
+	if err != nil {
+		writeReleaseError(c, err)
+		return
+	}
+	s.recordAudit(c, "移除发布单", project.Name+" · "+removed.ID)
+	c.JSON(http.StatusOK, gin.H{"release": removed})
+}
+
+func (s *Server) republishRelease(c *gin.Context) {
+	project, ok := s.projectForRequest(c)
+	if !ok {
+		return
+	}
+	item, err := s.deps.Release.Get(c.Param("releaseID"))
+	if err != nil {
+		writeReleaseError(c, err)
+		return
+	}
+	if item.ProjectID != project.ID {
+		writeError(c, http.StatusNotFound, "not_found", "发布记录不存在")
+		return
+	}
+	if item.Removed {
+		writeReleaseError(c, release.ErrReleaseRemoved)
+		return
+	}
+	if item.Status == release.StatusDraft {
+		writeError(c, http.StatusConflict, "conflict", "草稿发布单无需重新发布，请直接移除")
+		return
+	}
+	if item.Status == release.StatusQueued || item.Status == release.StatusRunning {
+		writeError(c, http.StatusConflict, "conflict", "运行中的发布单不能移除，请先取消发布")
+		return
+	}
+	removal, err := s.deps.Release.PrepareBranchRemoval(item.ID)
+	if err != nil {
+		writeReleaseError(c, err)
+		return
+	}
+	if strings.TrimSpace(removal.BaseCommit.SHA) == "" {
+		writeError(c, http.StatusConflict, "conflict", "当前发布流程没有可重新发布的基础分支版本")
+		return
+	}
+
+	targets := make([]release.TargetInput, 0, len(item.Targets))
+	for _, target := range item.Targets {
+		targets = append(targets, target.TargetInput)
+	}
+	if len(targets) == 0 {
+		targets, err = s.resolveReleaseTargetsForContext(c.Request.Context(), project, nil)
+		if err != nil {
+			writeStoreError(c, err)
+			return
+		}
+	}
+	claims, _ := auth.ClaimsFrom(c)
+	createdByName := strings.TrimSpace(claims.Username)
+	if user, userErr := s.deps.Store.User(c.Request.Context(), claims.UserID); userErr == nil {
+		createdByName = strings.TrimSpace(user.DisplayName)
+		if createdByName == "" {
+			createdByName = strings.TrimSpace(user.Username)
+		}
+	}
+	replacement, duplicate, err := s.deps.Release.Create(c.Request.Context(), release.CreateInput{
+		SpaceID:       project.SpaceID,
+		ProjectID:     project.ID,
+		RepositoryID:  project.RepositoryID,
+		CreatedBy:     claims.UserID,
+		CreatedByName: createdByName,
+		// The replacement records the flow base revision and the remaining
+		// participant snapshot. The removed branch is deliberately not used as
+		// the source branch of the new immutable release; a provider with a
+		// composition operation can later turn this snapshot into a temporary
+		// Git ref before building it.
+		Branch:            removal.Flow.BaseBranch,
+		BaseBranch:        removal.Flow.BaseBranch,
+		Name:              item.Name,
+		CommitSHAs:        []string{removal.BaseCommit.SHA},
+		FlowID:            removal.Flow.ID,
+		FlowVersion:       removal.Flow.Version,
+		FlowParticipants:  removal.Flow.Participants,
+		Participants:      removal.Participants,
+		ParentReleaseID:   item.ID,
+		ReplacesReleaseID: item.ID,
+		ReplacementState:  "pending",
+		RemovedBranch:     removal.RemovedBranch,
+		Strategy:          item.Plan.Strategy,
+		Traffic:           item.Plan.Traffic,
+		Targets:           targets,
+		ForceNew:          true,
+	})
+	if err != nil {
+		writeReleaseError(c, err)
+		return
+	}
+	if duplicate {
+		writeError(c, http.StatusConflict, "conflict", "当前分支已经存在相同的移除任务")
+		return
+	}
+	if err := s.startPublishWithCompletion(c.Request.Context(), project, replacement.ID, func(_ release.Release) {
+		if _, _, commitErr := s.deps.Release.CommitBranchRemoval(item.ID, replacement.ID, claims.UserID); commitErr != nil {
+			_, _ = s.deps.Release.RejectBranchRemoval(replacement.ID)
+		}
+	}, func(_ release.Release, _ error) {
+		_, _ = s.deps.Release.RejectBranchRemoval(replacement.ID)
+	}); err != nil {
+		_, _ = s.deps.Release.RejectBranchRemoval(replacement.ID)
+		writeReleaseError(c, err)
+		return
+	}
+	s.recordAudit(c, "移出分支并重新发布", project.Name+" · "+removal.RemovedBranch)
+	if updated, getErr := s.deps.Release.Get(replacement.ID); getErr == nil {
+		replacement = updated
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"release":              replacement,
+		"replacing_release_id": item.ID,
+		"removed_branch":       removal.RemovedBranch,
+		"replacement_state":    replacement.ReplacementState,
+		"flow":                 removal.Flow,
+		"replacing":            true,
+	})
+}
+
 func (s *Server) failRelease(c *gin.Context) {
 	project, ok := s.projectForRequest(c)
 	if !ok {
@@ -351,9 +658,16 @@ func (s *Server) removeReleaseCommit(c *gin.Context) {
 }
 
 func (s *Server) startPublish(ctx context.Context, project domain.Project, id string) error {
+	return s.startPublishWithCompletion(ctx, project, id, nil, nil)
+}
+
+func (s *Server) startPublishWithCompletion(ctx context.Context, project domain.Project, id string, onSuccess func(release.Release), onFailure func(release.Release, error)) error {
 	item, err := s.deps.Release.Get(id)
 	if err != nil {
 		return err
+	}
+	if item.Removed {
+		return release.ErrReleaseRemoved
 	}
 	// A second click while the same release is already queued or running is
 	// idempotent. Return before repeating the network-heavy preflight checks.
@@ -372,6 +686,9 @@ func (s *Server) startPublish(ctx context.Context, project domain.Project, id st
 		if err != nil {
 			return err
 		}
+	}
+	if err := s.validateAutoMerge(ctx, project, item); err != nil {
+		return err
 	}
 	if s.deps.ImageBuilder == nil {
 		return runtime.ErrImageBuildUnsupported
@@ -453,10 +770,28 @@ func (s *Server) startPublish(ctx context.Context, project domain.Project, id st
 				_, _ = s.deps.Release.FailTarget(id, target.ID, fmt.Sprintf("部署失败：%v", targetErr))
 				_, _ = s.deps.Release.CancelPendingTargets(id, fmt.Sprintf("因环境 %s 发布失败，未继续发布", target.Name))
 				_, _ = s.deps.Release.Fail(id, fmt.Sprintf("目标 %s 部署失败：%v", target.Name, targetErr))
+				if onFailure != nil {
+					if failed, getErr := s.deps.Release.Get(id); getErr == nil {
+						onFailure(failed, targetErr)
+					}
+				}
 				return
 			}
 		}
-		_, _ = s.deps.Release.FinalizeTargets(id)
+		finalized, finalizeErr := s.deps.Release.FinalizeTargets(id)
+		if finalizeErr != nil {
+			if onFailure != nil {
+				if failed, getErr := s.deps.Release.Get(id); getErr == nil {
+					onFailure(failed, finalizeErr)
+				}
+			}
+			return
+		}
+		if finalized.Status == release.StatusSucceeded && onSuccess != nil {
+			onSuccess(finalized)
+		} else if finalized.Status == release.StatusFailed && onFailure != nil {
+			onFailure(finalized, errors.New(finalized.Error))
+		}
 	}(project, item)
 	return nil
 }
@@ -488,10 +823,21 @@ func (s *Server) executeReleaseTarget(project domain.Project, item release.Relea
 	if len(item.Commits) > 0 {
 		s.appendReleaseLog(item.ID, target.ID, "git", "stdout", "INFO", fmt.Sprintf("branch=%s commit=%s", item.Branch, strings.TrimSpace(item.Commits[0].SHA)))
 	}
+	if len(item.Participants) > 0 {
+		branches := make([]string, 0, len(item.Participants))
+		for _, participant := range item.Participants {
+			if branch := strings.TrimSpace(participant.Branch); branch != "" {
+				branches = append(branches, branch)
+			}
+		}
+		if len(branches) > 0 {
+			s.appendReleaseLog(item.ID, target.ID, "git", "stdout", "INFO", fmt.Sprintf("release flow=%s version=%d participants=%s", item.FlowID, item.FlowVersion, strings.Join(branches, ",")))
+		}
+	}
 	if _, err := s.deps.Release.UpdateTargetProgress(item.ID, target.ID, 15, "preparing", "已读取发布配置"); err != nil {
 		return err
 	}
-	if _, err := s.deps.Release.UpdateTargetProgress(item.ID, target.ID, 25, "building", "正在构建并推送镜像"); err != nil {
+	if _, err := s.deps.Release.UpdateTargetProgress(item.ID, target.ID, 20, "preparing", "正在读取代码"); err != nil {
 		return err
 	}
 	if err := s.deployRelease(project, item, target); err != nil {
@@ -503,8 +849,69 @@ func (s *Server) executeReleaseTarget(project domain.Project, item release.Relea
 	_, err = s.deps.Release.CompleteTarget(item.ID, target.ID)
 	if err == nil {
 		s.appendReleaseLog(item.ID, target.ID, "ttp", "stdout", "INFO", fmt.Sprintf("release target=%s completed", target.ID))
+		s.autoMergeAfterTarget(project, item, target)
 	}
 	return err
+}
+
+func (s *Server) validateAutoMerge(ctx context.Context, project domain.Project, item release.Release) error {
+	if !project.AutoMergeEnabled {
+		return nil
+	}
+	if strings.TrimSpace(project.AutoMergeTargetID) == "" {
+		return fmt.Errorf("自动合并已启用，但没有配置触发环境")
+	}
+	triggerFound := false
+	for _, target := range item.Targets {
+		if target.ID == project.AutoMergeTargetID {
+			triggerFound = true
+			break
+		}
+	}
+	if !triggerFound {
+		return fmt.Errorf("自动合并触发环境未包含在本次发布中")
+	}
+	if strings.TrimSpace(item.Branch) == strings.TrimSpace(project.DefaultBranch) {
+		return nil
+	}
+	if _, ok := s.deps.Git.(git.BranchMerger); !ok {
+		return git.ErrWriteUnsupported
+	}
+	return git.RequireRepositoryMergeAccess(ctx, s.deps.Git, project.RepositoryID)
+}
+
+// autoMergeAfterTarget deliberately runs after Kubernetes has marked the
+// target successful. A merge failure is recorded in the execution log but
+// never rolls back an already deployed environment.
+func (s *Server) autoMergeAfterTarget(project domain.Project, item release.Release, target release.ReleaseTarget) {
+	if !project.AutoMergeEnabled || target.ID != project.AutoMergeTargetID {
+		return
+	}
+	if strings.TrimSpace(item.Branch) == "" || strings.TrimSpace(item.Branch) == strings.TrimSpace(project.DefaultBranch) {
+		s.appendReleaseLog(item.ID, target.ID, "git", "stdout", "INFO", "source branch 已是项目默认分支，跳过自动 merge")
+		return
+	}
+	merger, ok := s.deps.Git.(git.BranchMerger)
+	if !ok {
+		s.appendReleaseLog(item.ID, target.ID, "git", "stderr", "ERROR", "当前 Git 连接不支持自动 merge")
+		return
+	}
+	mergeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	s.appendReleaseLog(item.ID, target.ID, "git", "stdout", "INFO", fmt.Sprintf("环境 %s 发布成功，开始将分支 %s merge 到 %s", target.Name, item.Branch, project.DefaultBranch))
+	result, err := merger.MergeBranch(mergeCtx, project.RepositoryID, item.Branch, project.DefaultBranch)
+	if err != nil {
+		s.appendReleaseLog(item.ID, target.ID, "git", "stderr", "ERROR", fmt.Sprintf("自动 merge 失败：%v", err))
+		return
+	}
+	message := strings.TrimSpace(result.Message)
+	if message == "" {
+		message = fmt.Sprintf("已将 %s merge 到 %s", item.Branch, project.DefaultBranch)
+	}
+	if strings.TrimSpace(result.CommitSHA) != "" {
+		message += " commit=" + strings.TrimSpace(result.CommitSHA)
+	}
+	s.appendReleaseLog(item.ID, target.ID, "git", "stdout", "INFO", "自动 merge 成功："+message)
 }
 
 func (s *Server) appendReleaseLog(id, targetID, source, stream, level, line string) {
@@ -560,12 +967,34 @@ func (s *Server) deployRelease(project domain.Project, item release.Release, tar
 	if err != nil {
 		return err
 	}
-	artifact, err := s.artifactForRelease(ctx, project, item, commitSHA)
-	s.appendBuildLogs(item.ID, target.ID, buildLogs(artifact, err))
+	streamedBuild := false
+	buildStageStarted := false
+	artifact, err, streamedBuild := s.artifactForReleaseWithLogs(ctx, project, item, commitSHA, func(entry imagebuild.LogEntry) {
+		streamedBuild = true
+		if !buildStageStarted && buildLogStartsImageBuild(entry.Line) {
+			buildStageStarted = true
+			_, _ = s.deps.Release.UpdateTargetProgress(item.ID, target.ID, 25, "building", "正在构建并推送镜像")
+		}
+		stream := strings.ToLower(strings.TrimSpace(entry.Stream))
+		if stream != "stderr" {
+			stream = "stdout"
+		}
+		level := strings.ToUpper(strings.TrimSpace(entry.Level))
+		if level == "" {
+			level = "INFO"
+		}
+		s.appendReleaseLog(item.ID, target.ID, buildLogSource(entry.Line), stream, level, entry.Line)
+	})
+	if !streamedBuild {
+		s.appendBuildLogs(item.ID, target.ID, buildLogs(artifact, err))
+	}
 	if err != nil {
 		return err
 	}
 	s.appendReleaseLog(item.ID, target.ID, "build", "stdout", "INFO", fmt.Sprintf("image=%s", artifact.Image))
+	if _, err := s.deps.Release.UpdateTargetProgress(item.ID, target.ID, 75, "building", "正在应用 Kubernetes"); err != nil {
+		return err
+	}
 	return s.deps.Runtime.DeployRelease(ctx, runtime.ReleaseDeployment{
 		ClusterID:           target.ClusterID,
 		Namespace:           target.Namespace,
@@ -611,18 +1040,23 @@ func (s *Server) imagePullCredentialForProject(ctx context.Context, project doma
 // The first environment builds it; later environments reuse the persisted
 // digest, never a mutable tag or a second independent build.
 func (s *Server) artifactForRelease(ctx context.Context, project domain.Project, item release.Release, commitSHA string) (imagebuild.Result, error) {
+	result, err, _ := s.artifactForReleaseWithLogs(ctx, project, item, commitSHA, nil)
+	return result, err
+}
+
+func (s *Server) artifactForReleaseWithLogs(ctx context.Context, project domain.Project, item release.Release, commitSHA string, onLog imagebuild.LogFunc) (imagebuild.Result, error, bool) {
 	commitSHA = strings.TrimSpace(commitSHA)
 	if item.Artifact != nil && strings.EqualFold(strings.TrimSpace(item.Artifact.CommitSHA), commitSHA) && imagebuild.IsDigest(item.Artifact.Digest) && strings.Contains(item.Artifact.Image, "@"+item.Artifact.Digest) {
-		return imagebuild.Result{Image: item.Artifact.Image, Digest: item.Artifact.Digest, StartedAt: item.Artifact.BuiltAt, FinishedAt: item.Artifact.BuiltAt}, nil
+		return imagebuild.Result{Image: item.Artifact.Image, Digest: item.Artifact.Digest, StartedAt: item.Artifact.BuiltAt, FinishedAt: item.Artifact.BuiltAt}, nil, false
 	}
-	result, err := s.buildReleaseImage(ctx, project, item.ID, commitSHA)
+	result, err, streamed := s.buildReleaseImageWithLogs(ctx, project, item.ID, commitSHA, onLog)
 	if err != nil {
-		return result, err
+		return result, err, streamed
 	}
 	if _, err := s.deps.Release.SetArtifact(item.ID, release.Artifact{Image: result.Image, Digest: result.Digest, CommitSHA: commitSHA, BuiltAt: result.FinishedAt}); err != nil {
-		return result, err
+		return result, err, streamed
 	}
-	return result, nil
+	return result, nil, streamed
 }
 
 // buildReleaseImage only forwards the saved source revision, the optional
@@ -630,14 +1064,26 @@ func (s *Server) artifactForRelease(ctx context.Context, project domain.Project,
 // platform builder. Dockerfile and platform settings remain entirely inside
 // that internal service.
 func (s *Server) buildReleaseImage(ctx context.Context, project domain.Project, releaseID, commitSHA string) (imagebuild.Result, error) {
+	result, err, _ := s.buildReleaseImageWithLogs(ctx, project, releaseID, commitSHA, nil)
+	return result, err
+}
+
+func (s *Server) buildReleaseImageWithLogs(ctx context.Context, project domain.Project, releaseID, commitSHA string, onLog imagebuild.LogFunc) (imagebuild.Result, error, bool) {
 	if s == nil || s.deps.ImageBuilder == nil {
-		return imagebuild.Result{}, runtime.ErrImageBuildUnsupported
+		return imagebuild.Result{}, runtime.ErrImageBuildUnsupported, false
 	}
 	request, err := s.imageBuildRequest(ctx, project, release.Release{ID: releaseID}, commitSHA)
 	if err != nil {
-		return imagebuild.Result{}, err
+		return imagebuild.Result{}, err, false
 	}
-	return s.deps.ImageBuilder.Build(ctx, request)
+	if onLog != nil {
+		if streamer, ok := s.deps.ImageBuilder.(imagebuild.StreamingBuilder); ok {
+			result, err := streamer.BuildWithLogs(ctx, request, onLog)
+			return result, err, true
+		}
+	}
+	result, err := s.deps.ImageBuilder.Build(ctx, request)
+	return result, err, false
 }
 
 func firstReleaseCommit(item release.Release) string {
@@ -693,7 +1139,7 @@ func (s *Server) appendBuildLogs(releaseID, targetID string, logs []imagebuild.L
 		if level == "" {
 			level = "INFO"
 		}
-		s.appendReleaseLog(releaseID, targetID, "build", stream, level, entry.Line)
+		s.appendReleaseLog(releaseID, targetID, buildLogSource(entry.Line), stream, level, entry.Line)
 	}
 }
 
@@ -799,6 +1245,8 @@ func writeReleaseError(c *gin.Context, err error) {
 		status, code = http.StatusBadRequest, "invalid_manifest"
 	case errors.Is(err, git.ErrRepositoryNotFound), errors.Is(err, git.ErrBranchNotFound), errors.Is(err, git.ErrCommitNotFound):
 		status, code = http.StatusNotFound, "not_found"
+	case errors.Is(err, git.ErrWriteUnsupported):
+		status, code = http.StatusNotImplemented, "git_merge_unsupported"
 	case errors.Is(err, context.DeadlineExceeded):
 		status, code = http.StatusGatewayTimeout, "provider_timeout"
 	case errors.Is(err, runtime.ErrDeploymentRolloutTimeout):
@@ -807,6 +1255,9 @@ func writeReleaseError(c *gin.Context, err error) {
 		status, code = http.StatusBadGateway, "rollout_failed"
 	case errors.Is(err, runtime.ErrReleaseDeploymentUnsupported):
 		status, code = http.StatusNotImplemented, "deployment_unsupported"
+	case errors.Is(err, runtime.ErrReleaseTrafficUnsupported):
+		writeError(c, http.StatusNotImplemented, "traffic_unsupported", "当前运行环境尚未接入流量路由，无法调整发布流量")
+		return
 	case errors.Is(err, runtime.ErrImageBuildUnsupported):
 		status, code = http.StatusNotImplemented, "image_build_unsupported"
 	case errors.Is(err, runtime.ErrReleaseAccessDenied):
@@ -825,6 +1276,12 @@ func writeReleaseError(c *gin.Context, err error) {
 		status, code = http.StatusBadRequest, "invalid_request"
 	case errors.Is(err, release.ErrInvalidStatusFlow), errors.Is(err, release.ErrReleaseImmutable), errors.Is(err, release.ErrLastCommit), errors.Is(err, release.ErrTargetRetry):
 		status, code = http.StatusConflict, "conflict"
+	case errors.Is(err, release.ErrReleaseRemoved):
+		status, code = http.StatusConflict, "conflict"
+	case errors.Is(err, release.ErrFlowBaseBranch), errors.Is(err, release.ErrFlowConflict):
+		status, code = http.StatusConflict, "release_flow_conflict"
+	case errors.Is(err, release.ErrFlowNotFound):
+		status, code = http.StatusNotFound, "release_flow_not_found"
 	case errors.Is(err, release.ErrReleaseNotFound):
 		status, code = http.StatusNotFound, "not_found"
 	}

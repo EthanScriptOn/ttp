@@ -93,6 +93,218 @@ func TestPublishExecutesRuntimeDeployment(t *testing.T) {
 	}
 }
 
+func TestRollingReleaseTrafficUpdateReturnsClearConflict(t *testing.T) {
+	server := testServer()
+	handler := server.Router()
+	token := loginForTest(t, handler)
+
+	created := doRequest(t, handler, http.MethodPost, "/api/projects/reverse-lab/releases", token, `{"branch":"main","commit_shas":["a1b2c3d4e5f6"],"target_ids":["target-reverse-lab-dev"],"strategy":"rolling"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create release: expected 201, got %d: %s", created.Code, created.Body.String())
+	}
+	var body struct {
+		Release struct {
+			ID string `json:"id"`
+		} `json:"release"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+
+	response := doRequest(t, handler, http.MethodPatch, "/api/projects/reverse-lab/releases/"+body.Release.ID+"/targets/target-reverse-lab-dev/traffic", token, `{"stable_percent":90,"candidate_percent":10}`)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "当前发布单实际采用滚动发布，不支持调整流量") {
+		t.Fatalf("rolling traffic update: expected clear 409 conflict, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPublishTriggersConfiguredEnvironmentAutoMerge(t *testing.T) {
+	server := testServer()
+	handler := server.Router()
+	token := loginForTest(t, handler)
+	updated := doRequest(t, handler, http.MethodPatch, "/api/projects/reverse-lab", token, `{"auto_merge_enabled":true,"auto_merge_target_id":"target-reverse-lab-dev"}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("configure auto merge: expected 200, got %d: %s", updated.Code, updated.Body.String())
+	}
+	created := doRequest(t, handler, http.MethodPost, "/api/projects/reverse-lab/releases", token, `{"branch":"release/2026.01","commit_shas":["112233445566"],"target_ids":["target-reverse-lab-dev"],"strategy":"rolling"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create release: expected 201, got %d: %s", created.Code, created.Body.String())
+	}
+	var body struct {
+		Release struct {
+			ID string `json:"id"`
+		} `json:"release"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if response := doRequest(t, handler, http.MethodPost, "/api/projects/reverse-lab/releases/"+body.Release.ID+"/publish", token, ""); response.Code != http.StatusAccepted {
+		t.Fatalf("publish: expected 202, got %d: %s", response.Code, response.Body.String())
+	}
+	item := waitForSucceededRelease(t, server, body.Release.ID)
+	if len(item.Targets) != 1 || len(item.Targets[0].Logs) == 0 {
+		t.Fatalf("release did not retain execution logs: %#v", item.Targets)
+	}
+	found := false
+	for _, log := range item.Targets[0].Logs {
+		if strings.Contains(log.Line, "自动 merge 成功") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("auto merge success was not logged: %#v", item.Targets[0].Logs)
+	}
+}
+
+func TestReleaseFlowEndpointExposesCurrentReleaseAndParticipants(t *testing.T) {
+	server := testServer()
+	handler := server.Router()
+	token := loginForTest(t, handler)
+	for _, branch := range []string{"main", "release/2026.01"} {
+		created := doRequest(t, handler, http.MethodPost, "/api/projects/reverse-lab/releases", token, `{"branch":"`+branch+`","strategy":"rolling"}`)
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create %s release: expected 201, got %d: %s", branch, created.Code, created.Body.String())
+		}
+	}
+
+	response := doRequest(t, handler, http.MethodGet, "/api/projects/reverse-lab/release-flow", token, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("get release flow: expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Flow struct {
+			ID               string `json:"id"`
+			BaseBranch       string `json:"base_branch"`
+			CurrentReleaseID string `json:"current_release_id"`
+			Version          int    `json:"version"`
+			Participants     []struct {
+				Branch string `json:"branch"`
+				Active bool   `json:"active"`
+			} `json:"participants"`
+		} `json:"flow"`
+		CurrentRelease     release.Release   `json:"current_release"`
+		ParticipantRelease []release.Release `json:"participant_releases"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Flow.ID == "" || body.Flow.BaseBranch != "main" || body.Flow.Version != 2 || body.Flow.CurrentReleaseID == "" {
+		t.Fatalf("unexpected flow snapshot: %#v", body.Flow)
+	}
+	active := map[string]bool{}
+	for _, participant := range body.Flow.Participants {
+		active[participant.Branch] = participant.Active
+	}
+	if !active["main"] || !active["release/2026.01"] {
+		t.Fatalf("flow did not expose both active participants: %#v", active)
+	}
+	if body.CurrentRelease.ID != body.Flow.CurrentReleaseID || len(body.ParticipantRelease) != 2 {
+		t.Fatalf("flow release projections are incomplete: current=%s/%s participants=%d", body.CurrentRelease.ID, body.Flow.CurrentReleaseID, len(body.ParticipantRelease))
+	}
+}
+
+func TestRepublishRemovesBranchFromFlowAndKeepsImmutableHistory(t *testing.T) {
+	provider := &movingHeadProvider{Provider: git.NewDemoProvider()}
+	recorder := &recordingReleaseRuntime{DemoProvider: runtime.NewDemoProvider()}
+	server := testServerWithGitProvider(provider)
+	server.deps.Runtime = runtime.NewService(recorder)
+	handler := server.Router()
+	token := loginForTest(t, handler)
+
+	created := doRequest(t, handler, http.MethodPost, "/api/projects/reverse-lab/releases", token, `{"branch":"release/2026.01","strategy":"rolling"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create release: expected 201, got %d: %s", created.Code, created.Body.String())
+	}
+	var createdBody struct {
+		Release struct {
+			ID      string `json:"id"`
+			Commits []struct {
+				SHA string `json:"sha"`
+			} `json:"commits"`
+		} `json:"release"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(createdBody.Release.Commits) != 1 || createdBody.Release.Commits[0].SHA != "112233445566" {
+		t.Fatalf("created release did not capture the original branch head: %#v", createdBody.Release.Commits)
+	}
+	releasePath := "/api/projects/reverse-lab/releases/" + createdBody.Release.ID
+	published := doRequest(t, handler, http.MethodPost, releasePath+"/publish", token, "")
+	if published.Code != http.StatusAccepted {
+		t.Fatalf("publish: expected 202, got %d: %s", published.Code, published.Body.String())
+	}
+	waitForSucceededRelease(t, server, createdBody.Release.ID)
+
+	provider.moveHead()
+	removed := doRequest(t, handler, http.MethodDelete, releasePath, token, "")
+	if removed.Code != http.StatusConflict || !strings.Contains(removed.Body.String(), "已发布发布单不能直接移除") {
+		t.Fatalf("remove published release: expected 409 conflict, got %d: %s", removed.Code, removed.Body.String())
+	}
+
+	unchanged, err := server.deps.Release.Get(createdBody.Release.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Removed || unchanged.Status != release.StatusSucceeded {
+		t.Fatalf("direct removal changed the old release: %#v", unchanged)
+	}
+
+	republished := doRequest(t, handler, http.MethodPost, releasePath+"/republish", token, "")
+	if republished.Code != http.StatusAccepted {
+		t.Fatalf("republish: expected 202, got %d: %s", republished.Code, republished.Body.String())
+	}
+	var republishedBody struct {
+		Release struct {
+			ID      string `json:"id"`
+			Branch  string `json:"branch"`
+			Commits []struct {
+				SHA string `json:"sha"`
+			} `json:"commits"`
+		} `json:"release"`
+		ReplacingReleaseID string `json:"replacing_release_id"`
+		Replacing          bool   `json:"replacing"`
+	}
+	if err := json.Unmarshal(republished.Body.Bytes(), &republishedBody); err != nil {
+		t.Fatal(err)
+	}
+	if republishedBody.ReplacingReleaseID != createdBody.Release.ID || !republishedBody.Replacing {
+		t.Fatalf("republish response did not identify the replaced release: %s", republished.Body.String())
+	}
+	if republishedBody.Release.ID == "" || republishedBody.Release.ID == createdBody.Release.ID || republishedBody.Release.Branch != "main" {
+		t.Fatalf("republish did not create a new release: %#v", republishedBody.Release)
+	}
+	if len(republishedBody.Release.Commits) != 1 || republishedBody.Release.Commits[0].SHA != "a1b2c3d4e5f6" {
+		t.Fatalf("replacement did not use the flow base revision: %#v", republishedBody.Release.Commits)
+	}
+
+	replacement := waitForSucceededRelease(t, server, republishedBody.Release.ID)
+	if len(replacement.Commits) != 1 || replacement.Commits[0].SHA != "a1b2c3d4e5f6" {
+		t.Fatalf("replacement release did not retain the flow base revision: %#v", replacement.Commits)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		old, getErr := server.deps.Release.Get(createdBody.Release.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if old.ReplacedByReleaseID == republishedBody.Release.ID && old.ReplacementState == "replaced" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("old release was not marked as replaced after replacement succeeded: %#v", old)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if deployment, ok := recorder.latestDeployment(); !ok || deployment.CommitSHA != "a1b2c3d4e5f6" {
+		t.Fatalf("replacement deployment did not use the flow base revision: %#v", deployment)
+	}
+	listed := doRequest(t, handler, http.MethodGet, "/api/projects/reverse-lab/releases", token, "")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), createdBody.Release.ID) || !strings.Contains(listed.Body.String(), republishedBody.Release.ID) {
+		t.Fatalf("release list did not retain immutable history and replacement: %d %s", listed.Code, listed.Body.String())
+	}
+}
+
 func TestPublishBuildsOneArtifactForAllTargetsAndRebuildsOnRepublish(t *testing.T) {
 	recorder := &recordingReleaseRuntime{DemoProvider: runtime.NewDemoProvider()}
 	server := testServer()

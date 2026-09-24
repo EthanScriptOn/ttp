@@ -25,6 +25,7 @@ const (
 var (
 	appsDeploymentGVR = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 	appsDaemonSetGVR  = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
+	corePodsGVR       = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 )
 
 func (p *KubernetesProvider) CheckMonitoring(ctx context.Context, clusterID string) (MonitoringStatus, error) {
@@ -50,27 +51,33 @@ func (p *KubernetesProvider) CheckMonitoring(ctx context.Context, clusterID stri
 	status.Dependencies = dependencies
 	status.Available = true
 	status.Installed = true
+	status.State = "ready"
+	failed := make([]string, 0, len(dependencies))
+	missing := make([]string, 0, len(dependencies))
 	for _, dependency := range dependencies {
 		status.Available = status.Available && dependency.Available
 		status.Installed = status.Installed && dependency.Installed
+		if dependency.State == "failed" {
+			failed = append(failed, dependency.DisplayName)
+		}
+		if !dependency.Installed {
+			missing = append(missing, dependency.DisplayName)
+		}
 	}
 	status.HistoryAvailable = dependencies[0].Available
 
 	switch {
 	case status.Available:
 		status.Message = "Prometheus、node-exporter 和 kube-state-metrics 已接入"
-	case !dependencies[0].Installed:
-		status.Message = "未检测到 Prometheus，可由平台安装"
-	case !dependencies[0].Available:
-		status.Message = "Prometheus 已安装，但尚未就绪"
+	case len(failed) > 0:
+		status.State = "failed"
+		status.Message = fmt.Sprintf("监控组件安装异常：%s", strings.Join(failed, "、"))
+	case len(missing) > 0:
+		status.State = "missing"
+		status.Message = fmt.Sprintf("缺少监控组件：%s", strings.Join(missing, "、"))
 	default:
-		missing := make([]string, 0, len(dependencies))
-		for _, dependency := range dependencies {
-			if !dependency.Available {
-				missing = append(missing, dependency.DisplayName)
-			}
-		}
-		status.Message = fmt.Sprintf("监控依赖尚未就绪：%s", strings.Join(missing, "、"))
+		status.State = "installing"
+		status.Message = "监控组件正在安装并等待就绪"
 	}
 	return status, nil
 }
@@ -79,6 +86,7 @@ func monitoringDeploymentDependency(ctx context.Context, client dynamic.Interfac
 	dependency := MonitoringDependency{
 		Component:      name,
 		DisplayName:    displayName,
+		State:          "missing",
 		Installable:    true,
 		InstallVersion: version,
 		Message:        "未检测到，可由平台安装",
@@ -88,16 +96,40 @@ func monitoringDeploymentDependency(ctx context.Context, client dynamic.Interfac
 		return dependency
 	}
 	if err != nil {
+		dependency.State = "failed"
 		dependency.Message = "检测失败"
 		return dependency
 	}
 	dependency.Installed = true
+	dependency.State = "installing"
+	applyMonitoringImageProgress(&dependency, monitoringImageProgressFor(deployment, name))
 	available, _, _ := unstructured.NestedInt64(deployment.Object, "status", "availableReplicas")
-	if available > 0 {
+	unavailable, _, _ := unstructured.NestedInt64(deployment.Object, "status", "unavailableReplicas")
+	if available > 0 && unavailable == 0 {
 		dependency.Available = true
+		dependency.State = "ready"
+		dependency.RetryCount = 0
 		dependency.Message = "已接入"
 	} else {
-		dependency.Message = "已安装，但尚未就绪"
+		state, statusMessage, pullFailed := monitoringPodStatus(ctx, client, name)
+		dependency.State = state
+		dependency.Message = statusMessage
+		if pullFailed {
+			progress, retryMessage, retryErr := reconcileMonitoringImagePull(ctx, client, appsDeploymentGVR, name)
+			if retryErr != nil {
+				dependency.State = "failed"
+				dependency.Message = "切换国内镜像源失败：" + shortenMonitoringMessage(retryErr.Error())
+			} else {
+				applyMonitoringImageProgress(&dependency, progress)
+				if strings.Contains(retryMessage, "均拉取失败") {
+					dependency.State = "failed"
+					dependency.Message = retryMessage + "；" + dependency.Message
+				} else {
+					dependency.State = "installing"
+					dependency.Message = retryMessage
+				}
+			}
+		}
 	}
 	return dependency
 }
@@ -106,6 +138,7 @@ func monitoringDaemonSetDependency(ctx context.Context, client dynamic.Interface
 	dependency := MonitoringDependency{
 		Component:      name,
 		DisplayName:    displayName,
+		State:          "missing",
 		Installable:    true,
 		InstallVersion: version,
 		Message:        "未检测到，可由平台安装",
@@ -115,19 +148,123 @@ func monitoringDaemonSetDependency(ctx context.Context, client dynamic.Interface
 		return dependency
 	}
 	if err != nil {
+		dependency.State = "failed"
 		dependency.Message = "检测失败"
 		return dependency
 	}
 	dependency.Installed = true
+	dependency.State = "installing"
+	applyMonitoringImageProgress(&dependency, monitoringImageProgressFor(daemonSet, name))
 	desired, _, _ := unstructured.NestedInt64(daemonSet.Object, "status", "desiredNumberScheduled")
 	ready, _, _ := unstructured.NestedInt64(daemonSet.Object, "status", "numberReady")
 	if desired > 0 && ready >= desired {
 		dependency.Available = true
+		dependency.State = "ready"
+		dependency.RetryCount = 0
 		dependency.Message = "已接入"
 	} else {
-		dependency.Message = "已安装，但尚未就绪"
+		state, statusMessage, pullFailed := monitoringPodStatus(ctx, client, name)
+		dependency.State = state
+		dependency.Message = statusMessage
+		if pullFailed {
+			progress, retryMessage, retryErr := reconcileMonitoringImagePull(ctx, client, appsDaemonSetGVR, name)
+			if retryErr != nil {
+				dependency.State = "failed"
+				dependency.Message = "切换国内镜像源失败：" + shortenMonitoringMessage(retryErr.Error())
+			} else {
+				applyMonitoringImageProgress(&dependency, progress)
+				if strings.Contains(retryMessage, "均拉取失败") {
+					dependency.State = "failed"
+					dependency.Message = retryMessage + "；" + dependency.Message
+				} else {
+					dependency.State = "installing"
+					dependency.Message = retryMessage
+				}
+			}
+		}
 	}
 	return dependency
+}
+
+func monitoringPodStatus(ctx context.Context, client dynamic.Interface, component string) (string, string, bool) {
+	pods, err := client.Resource(corePodsGVR).Namespace(prometheusNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=" + component,
+	})
+	if err != nil || len(pods.Items) == 0 {
+		return "installing", "已安装，等待 Pod 创建", false
+	}
+	installingMessage := ""
+	for _, pod := range pods.Items {
+		if pod.GetDeletionTimestamp() != nil {
+			continue
+		}
+		conditions, _, _ := unstructured.NestedSlice(pod.Object, "status", "conditions")
+		for _, raw := range conditions {
+			condition, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			conditionType, _, _ := unstructured.NestedString(condition, "type")
+			conditionStatus, _, _ := unstructured.NestedString(condition, "status")
+			reason, _, _ := unstructured.NestedString(condition, "reason")
+			if conditionType == "PodScheduled" && conditionStatus == "False" && reason == "Unschedulable" {
+				detail, _, _ := unstructured.NestedString(condition, "message")
+				return "failed", "Pod 无法调度：" + shortenMonitoringMessage(detail), false
+			}
+		}
+		statuses, _, _ := unstructured.NestedSlice(pod.Object, "status", "containerStatuses")
+		for _, raw := range statuses {
+			status, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			waiting, _, _ := unstructured.NestedMap(status, "state", "waiting")
+			if reason, _, _ := unstructured.NestedString(waiting, "reason"); reason != "" {
+				pullFailed := reason == "ImagePullBackOff" || reason == "ErrImagePull"
+				state := monitoringWaitingState(reason)
+				message := fmt.Sprintf("Pod 启动异常：%s", reason)
+				if detail, _, _ := unstructured.NestedString(waiting, "message"); detail != "" {
+					message = fmt.Sprintf("Pod 启动异常：%s（%s）", reason, shortenMonitoringMessage(detail))
+				}
+				if state == "failed" {
+					return state, message, pullFailed
+				}
+				if installingMessage == "" {
+					installingMessage = message
+				}
+				continue
+			}
+			terminated, _, _ := unstructured.NestedMap(status, "state", "terminated")
+			if reason, _, _ := unstructured.NestedString(terminated, "reason"); reason != "" {
+				if detail, _, _ := unstructured.NestedString(terminated, "message"); detail != "" {
+					return "failed", fmt.Sprintf("Pod 已终止：%s（%s）", reason, shortenMonitoringMessage(detail)), false
+				}
+				return "failed", fmt.Sprintf("Pod 已终止：%s", reason), false
+			}
+		}
+	}
+	if installingMessage != "" {
+		return "installing", installingMessage, false
+	}
+	return "installing", "已安装，Pod 正在启动", false
+}
+
+func monitoringWaitingState(reason string) string {
+	switch reason {
+	case "ContainerCreating", "PodInitializing":
+		return "installing"
+	default:
+		return "failed"
+	}
+}
+
+func shortenMonitoringMessage(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	const maxLength = 240
+	if len([]rune(value)) <= maxLength {
+		return value
+	}
+	return string([]rune(value)[:maxLength]) + "…"
 }
 
 func (p *KubernetesProvider) InstallMonitoring(ctx context.Context, clusterID string) (MonitoringStatus, error) {
@@ -151,6 +288,7 @@ func (p *KubernetesProvider) InstallMonitoringWithRetention(ctx context.Context,
 		}
 	}
 	return MonitoringStatus{
+		State:          "installing",
 		Component:      prometheusName,
 		DisplayName:    "Prometheus",
 		Installable:    true,
@@ -159,9 +297,9 @@ func (p *KubernetesProvider) InstallMonitoringWithRetention(ctx context.Context,
 		Message:        "Prometheus 监控组件已提交安装，等待采集链路就绪",
 		RetentionDays:  retentionDays,
 		Dependencies: []MonitoringDependency{
-			{Component: prometheusName, DisplayName: "Prometheus", Installable: true, Installed: true, InstallVersion: prometheusVersion},
-			{Component: nodeExporterName, DisplayName: "node-exporter", Installable: true, Installed: true, InstallVersion: nodeExporterVersion},
-			{Component: kubeStateMetricsName, DisplayName: "kube-state-metrics", Installable: true, Installed: true, InstallVersion: kubeStateMetricsVersion},
+			installingMonitoringDependency(prometheusName, "Prometheus", prometheusVersion),
+			installingMonitoringDependency(nodeExporterName, "node-exporter", nodeExporterVersion),
+			installingMonitoringDependency(kubeStateMetricsName, "kube-state-metrics", kubeStateMetricsVersion),
 		},
 	}, nil
 }
@@ -362,17 +500,18 @@ scrape_configs:
 		}),
 		object(map[string]interface{}{
 			"apiVersion": "apps/v1", "kind": "Deployment",
-			"metadata": map[string]interface{}{"name": prometheusName, "namespace": prometheusNamespace, "labels": prometheusLabels},
+			"metadata": map[string]interface{}{"name": prometheusName, "namespace": prometheusNamespace, "labels": prometheusLabels, "annotations": monitoringImageAnnotations()},
 			"spec": map[string]interface{}{
 				"replicas": int64(1),
+				"strategy": map[string]interface{}{"type": "Recreate"},
 				"selector": map[string]interface{}{"matchLabels": map[string]interface{}{"app.kubernetes.io/name": prometheusName}},
 				"template": map[string]interface{}{
-					"metadata": map[string]interface{}{"labels": prometheusLabels},
+					"metadata": map[string]interface{}{"labels": prometheusLabels, "annotations": monitoringPodImageAnnotations(prometheusName)},
 					"spec": map[string]interface{}{
 						"serviceAccountName": prometheusName,
 						"containers": []interface{}{map[string]interface{}{
 							"name":           prometheusName,
-							"image":          "prom/prometheus:" + prometheusVersion,
+							"image":          primaryMonitoringImage(prometheusName),
 							"args":           []interface{}{"--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=" + fmt.Sprintf("%dd", retentionDays), "--web.enable-lifecycle"},
 							"ports":          []interface{}{map[string]interface{}{"name": "http", "containerPort": int64(9090)}},
 							"readinessProbe": map[string]interface{}{"httpGet": map[string]interface{}{"path": "/-/ready", "port": int64(9090)}, "initialDelaySeconds": int64(5), "periodSeconds": int64(10)},
@@ -415,17 +554,17 @@ scrape_configs:
 		}),
 		object(map[string]interface{}{
 			"apiVersion": "apps/v1", "kind": "Deployment",
-			"metadata": map[string]interface{}{"name": kubeStateMetricsName, "namespace": prometheusNamespace, "labels": kubeStateMetricsLabels},
+			"metadata": map[string]interface{}{"name": kubeStateMetricsName, "namespace": prometheusNamespace, "labels": kubeStateMetricsLabels, "annotations": monitoringImageAnnotations()},
 			"spec": map[string]interface{}{
 				"replicas": int64(1),
 				"selector": map[string]interface{}{"matchLabels": map[string]interface{}{"app.kubernetes.io/name": kubeStateMetricsName}},
 				"template": map[string]interface{}{
-					"metadata": map[string]interface{}{"labels": kubeStateMetricsLabels},
+					"metadata": map[string]interface{}{"labels": kubeStateMetricsLabels, "annotations": monitoringPodImageAnnotations(kubeStateMetricsName)},
 					"spec": map[string]interface{}{
 						"serviceAccountName": kubeStateMetricsName,
 						"containers": []interface{}{map[string]interface{}{
 							"name":           kubeStateMetricsName,
-							"image":          "registry.k8s.io/kube-state-metrics/kube-state-metrics:" + kubeStateMetricsVersion,
+							"image":          primaryMonitoringImage(kubeStateMetricsName),
 							"args":           []interface{}{"--port=8080"},
 							"ports":          []interface{}{map[string]interface{}{"name": "http", "containerPort": int64(8080)}},
 							"readinessProbe": map[string]interface{}{"httpGet": map[string]interface{}{"path": "/healthz", "port": int64(8080)}, "initialDelaySeconds": int64(5), "periodSeconds": int64(10)},
@@ -446,11 +585,11 @@ scrape_configs:
 		}),
 		object(map[string]interface{}{
 			"apiVersion": "apps/v1", "kind": "DaemonSet",
-			"metadata": map[string]interface{}{"name": nodeExporterName, "namespace": prometheusNamespace, "labels": nodeExporterLabels},
+			"metadata": map[string]interface{}{"name": nodeExporterName, "namespace": prometheusNamespace, "labels": nodeExporterLabels, "annotations": monitoringImageAnnotations()},
 			"spec": map[string]interface{}{
 				"selector": map[string]interface{}{"matchLabels": map[string]interface{}{"app.kubernetes.io/name": nodeExporterName}},
 				"template": map[string]interface{}{
-					"metadata": map[string]interface{}{"labels": nodeExporterLabels},
+					"metadata": map[string]interface{}{"labels": nodeExporterLabels, "annotations": monitoringPodImageAnnotations(nodeExporterName)},
 					"spec": map[string]interface{}{
 						"serviceAccountName": nodeExporterName,
 						"hostNetwork":        true,
@@ -458,7 +597,7 @@ scrape_configs:
 						"tolerations":        []interface{}{map[string]interface{}{"operator": "Exists"}},
 						"containers": []interface{}{map[string]interface{}{
 							"name":            nodeExporterName,
-							"image":           "quay.io/prometheus/node-exporter:" + nodeExporterVersion,
+							"image":           primaryMonitoringImage(nodeExporterName),
 							"args":            []interface{}{"--path.rootfs=/host/root", "--path.procfs=/host/proc", "--path.sysfs=/host/sys"},
 							"ports":           []interface{}{map[string]interface{}{"name": "metrics", "containerPort": int64(9100), "hostPort": int64(9100)}},
 							"securityContext": map[string]interface{}{"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "runAsNonRoot": true, "runAsUser": int64(65534), "capabilities": map[string]interface{}{"drop": []interface{}{"ALL"}}},

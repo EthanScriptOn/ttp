@@ -1,45 +1,62 @@
-import { CodeOutlined, EnvironmentOutlined, FileTextOutlined, SettingOutlined } from '@ant-design/icons'
-import { Alert, Button, Descriptions, Drawer, Input, Space, Spin, Tabs, Tag, message } from 'antd'
-import { useEffect, useState } from 'react'
-import { getPod, getPodLogs, updatePodConfig } from '../services/api'
+import { ReloadOutlined, SearchOutlined } from '@ant-design/icons'
+import { Alert, Button, Drawer, Input, Pagination, Select, Space, Spin, Tag } from 'antd'
+import { useEffect, useMemo, useState } from 'react'
+import { getPodLogs } from '../services/api'
 
 const emptyPod = {}
+const LOG_PAGE_SIZE = 50
 
-export default function PodDrawer({ project, pod: podValue, target, targetId = '', open, onClose, canEdit = true }) {
+function logLevel(line) {
+  if (/\b(error|fatal|panic|critical|crit)\b/i.test(line)) return 'ERROR'
+  if (/\b(warn|warning)\b/i.test(line)) return 'WARN'
+  if (/\b(info|notice)\b/i.test(line)) return 'INFO'
+  if (/\b(debug|trace)\b/i.test(line)) return 'DEBUG'
+  return 'OTHER'
+}
+
+function parseLogs(value) {
+  const lines = String(value || '').split(/\r?\n/)
+  if (lines[lines.length - 1] === '') lines.pop()
+  return lines.map((line, index) => ({ id: index + 1, line, level: logLevel(line) }))
+}
+
+export default function PodDrawer({ project, pod: podValue, targetId = '', open, onClose, onPodNotFound }) {
   const pod = podValue || emptyPod
-  const [detail, setDetail] = useState(null)
   const [logs, setLogs] = useState('')
-  const [configText, setConfigText] = useState('')
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
-  const [saving, setSaving] = useState(false)
+  const [keyword, setKeyword] = useState('')
+  const [level, setLevel] = useState('ALL')
+  const [page, setPage] = useState(1)
 
   useEffect(() => {
     if (!open || !pod) {
       setLoading(false)
       setLoadError('')
+      setLogs('')
       return
     }
     let active = true
     setLoading(true)
     setLoadError('')
+    setKeyword('')
+    setLevel('ALL')
+    setPage(1)
 
     const load = async () => {
       try {
-        const [nextDetail, nextLogs] = await Promise.all([
-          getPod(project.id, pod.name, targetId),
-          getPodLogs(project.id, pod.name, pod.container, targetId),
-        ])
+        const nextLogs = await getPodLogs(project.id, pod.name, pod.container, targetId, 0)
         if (!active) return
-        setDetail(nextDetail)
         setLogs(nextLogs || '')
-        setConfigText(JSON.stringify({ config: nextDetail?.config || {}, environment: nextDetail?.environment || {} }, null, 2))
       } catch (error) {
         if (!active) return
-        setDetail(null)
         setLogs('')
-        setConfigText('')
-        setLoadError(error?.message || 'Pod 详情和日志加载失败，请稍后重试')
+        if (error?.code === 'not_found') {
+          onPodNotFound?.()
+          setLoadError('Pod 已完成滚动更新，运行态列表正在刷新')
+        } else {
+          setLoadError(error?.message || 'Pod 详情和日志加载失败，请稍后重试')
+        }
       } finally {
         if (active) setLoading(false)
       }
@@ -49,34 +66,59 @@ export default function PodDrawer({ project, pod: podValue, target, targetId = '
     return () => { active = false }
   }, [open, pod, project, targetId])
 
-  const save = async () => {
-    let parsed
-    try {
-      parsed = JSON.parse(configText)
-    } catch {
-      message.error('配置 JSON 格式错误，请检查后重试')
-      return
-    }
+  const parsedLogs = useMemo(() => parseLogs(logs), [logs])
+  const filteredLogs = useMemo(() => {
+    const query = keyword.trim().toLowerCase()
+    return parsedLogs.filter((item) => {
+      if (level !== 'ALL' && item.level !== level) return false
+      return !query || item.line.toLowerCase().includes(query)
+    })
+  }, [keyword, level, parsedLogs])
+  const pageCount = Math.max(1, Math.ceil(filteredLogs.length / LOG_PAGE_SIZE))
+  const visibleLogs = filteredLogs.slice((page - 1) * LOG_PAGE_SIZE, page * LOG_PAGE_SIZE)
 
-    setSaving(true)
+  useEffect(() => {
+    setPage(1)
+  }, [keyword, level])
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount)
+  }, [page, pageCount])
+
+  const refreshLogs = async () => {
+    if (!project?.id || !pod?.name) return
+    setLoading(true)
+    setLoadError('')
     try {
-      const next = await updatePodConfig(project.id, pod.name, parsed, targetId)
-      setDetail((old) => ({ ...old, ...next }))
-      message.success('Pod 配置已保存')
+      const nextLogs = await getPodLogs(project.id, pod.name, pod.container, targetId, 0)
+      setLogs(nextLogs || '')
+      setPage(1)
     } catch (error) {
-      message.error(error?.message ? `Pod 配置保存失败：${error.message}` : 'Pod 配置保存失败，请稍后重试')
+      if (error?.code === 'not_found') {
+        onPodNotFound?.()
+        setLoadError('Pod 已完成滚动更新，运行态列表正在刷新')
+      } else {
+        setLoadError(error?.message || 'Pod 日志加载失败，请稍后重试')
+      }
     } finally {
-      setSaving(false)
+      setLoading(false)
     }
   }
 
-  const targetContext = target ? `${target.name} · ${target.cluster_id} / ${target.namespace}` : `${detail?.cluster_id || pod?.cluster_id || '当前集群'} / ${detail?.namespace || pod?.namespace || '当前 namespace'}`
-
   return <Drawer title={<div className="pod-drawer-title"><span>{pod?.name}</span><Tag color="green">运行中</Tag></div>} width={700} open={open} onClose={onClose} destroyOnHidden>
-    {loading ? <div className="drawer-loading"><Spin /></div> : loadError ? <Alert type="error" showIcon message="Pod 信息加载失败" description={loadError} /> : !detail ? <Alert type="warning" message="暂时拿不到 Pod 详情" /> : <Tabs defaultActiveKey="overview" items={[
-      { key: 'overview', label: <span><CodeOutlined /> 概览</span>, children: <><div className="pod-drawer-context"><EnvironmentOutlined /> {targetContext}</div><Descriptions column={1} bordered size="small"><Descriptions.Item label="命名空间">{detail.namespace}</Descriptions.Item><Descriptions.Item label="Pod IP">{detail.pod_ip || '-'}</Descriptions.Item><Descriptions.Item label="所在节点">{detail.node_name || '-'}</Descriptions.Item><Descriptions.Item label="容器">{Object.keys(detail.containers || {}).join(', ') || pod.container}</Descriptions.Item><Descriptions.Item label="镜像">{Object.values(detail.containers || {})[0]?.image || '-'}</Descriptions.Item></Descriptions></> },
-      { key: 'logs', label: <span><FileTextOutlined /> 日志</span>, children: <pre className="pod-logs">{logs || '暂无日志'}</pre> },
-      { key: 'config', label: <span><SettingOutlined /> 配置</span>, children: <><Alert className="config-alert" type={canEdit ? 'info' : 'warning'} showIcon message={canEdit ? '修改后会写入运行态配置；容器是否需要重启由部署策略决定。' : '当前角色只能查看 Pod 配置，不能修改运行态参数。'} /><Input.TextArea value={configText} readOnly={!canEdit} onChange={(event) => setConfigText(event.target.value)} autoSize={{ minRows: 14, maxRows: 24 }} className="config-editor" /><Space className="config-actions">{canEdit && <Button type="primary" loading={saving} onClick={save}>保存配置</Button>}<Button disabled={!canEdit} onClick={() => setConfigText(JSON.stringify({ config: detail.config || {}, environment: detail.environment || {} }, null, 2))}>恢复</Button></Space></> },
-    ]} />}
+    {loading && !logs ? <div className="drawer-loading"><Spin /></div> : loadError ? <Alert type="error" showIcon message="Pod 日志加载失败" description={loadError} /> : <section className="pod-log-viewer">
+      <div className="pod-log-toolbar">
+        <Space.Compact className="pod-log-filters">
+          <Input allowClear prefix={<SearchOutlined />} placeholder="查询日志内容" value={keyword} onChange={(event) => setKeyword(event.target.value)} />
+          <Select value={level} onChange={setLevel} options={[{ value: 'ALL', label: '全部级别' }, { value: 'ERROR', label: 'ERROR' }, { value: 'WARN', label: 'WARN' }, { value: 'INFO', label: 'INFO' }, { value: 'DEBUG', label: 'DEBUG' }, { value: 'OTHER', label: '其他' }]} />
+        </Space.Compact>
+        <Button icon={<ReloadOutlined />} loading={loading} onClick={refreshLogs}>刷新</Button>
+        <span className="pod-log-count">{filteredLogs.length} / {parsedLogs.length} 行</span>
+      </div>
+      <div className="pod-logs" role="log" aria-label="Pod 日志">
+        {visibleLogs.length ? visibleLogs.map((item) => <div className={`pod-log-line ${item.level.toLowerCase()}`} key={item.id}><span>{item.id}</span><code>{item.line || ' '}</code></div>) : <div className="pod-log-empty">{parsedLogs.length ? '没有匹配的日志' : '暂无日志'}</div>}
+      </div>
+      {filteredLogs.length > 0 && <div className="pod-log-pagination"><Pagination current={page} pageSize={LOG_PAGE_SIZE} total={filteredLogs.length} showSizeChanger={false} showQuickJumper size="small" onChange={setPage} /></div>}
+    </section>}
   </Drawer>
 }

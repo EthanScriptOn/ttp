@@ -109,6 +109,10 @@ export TTP_BUILDER_IMAGE_REPOSITORY_PREFIX='registry.example.com/ttp'
 export TTP_BUILDER_REGISTRY_CREDENTIAL_REF='platform-registry'
 export TTP_BUILDER_WORKDIR="$HOME/.local/share/ttp-builder/work"
 
+# Optional. Scope a ClashMac/Clash-compatible proxy to the TTP process tree.
+# Local TTP services (127.0.0.1/localhost) bypass it automatically.
+export TTP_PROXY_URL='http://127.0.0.1:17890'
+
 # Optional. Keep false when buildkitd is supervised separately.
 export TTP_BUILDER_START_BUILDKIT=false
 
@@ -122,6 +126,12 @@ address, and uses `TTP_BUILDER_TOKEN` for the API-to-worker call.
 another machine, leave
 `TTP_BUILDER_ENABLED` disabled and configure an HTTPS
 `CICD_IMAGE_BUILDER_URL` directly.
+
+`TTP_PROXY_URL` is optional and only affects the backend, builder, and their
+child processes started by `scripts/start-local.sh`; it does not change the
+macOS system proxy or other applications. Use the local mixed-port exposed by
+the selected Clash-compatible client. GitHub and registry traffic can then use
+the proxy while local TTP endpoints remain direct.
 
 To let the script own a local daemon as well, set
 `TTP_BUILDER_START_BUILDKIT=true`. It then starts `buildkitd` as a third

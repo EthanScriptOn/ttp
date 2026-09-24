@@ -107,7 +107,7 @@ var projectPermissionCatalog = []Permission{
 	{Key: ProjectDeploymentManage, Name: "管理部署配置", Description: "管理发布环境和 Kubernetes 资源文件"},
 	{Key: ProjectReleaseRead, Name: "查看发布", Description: "查看发布记录、详情和日志"},
 	{Key: ProjectReleaseCreate, Name: "创建发布", Description: "创建发布草稿和发布准备单"},
-	{Key: ProjectReleaseUpdate, Name: "修改发布草稿", Description: "修改或删除发布草稿中的内容"},
+	{Key: ProjectReleaseUpdate, Name: "管理发布单", Description: "修改发布草稿或从列表移除发布单"},
 	{Key: ProjectReleasePublish, Name: "执行发布", Description: "执行、取消、重试发布和管理 A/B 实验"},
 	{Key: ProjectRuntimeRead, Name: "查看运行态", Description: "查看 Pod、日志和监控指标"},
 	{Key: ProjectRuntimeConfig, Name: "修改运行配置", Description: "修改 Pod 运行时配置"},

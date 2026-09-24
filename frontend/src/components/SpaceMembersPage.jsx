@@ -86,7 +86,7 @@ const PROJECT_PERMISSION_LABELS = {
   'project:deployment:manage': '管理部署配置',
   'project:release:read': '查看发布',
   'project:release:create': '创建发布',
-  'project:release:update': '修改发布草稿',
+  'project:release:update': '管理发布单',
   'project:release:publish': '执行发布',
   'project:runtime:read': '查看运行态',
   'project:runtime:config': '修改运行配置',
@@ -788,7 +788,6 @@ export default function SpaceMembersPage({ role, user }) {
       <div className="page-heading members-rbac-heading">
         <div>
           <Typography.Title level={2}>成员与权限</Typography.Title>
-          <Typography.Paragraph type="secondary">管理空间成员、角色定义，以及成员对具体项目的访问授权。</Typography.Paragraph>
         </div>
       </div>
 

@@ -53,6 +53,7 @@ type Memory struct {
 	namespaceQuotas     map[string]namespaceQuotaConfig
 	deploymentConfigs   map[string]domain.DeploymentConfig
 	deploymentResources map[string]domain.DeploymentResourceFile
+	deploymentOverrides map[string]domain.DeploymentResourceOverride
 	abExperiments       map[string]domain.ABExperiment
 	auditLogs           []domain.AuditLog
 	nextAuditID         uint64
@@ -75,6 +76,7 @@ func NewMemory() *Memory {
 		namespaceQuotas:     make(map[string]namespaceQuotaConfig),
 		deploymentConfigs:   make(map[string]domain.DeploymentConfig),
 		deploymentResources: make(map[string]domain.DeploymentResourceFile),
+		deploymentOverrides: make(map[string]domain.DeploymentResourceOverride),
 		abExperiments:       make(map[string]domain.ABExperiment),
 	}
 }
@@ -124,6 +126,7 @@ func NewMemoryWithFixtures() *Memory {
 		},
 		deploymentConfigs:   make(map[string]domain.DeploymentConfig),
 		deploymentResources: make(map[string]domain.DeploymentResourceFile),
+		deploymentOverrides: make(map[string]domain.DeploymentResourceOverride),
 		abExperiments:       make(map[string]domain.ABExperiment),
 	}
 }
@@ -463,6 +466,12 @@ func (m *Memory) UpdateProject(ctx context.Context, spaceID, projectID string, i
 	}
 	if input.DefaultBranch != nil {
 		project.DefaultBranch = strings.TrimSpace(*input.DefaultBranch)
+	}
+	if input.AutoMergeEnabled != nil {
+		project.AutoMergeEnabled = *input.AutoMergeEnabled
+	}
+	if input.AutoMergeTargetID != nil {
+		project.AutoMergeTargetID = strings.TrimSpace(*input.AutoMergeTargetID)
 	}
 	if input.ClusterID != nil {
 		clusterID := normalizeClusterID(spaceID, *input.ClusterID)
@@ -854,6 +863,11 @@ func (m *Memory) DeleteDeploymentTarget(ctx context.Context, spaceID, projectID,
 		return fmt.Errorf("%w: 项目必须保留 DEV 环境", ErrConflict)
 	}
 	delete(m.deploymentTargets, targetID)
+	for id, override := range m.deploymentOverrides {
+		if override.ProjectID == projectID && override.TargetID == targetID {
+			delete(m.deploymentOverrides, id)
+		}
+	}
 	return nil
 }
 
@@ -1076,7 +1090,170 @@ func (m *Memory) DeleteDeploymentResourceFile(ctx context.Context, spaceID, proj
 		return ErrNotFound
 	}
 	delete(m.deploymentResources, resourceID)
+	for id, override := range m.deploymentOverrides {
+		if override.ProjectID == projectID && override.GlobalResourceID == resourceID {
+			delete(m.deploymentOverrides, id)
+		}
+	}
 	return nil
+}
+
+func (m *Memory) ListDeploymentResourceOverrides(ctx context.Context, spaceID, projectID, targetID string) ([]domain.DeploymentResourceOverride, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	project, projectOK := m.projects[projectID]
+	target, targetOK := m.deploymentTargets[targetID]
+	if !projectOK || project.SpaceID != spaceID || !targetOK || target.SpaceID != spaceID || target.ProjectID != projectID {
+		return nil, ErrNotFound
+	}
+	result := make([]domain.DeploymentResourceOverride, 0)
+	for _, override := range m.deploymentOverrides {
+		if override.ProjectID == projectID && override.TargetID == targetID {
+			result = append(result, override)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].SortOrder == result[j].SortOrder {
+			return result[i].Path < result[j].Path
+		}
+		return result[i].SortOrder < result[j].SortOrder
+	})
+	return result, nil
+}
+
+func (m *Memory) CreateDeploymentResourceOverride(ctx context.Context, spaceID, projectID, targetID string, input SaveDeploymentResourceOverrideInput) (domain.DeploymentResourceOverride, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	if err := validateResourceOverrideInput(input); err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	project, projectOK := m.projects[projectID]
+	target, targetOK := m.deploymentTargets[targetID]
+	if !projectOK || project.SpaceID != spaceID || !targetOK || target.SpaceID != spaceID || target.ProjectID != projectID {
+		return domain.DeploymentResourceOverride{}, ErrNotFound
+	}
+	if input.GlobalResourceID != "" {
+		global, ok := m.deploymentResources[input.GlobalResourceID]
+		if !ok || global.ProjectID != projectID {
+			return domain.DeploymentResourceOverride{}, ErrNotFound
+		}
+	} else {
+		for _, global := range m.deploymentResources {
+			if global.ProjectID == projectID && (global.Path == strings.TrimSpace(input.Path) || global.Name == strings.TrimSpace(input.Name)) {
+				return domain.DeploymentResourceOverride{}, ErrConflict
+			}
+		}
+	}
+	count := 0
+	for _, override := range m.deploymentOverrides {
+		if override.ProjectID != projectID || override.TargetID != targetID {
+			continue
+		}
+		count++
+		if override.Path == strings.TrimSpace(input.Path) || override.Name == strings.TrimSpace(input.Name) || (input.GlobalResourceID != "" && override.GlobalResourceID == input.GlobalResourceID) {
+			return domain.DeploymentResourceOverride{}, ErrConflict
+		}
+	}
+	if count >= 100 {
+		return domain.DeploymentResourceOverride{}, fmt.Errorf("%w: no more than 100 environment resource files are allowed", ErrInvalidInput)
+	}
+	id := strings.TrimSpace(input.ID)
+	if id == "" {
+		id = "override-" + uuid.NewString()[:8]
+	}
+	now := time.Now().UTC()
+	override := domain.DeploymentResourceOverride{
+		ID: id, ProjectID: projectID, TargetID: targetID, GlobalResourceID: strings.TrimSpace(input.GlobalResourceID),
+		Name: strings.TrimSpace(input.Name), Path: strings.TrimSpace(input.Path), Format: strings.ToLower(strings.TrimSpace(input.Format)),
+		Content: input.Content, APIVersion: input.APIVersion, Kind: input.Kind, ResourceName: input.ResourceName,
+		Namespace: input.Namespace, SortOrder: input.SortOrder, Version: 1, ReleaseSupported: input.ReleaseSupported,
+		BaseGlobalVersion: input.BaseGlobalVersion, BaseGlobalContent: input.BaseGlobalContent, UpdatedAt: now,
+	}
+	m.deploymentOverrides[id] = override
+	return override, nil
+}
+
+func (m *Memory) UpdateDeploymentResourceOverride(ctx context.Context, spaceID, projectID, targetID, overrideID string, input SaveDeploymentResourceOverrideInput) (domain.DeploymentResourceOverride, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	if err := validateResourceOverrideInput(input); err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.deploymentOverrides[overrideID]
+	if !ok || current.ProjectID != projectID || current.TargetID != targetID {
+		return domain.DeploymentResourceOverride{}, ErrNotFound
+	}
+	project, projectOK := m.projects[projectID]
+	target, targetOK := m.deploymentTargets[targetID]
+	if !projectOK || project.SpaceID != spaceID || !targetOK || target.SpaceID != spaceID || target.ProjectID != projectID {
+		return domain.DeploymentResourceOverride{}, ErrNotFound
+	}
+	if strings.TrimSpace(input.GlobalResourceID) != current.GlobalResourceID {
+		return domain.DeploymentResourceOverride{}, ErrConflict
+	}
+	if current.GlobalResourceID == "" {
+		for _, global := range m.deploymentResources {
+			if global.ProjectID == projectID && (global.Path == strings.TrimSpace(input.Path) || global.Name == strings.TrimSpace(input.Name)) {
+				return domain.DeploymentResourceOverride{}, ErrConflict
+			}
+		}
+	}
+	for id, override := range m.deploymentOverrides {
+		if id != overrideID && override.ProjectID == projectID && override.TargetID == targetID && (override.Path == strings.TrimSpace(input.Path) || override.Name == strings.TrimSpace(input.Name)) {
+			return domain.DeploymentResourceOverride{}, ErrConflict
+		}
+	}
+	current.Name = strings.TrimSpace(input.Name)
+	current.Path = strings.TrimSpace(input.Path)
+	current.Format = strings.ToLower(strings.TrimSpace(input.Format))
+	current.Content = input.Content
+	current.APIVersion = input.APIVersion
+	current.Kind = input.Kind
+	current.ResourceName = input.ResourceName
+	current.Namespace = input.Namespace
+	current.SortOrder = input.SortOrder
+	current.ReleaseSupported = input.ReleaseSupported
+	if input.BaseGlobalVersion > 0 && current.GlobalResourceID != "" {
+		current.BaseGlobalVersion = input.BaseGlobalVersion
+		current.BaseGlobalContent = input.BaseGlobalContent
+	}
+	current.Version++
+	current.UpdatedAt = time.Now().UTC()
+	m.deploymentOverrides[overrideID] = current
+	return current, nil
+}
+
+func (m *Memory) DeleteDeploymentResourceOverride(ctx context.Context, spaceID, projectID, targetID, overrideID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	project, projectOK := m.projects[projectID]
+	target, targetOK := m.deploymentTargets[targetID]
+	override, overrideOK := m.deploymentOverrides[overrideID]
+	if !projectOK || project.SpaceID != spaceID || !targetOK || target.SpaceID != spaceID || target.ProjectID != projectID || !overrideOK || override.ProjectID != projectID || override.TargetID != targetID {
+		return ErrNotFound
+	}
+	delete(m.deploymentOverrides, overrideID)
+	return nil
+}
+
+func validateResourceOverrideInput(input SaveDeploymentResourceOverrideInput) error {
+	return validateResourceFileInput(SaveDeploymentResourceFileInput{
+		Name: input.Name, Path: input.Path, Format: input.Format, Content: input.Content, SortOrder: input.SortOrder,
+		APIVersion: input.APIVersion, Kind: input.Kind, ResourceName: input.ResourceName,
+		Namespace: input.Namespace, ReleaseSupported: input.ReleaseSupported,
+	})
 }
 
 func validateResourceFileInput(input SaveDeploymentResourceFileInput) error {

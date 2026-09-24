@@ -111,7 +111,6 @@ export default function ClusterOverview({ onOpenMonitor, canManageClusters = tru
       </Space>}
       variant="borderless"
     >
-      <Typography.Paragraph type="secondary" className="infrastructure-connection-description">注册目标集群并验证 TTP 后端的访问权限。</Typography.Paragraph>
       {error && <Alert className="infrastructure-section-alert" type="warning" showIcon message={error} />}
       {!loading && !clusters.length && <Card className="infrastructure-empty-card" variant="borderless"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前空间还没有 Kubernetes 集群连接">{canManageClusters && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>添加第一个连接</Button>}</Empty></Card>}
       {clusters.length > 0 && <div className="infrastructure-connection-list">

@@ -7,6 +7,6 @@ export default defineConfig({
   build: { chunkSizeWarningLimit: 1200 },
   server: {
     port: 5173,
-    proxy: { '/api': process.env.CICD_BACKEND_URL || 'http://127.0.0.1:8790' },
+    proxy: { '/api': { target: process.env.CICD_BACKEND_URL || 'http://127.0.0.1:8790', ws: true } },
   },
 })

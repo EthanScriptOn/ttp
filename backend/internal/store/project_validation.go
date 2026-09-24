@@ -167,6 +167,12 @@ func validateProjectUpdateInput(input UpdateProjectInput) error {
 	if input.DefaultBranch != nil && !validGitBranch(strings.TrimSpace(*input.DefaultBranch)) {
 		return fmt.Errorf("%w: default branch is invalid", ErrInvalidInput)
 	}
+	if input.AutoMergeTargetID != nil {
+		value := strings.TrimSpace(*input.AutoMergeTargetID)
+		if len(value) > 64 || hasControl(value) {
+			return fmt.Errorf("%w: auto merge target id is invalid", ErrInvalidInput)
+		}
+	}
 	if input.ClusterID != nil {
 		clusterID := strings.TrimSpace(*input.ClusterID)
 		if clusterID == "" || len(clusterID) > maxProjectClusterIDLength || hasControl(clusterID) {

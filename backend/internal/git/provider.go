@@ -15,6 +15,20 @@ var (
 	ErrWriteUnsupported      = errors.New("git write operations are not supported")
 )
 
+// BranchMergeResult is the provider-neutral outcome of merging a release
+// branch into the project's default branch. Providers may report an empty
+// commit SHA when the target was already up to date.
+type BranchMergeResult struct {
+	CommitSHA string `json:"commit_sha,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+// BranchMerger is optional so read-only/custom providers remain source
+// compatible. The production GitHub/GitLab providers implement it.
+type BranchMerger interface {
+	MergeBranch(ctx context.Context, repositoryID, sourceBranch, targetBranch string) (BranchMergeResult, error)
+}
+
 // Repository is the provider-neutral identity of a Git repository.
 type Repository struct {
 	ID            string `json:"id"`

@@ -266,6 +266,38 @@ func TestHTTPProviderRejectsUnsafeHostsAndRedirects(t *testing.T) {
 	}
 }
 
+func TestGitHubProviderMergeBranch(t *testing.T) {
+	const token = "merge-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/api/v3/repos/acme/widget/merges" {
+			t.Fatalf("unexpected merge request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			t.Fatalf("authorization header = %q", r.Header.Get("Authorization"))
+		}
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode merge payload: %v", err)
+		}
+		if payload["head"] != "feature/login" || payload["base"] != "main" {
+			t.Fatalf("unexpected merge payload: %#v", payload)
+		}
+		writeTestJSON(t, w, map[string]string{"sha": "merged-sha", "message": "merged"})
+	}))
+	defer server.Close()
+	provider, err := NewGitHubProvider(server.URL+"/acme/widget.git", token, WithAPIBaseURL(server.URL+"/api/v3"), WithAllowedHosts(server.Listener.Addr().String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := provider.MergeBranch(context.Background(), server.URL+"/acme/widget", "feature/login", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CommitSHA != "merged-sha" || result.Message != "merged" {
+		t.Fatalf("unexpected merge result: %#v", result)
+	}
+}
+
 func TestHTTPProviderMapsStatusAndTimeoutWithoutResponseBody(t *testing.T) {
 	const secret = "body-secret"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

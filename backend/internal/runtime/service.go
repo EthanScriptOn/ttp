@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -92,6 +93,21 @@ func (s *Service) ExecPodCommand(ctx context.Context, request PodExecRequest) (P
 	return executor.ExecPodCommand(ctx, request)
 }
 
+// StreamPodTerminal attaches an interactive PTY when the configured runtime
+// supports it. The service deliberately exposes streams rather than a
+// transport-specific websocket so API handlers can enforce their own session
+// protocol and lifecycle.
+func (s *Service) StreamPodTerminal(ctx context.Context, request PodTerminalRequest, stdin io.Reader, stdout, stderr io.Writer, sizes <-chan TerminalSize) error {
+	if s == nil || s.provider == nil {
+		return ErrPodExecUnsupported
+	}
+	streamer, ok := s.provider.(PodTerminalStream)
+	if !ok {
+		return ErrPodExecUnsupported
+	}
+	return streamer.StreamPodTerminal(ctx, request, stdin, stdout, stderr, sizes)
+}
+
 // DeployRelease delegates a release deployment to the runtime provider. A
 // provider that can only observe a cluster must fail explicitly; silently
 // treating a skipped write as a successful release is unsafe.
@@ -106,6 +122,20 @@ func (s *Service) DeployRelease(ctx context.Context, deployment ReleaseDeploymen
 	return deployer.DeployRelease(ctx, deployment)
 }
 
+// UpdateReleaseTraffic delegates a live rollout traffic change to a provider.
+// Providers without a traffic router fail explicitly instead of reporting a
+// successful adjustment that never reached the cluster.
+func (s *Service) UpdateReleaseTraffic(ctx context.Context, update ReleaseTrafficUpdate) error {
+	if s == nil || s.provider == nil {
+		return ErrReleaseTrafficUnsupported
+	}
+	updater, ok := s.provider.(ReleaseTrafficUpdater)
+	if !ok {
+		return ErrReleaseTrafficUnsupported
+	}
+	return updater.UpdateReleaseTraffic(ctx, update)
+}
+
 func (s *Service) CheckReleaseAccess(ctx context.Context, clusterID, namespace string) error {
 	if s == nil || s.provider == nil {
 		return ErrProviderNotConfigured
@@ -118,6 +148,19 @@ func (s *Service) CheckReleaseAccess(ctx context.Context, clusterID, namespace s
 		return nil
 	}
 	return checker.CheckReleaseAccess(ctx, clusterID, namespace)
+}
+
+// TestRegistryPull verifies the node-side image pull path. This is distinct
+// from checking the control plane's own HTTP access to the Registry API.
+func (s *Service) TestRegistryPull(ctx context.Context, clusterID string, request RegistryPullTestRequest) (RegistryPullTestResult, error) {
+	if s == nil || s.provider == nil {
+		return RegistryPullTestResult{}, ErrProviderNotConfigured
+	}
+	tester, ok := s.provider.(RegistryPullTester)
+	if !ok {
+		return RegistryPullTestResult{}, ErrRegistryPullTestUnsupported
+	}
+	return tester.TestRegistryPull(ctx, clusterID, request)
 }
 
 // EnsureNamespace delegates generated namespace creation/ownership checks to a

@@ -321,6 +321,9 @@ func applyDemoRelease(detail PodDetail, deployment ReleaseDeployment, now time.T
 	detail.Pod.Labels[ProjectLabelKey] = deployment.ProjectID
 	detail.Pod.Labels["app"] = deployment.ProjectID
 	detail.Pod.Labels["release"] = deployment.ReleaseID
+	if deployment.TargetID != "" {
+		detail.Pod.Labels["target"] = deployment.TargetID
+	}
 	detail.Pod.Labels["version"] = shortDemoSHA(deployment.CommitSHA)
 	detail.Pod.Labels["branch"] = deployment.Branch
 	detail.Pod.Phase = PodRunning
@@ -351,6 +354,60 @@ func applyDemoRelease(detail PodDetail, deployment ReleaseDeployment, now time.T
 		detail.Containers[name] = container
 	}
 	return detail
+}
+
+// UpdateReleaseTraffic updates the demo runtime metadata for the selected
+// release target. The demo provider has no external router, so the split is
+// exposed through the same CICD_* values that the release injects into Pods.
+func (p *DemoProvider) UpdateReleaseTraffic(ctx context.Context, update ReleaseTrafficUpdate) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if update.Strategy == "rolling" {
+		return fmt.Errorf("%w: rolling releases do not have an adjustable traffic split", ErrInvalidRuntimeInput)
+	}
+	if update.StablePercent < 0 || update.CandidatePercent < 0 || update.BluePercent < 0 || update.GreenPercent < 0 {
+		return fmt.Errorf("%w: traffic percentages must be non-negative", ErrInvalidRuntimeInput)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.requireCluster(update.ClusterID); err != nil {
+		return err
+	}
+	for key, item := range p.pods {
+		labels := item.detail.Labels
+		if item.detail.ClusterID != update.ClusterID ||
+			item.detail.Namespace != update.Namespace ||
+			item.detail.ProjectID != update.ProjectID ||
+			labels["release"] != update.ReleaseID ||
+			(update.TargetID != "" && labels["target"] != "" && labels["target"] != update.TargetID) {
+			continue
+		}
+		if item.detail.Environment == nil {
+			item.detail.Environment = make(map[string]string)
+		}
+		if item.detail.Config == nil {
+			item.detail.Config = make(map[string]string)
+		}
+		values := map[string]string{
+			"CICD_STABLE_PERCENT":    fmt.Sprint(update.StablePercent),
+			"CICD_CANDIDATE_PERCENT": fmt.Sprint(update.CandidatePercent),
+			"CICD_BLUE_PERCENT":      fmt.Sprint(update.BluePercent),
+			"CICD_GREEN_PERCENT":     fmt.Sprint(update.GreenPercent),
+		}
+		for name, value := range values {
+			item.detail.Environment[name] = value
+			item.detail.Config[name] = value
+		}
+		item.detail.Pod.Labels["traffic_percent"] = fmt.Sprint(func() int {
+			if update.Strategy == "blue_green" {
+				return update.GreenPercent
+			}
+			return update.CandidatePercent
+		}())
+		p.pods[key] = item
+	}
+	return nil
 }
 
 func demoReleasePodName(projectID, sha string, ordinal int) string {

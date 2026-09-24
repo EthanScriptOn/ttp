@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -15,6 +16,7 @@ type GitLabProvider struct {
 }
 
 var _ Provider = (*GitLabProvider)(nil)
+var _ BranchMerger = (*GitLabProvider)(nil)
 
 // GitLabHTTPProvider is kept as an explicit alias for callers that want the
 // transport-backed nature of the implementation to be visible at call sites.
@@ -246,6 +248,49 @@ func (p *GitLabProvider) GetCommit(ctx context.Context, repositoryID, sha string
 		return Commit{}, fmt.Errorf("get GitLab commit: %w", ErrProviderResponse)
 	}
 	return commit, nil
+}
+
+// MergeBranch creates and immediately merges a GitLab merge request. The
+// merge endpoint honours protected-branch policy and reports a provider error
+// when the configured bot is not allowed to merge.
+func (p *GitLabProvider) MergeBranch(ctx context.Context, repositoryID, sourceBranch, targetBranch string) (BranchMergeResult, error) {
+	if err := p.ensure(); err != nil {
+		return BranchMergeResult{}, err
+	}
+	if err := p.remote.checkRepository(repositoryID); err != nil {
+		return BranchMergeResult{}, err
+	}
+	sourceBranch, targetBranch = strings.TrimSpace(sourceBranch), strings.TrimSpace(targetBranch)
+	if sourceBranch == "" || targetBranch == "" {
+		return BranchMergeResult{}, ErrBranchNotFound
+	}
+	var request struct {
+		IID int `json:"iid"`
+	}
+	_, err := p.remote.sendJSON(ctx, "create GitLab merge request", http.MethodPost, p.remote.apiURL("projects", p.remote.repository.projectPath, "merge_requests"), map[string]string{
+		"source_branch": sourceBranch, "target_branch": targetBranch, "title": fmt.Sprintf("Merge %s into %s", sourceBranch, targetBranch),
+	}, &request)
+	if err != nil {
+		return BranchMergeResult{}, err
+	}
+	if request.IID <= 0 {
+		return BranchMergeResult{}, fmt.Errorf("create GitLab merge request: %w", ErrProviderResponse)
+	}
+	var result struct {
+		SHA     string `json:"merge_commit_sha"`
+		Message string `json:"message"`
+	}
+	_, err = p.remote.sendJSON(ctx, "merge GitLab merge request", http.MethodPut, p.remote.apiURL("projects", p.remote.repository.projectPath, "merge_requests", fmt.Sprint(request.IID), "merge"), map[string]any{
+		"merge_when_pipeline_succeeds": false,
+	}, &result)
+	if err != nil {
+		return BranchMergeResult{}, err
+	}
+	message := strings.TrimSpace(result.Message)
+	if message == "" {
+		message = fmt.Sprintf("已将 %s 合并到 %s", sourceBranch, targetBranch)
+	}
+	return BranchMergeResult{CommitSHA: strings.TrimSpace(result.SHA), Message: message}, nil
 }
 
 func (p *GitLabProvider) ensure() error {

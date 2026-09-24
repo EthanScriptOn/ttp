@@ -21,7 +21,7 @@ Compose 默认从国内公开镜像代理 `docker.m.daocloud.io` 拉取 MySQL �
 
 ## 文件
 
-- [`migrations/001_init.sql`](migrations/001_init.sql)：初始化核心表；`004_release_runtime.sql` 追加环境发布状态和执行日志，`005_project_git_credentials.sql` 追加项目级仓库机器人凭证表，`007_release_artifact.sql` 追加不可变镜像产物记录，`008_drop_project_build_configs.sql` 清理已移除的项目级构建配置表，`011_project_deployment_resource_files.sql` 保存逐文件 Kubernetes 资源配置，`012_deployment_namespace_quotas.sql` 保存环境资源配额。
+- [`migrations/001_init.sql`](migrations/001_init.sql)：初始化核心表；`004_release_runtime.sql` 追加环境发布状态和执行日志，`005_project_git_credentials.sql` 追加项目级仓库机器人凭证表，`007_release_artifact.sql` 追加不可变镜像产物记录，`008_drop_project_build_configs.sql` 清理已移除的项目级构建配置表，`011_project_deployment_resource_files.sql` 保存逐文件 Kubernetes 资源配置，`012_deployment_namespace_quotas.sql` 保存环境资源配额，`014_deployment_resource_overrides.sql` 保存环境级资源覆盖，`015_project_auto_merge.sql` 保存环境发布成功后的项目自动合并策略，`016_release_flows.sql` 保存发布流程和参与分支集合。
 - [`deploy/docker-compose.yml`](deploy/docker-compose.yml)：MySQL 8.0.36 和可选 Redis 7.2。
 - [`docs/local-development.md`](docs/local-development.md)：启动、连接、登录说明，API 流程、Kubernetes 依赖和回归约定。
 - [`deploy/kubernetes/README.md`](deploy/kubernetes/README.md)：Kubernetes 核心资源、附加组件、RBAC 和检查脚本。

@@ -143,7 +143,7 @@ func (s *Server) resolveDeploymentConfigWithContext(ctx context.Context, project
 }
 
 func (s *Server) resolveDeploymentConfigForTargetWithContext(ctx context.Context, project domain.Project, target domain.DeploymentTarget) (domain.DeploymentConfig, deploymentconfig.Validation, error) {
-	resourceFiles, filesErr := s.deps.Store.ListDeploymentResourceFiles(ctx, project.SpaceID, project.ID)
+	resourceFiles, filesErr := s.deploymentResourceFilesForTarget(ctx, project, target.ID)
 	if filesErr == nil && len(resourceFiles) > 0 {
 		resolved := domain.DeploymentConfig{ProjectID: project.ID, Namespace: target.Namespace, Format: "yaml", Version: 1, Files: make([]domain.DeploymentResourceFile, 0, len(resourceFiles))}
 		validated := deploymentconfig.Validation{Format: "yaml", Resources: make([]deploymentconfig.Resource, 0, len(resourceFiles))}

@@ -1,5 +1,5 @@
-import { Alert, Button, Form, Input, Modal, Select, Space, Tag, Typography, message } from 'antd'
-import { SafetyCertificateOutlined } from '@ant-design/icons'
+import { Alert, Button, Form, Input, Modal, Select, Space, Tag, Tooltip, Typography, message } from 'antd'
+import { QuestionCircleOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
 
 const DEFAULT_VALUES = {
@@ -7,6 +7,7 @@ const DEFAULT_VALUES = {
   default_branch: 'main',
   description: '',
   registry_connection_id: '',
+  auto_merge_target_id: '',
 }
 
 const isValidRepository = (value) => {
@@ -32,6 +33,7 @@ function projectValues(project) {
     default_branch: project?.default_branch || DEFAULT_VALUES.default_branch,
     description: project?.description || DEFAULT_VALUES.description,
     registry_connection_id: project?.registry_connection_id || DEFAULT_VALUES.registry_connection_id,
+    auto_merge_target_id: project?.auto_merge_target_id || DEFAULT_VALUES.auto_merge_target_id,
   }
 }
 
@@ -41,10 +43,11 @@ function cleanPayload(values) {
     default_branch: values.default_branch.trim(),
     description: values.description?.trim() || '',
     registry_connection_id: values.registry_connection_id || '',
+    auto_merge_target_id: values.auto_merge_target_id || '',
   }
 }
 
-export default function ProjectSettings({ project, open, loading = false, onCancel, onSubmit, gitCredential, gitCredentialLoading = false, onSaveGitCredential, onDeleteGitCredential, registryConnections = [], canManageGit = true }) {
+export default function ProjectSettings({ project, open, loading = false, onCancel, onSubmit, gitCredential, gitCredentialLoading = false, onSaveGitCredential, onDeleteGitCredential, registryConnections = [], deploymentTargets = [], canManageGit = true }) {
   const [form] = Form.useForm()
   const [credentialForm, setCredentialForm] = useState({ provider: 'auto', username: '', token: '' })
   const [credentialSaving, setCredentialSaving] = useState(false)
@@ -113,24 +116,13 @@ export default function ProjectSettings({ project, open, loading = false, onCanc
           <Input allowClear placeholder="例如：https://git.example.com/team/order-service.git" />
         </Form.Item>
 
-        <Form.Item
-          label="默认分支"
-          name="default_branch"
-          rules={[
-            { required: true, message: '请输入默认分支' },
-            { validator: (_, value) => isValidBranch(value?.trim()) ? Promise.resolve() : Promise.reject(new Error('请输入有效的分支名称')) },
-          ]}
-        >
-          <Input allowClear placeholder="例如：main 或 release" />
-        </Form.Item>
-
-        <Form.Item label="项目说明" name="description">
-          <Input allowClear placeholder="例如：订单服务的后端接口" />
-        </Form.Item>
-
         <div className="project-settings-subheading">
-          <Typography.Text strong>仓库授权</Typography.Text>
-          <Typography.Text type="secondary">用于读取代码和执行发布。</Typography.Text>
+          <span className="project-settings-label-with-help">
+            <Typography.Text strong>仓库授权</Typography.Text>
+            <Tooltip title="用于读取代码和执行发布。">
+              <QuestionCircleOutlined aria-label="仓库授权说明" />
+            </Tooltip>
+          </span>
         </div>
         <div className="project-git-credential">
           <div className="project-git-credential-heading">
@@ -151,14 +143,54 @@ export default function ProjectSettings({ project, open, loading = false, onCanc
           </> : <Alert type="info" showIcon message="当前项目角色只能查看 Git 连接状态，不能替换仓库机器人。" />}
         </div>
 
-        <div className="project-settings-subheading project-settings-subheading-inline">
-          <Typography.Text strong>构建与镜像</Typography.Text>
-          <Typography.Text type="secondary">选择项目使用的镜像仓库。</Typography.Text>
-        </div>
+        <Form.Item
+          label="默认分支"
+          name="default_branch"
+          rules={[
+            { required: true, message: '请输入默认分支' },
+            { validator: (_, value) => isValidBranch(value?.trim()) ? Promise.resolve() : Promise.reject(new Error('请输入有效的分支名称')) },
+          ]}
+        >
+          <Input allowClear placeholder="例如：main 或 release" />
+        </Form.Item>
+
+        <Form.Item
+          label={(
+            <span className="project-settings-label-with-help">
+              发布成功后自动合并
+              <Tooltip title="选择一个环境作为触发点，将本次发布分支合并到默认分支；留空表示任何环境发布成功后都不自动合并。仓库机器人需要具备合并权限。">
+                <QuestionCircleOutlined aria-label="自动合并说明" />
+              </Tooltip>
+            </span>
+          )}
+          name="auto_merge_target_id"
+        >
+          <Select
+            allowClear
+            placeholder={deploymentTargets.length ? '不自动合并（可选择触发环境）' : '请先创建发布环境'}
+            options={deploymentTargets.filter((target) => target.enabled !== false).map((target) => ({ value: target.id, label: target.name || target.environment_stage || target.environment }))}
+          />
+        </Form.Item>
+
         {!registryConnections.length && <Alert type="warning" showIcon message="当前空间还没有镜像仓库连接，请先到连接管理中添加并测试连接。" />}
 
-        <Form.Item label="镜像仓库连接" name="registry_connection_id" rules={[{ required: true, message: '请选择镜像仓库连接' }]} extra="用于构建推送和集群拉取。">
+        <Form.Item
+          label={(
+            <span className="project-settings-label-with-help">
+              镜像仓库连接
+              <Tooltip title="用于构建推送和集群拉取。">
+                <QuestionCircleOutlined aria-label="镜像仓库连接说明" />
+              </Tooltip>
+            </span>
+          )}
+          name="registry_connection_id"
+          rules={[{ required: true, message: '请选择镜像仓库连接' }]}
+        >
           <Select showSearch optionFilterProp="label" placeholder={registryConnections.length ? '请选择镜像仓库连接' : '尚未配置镜像仓库连接'} options={registryConnections.map((connection) => ({ value: connection.id, label: `${connection.name} · ${connection.registry}` }))} />
+        </Form.Item>
+
+        <Form.Item label="项目说明" name="description">
+          <Input allowClear placeholder="例如：订单服务的后端接口" />
         </Form.Item>
       </Form>
     </Modal>

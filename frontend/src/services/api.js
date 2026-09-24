@@ -4,10 +4,6 @@ import {
   normalizeBranch,
   normalizeCluster,
   normalizeCommit,
-  normalizeDeploymentResource,
-  normalizeDeploymentResources,
-  normalizeNamespaceQuota,
-  normalizeDeploymentTarget,
   normalizeGitCredential,
   normalizeGitAccess,
   normalizeImageRegistryConnection,
@@ -40,6 +36,20 @@ import {
 } from './api-helpers'
 
 export { ApiError, normalizePreparation, normalizeRelease }
+export {
+  createDeploymentResource,
+  createDeploymentResourceOverride,
+  createDeploymentTarget,
+  deleteDeploymentResource,
+  deleteDeploymentResourceOverride,
+  deleteDeploymentTarget,
+  getDeploymentResources,
+  getDeploymentTargets,
+  updateDeploymentResource,
+  updateDeploymentResourceOverride,
+  updateDeploymentTarget,
+  validateDeploymentResource,
+} from './deployment-api'
 
 export async function login(username, password) {
   const result = await request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
@@ -157,6 +167,10 @@ export async function testImageRegistryConnection(connectionId) {
   return normalizeImageRegistryConnection(await request(`/image-registry-connections/${segment(connectionId)}/test`, { method: 'POST' }))
 }
 
+export async function testRegistryPull(clusterId, connectionId) {
+  return request(`/clusters/${segment(clusterId)}/image-registry-connections/${segment(connectionId)}/pull-test`, { method: 'POST' })
+}
+
 export async function deleteImageRegistryConnection(connectionId) {
   return request(`/image-registry-connections/${segment(connectionId)}`, { method: 'DELETE' })
 }
@@ -233,77 +247,6 @@ export async function updateProject(projectId, payload) {
   return normalizeProject(await request(`/projects/${segment(projectId)}`, { method: 'PATCH', body: JSON.stringify(payload) }))
 }
 
-export async function getDeploymentTargets(projectId) {
-  const result = await request(`/projects/${segment(projectId)}/deployment-targets`)
-  return responseItems(result).map(normalizeDeploymentTarget).filter((item) => item.id)
-}
-
-export async function createDeploymentTarget(projectId, payload = {}) {
-  const body = {
-    name: asString(payload.name),
-    environment: asString(payload.environment),
-    stage: asString(payload.stage),
-    sort_order: Number(payload.sort_order),
-    cluster_id: asString(payload.cluster_id),
-    resource_quota: normalizeNamespaceQuota(payload.resource_quota),
-    deploy_strategy: asString(payload.deploy_strategy),
-    enabled: payload.enabled === undefined ? true : Boolean(payload.enabled),
-  }
-  return normalizeDeploymentTarget(await request(`/projects/${segment(projectId)}/deployment-targets`, { method: 'POST', body: JSON.stringify(body) }))
-}
-
-export async function updateDeploymentTarget(projectId, targetId, payload = {}) {
-  const body = { ...payload }
-  if (payload.resource_quota !== undefined) body.resource_quota = normalizeNamespaceQuota(payload.resource_quota)
-  return normalizeDeploymentTarget(await request(`/projects/${segment(projectId)}/deployment-targets/${segment(targetId)}`, { method: 'PATCH', body: JSON.stringify(body) }))
-}
-
-export async function deleteDeploymentTarget(projectId, targetId) {
-  return request(`/projects/${segment(projectId)}/deployment-targets/${segment(targetId)}`, { method: 'DELETE' })
-}
-
-export async function getDeploymentResources(projectId) {
-  const result = await request(`/projects/${segment(projectId)}/deployment-resources`)
-  return normalizeDeploymentResources(result)
-}
-
-export async function createDeploymentResource(projectId, payload = {}) {
-  const body = {
-    name: asString(payload.name),
-    path: asString(payload.path),
-    format: asString(payload.format),
-    content: asString(payload.content),
-    sort_order: Number(payload.sort_order || 0),
-  }
-  return normalizeDeploymentResource(await request(`/projects/${segment(projectId)}/deployment-resources`, { method: 'POST', body: JSON.stringify(body) }))
-}
-
-export async function updateDeploymentResource(projectId, resourceId, payload = {}) {
-  const body = {
-    name: asString(payload.name),
-    path: asString(payload.path),
-    format: asString(payload.format),
-    content: asString(payload.content),
-    sort_order: Number(payload.sort_order || 0),
-  }
-  return normalizeDeploymentResource(await request(`/projects/${segment(projectId)}/deployment-resources/${segment(resourceId)}`, { method: 'PUT', body: JSON.stringify(body) }))
-}
-
-export async function deleteDeploymentResource(projectId, resourceId) {
-  return request(`/projects/${segment(projectId)}/deployment-resources/${segment(resourceId)}`, { method: 'DELETE' })
-}
-
-export async function validateDeploymentResource(projectId, payload = {}) {
-  const body = {
-    name: asString(payload.name),
-    path: asString(payload.path),
-    format: asString(payload.format),
-    content: asString(payload.content),
-    sort_order: Number(payload.sort_order || 0),
-  }
-  return normalizeDeploymentResource(await request(`/projects/${segment(projectId)}/deployment-resources/validate`, { method: 'POST', body: JSON.stringify(body) }))
-}
-
 export async function getCommits(projectId, branch = 'main') {
   const branchName = asString(branch, 'main')
   const result = await request(`/projects/${segment(projectId)}/git/commits?branch=${encodeURIComponent(branchName)}&limit=200`)
@@ -365,6 +308,18 @@ export async function getReleases(projectId) {
   return responseItems(result).map(normalizeRelease).filter((item) => item.id)
 }
 
+export async function getReleasePage(projectId, page = 1, pageSize = 10, query = '') {
+  const search = asString(query).trim()
+  const suffix = search ? `&q=${encodeURIComponent(search)}` : ''
+  const result = await request(`/projects/${segment(projectId)}/releases?page=${encodeURIComponent(page)}&page_size=${encodeURIComponent(pageSize)}${suffix}`)
+  return {
+    items: responseItems(result).map(normalizeRelease).filter((item) => item.id),
+    total: Number(result?.total) || 0,
+    page: Number(result?.page) || 1,
+    page_size: Number(result?.page_size) || pageSize,
+  }
+}
+
 export async function getABExperiments(projectId) {
   const result = await request(`/projects/${segment(projectId)}/ab-experiments`)
   return responseItems(result).map(normalizeABExperiment).filter((item) => item.id)
@@ -408,6 +363,48 @@ export async function publishRelease(projectId, releaseId) {
   return releaseResponse(await request(`/projects/${segment(projectId)}/releases/${segment(releaseId)}/publish`, { method: 'POST' }))
 }
 
+export async function republishRelease(projectId, releaseId) {
+  const result = await request(`/projects/${segment(projectId)}/releases/${segment(releaseId)}/republish`, { method: 'POST' })
+  return {
+    release: releaseResponse(result),
+    replacing_release_id: asString(result?.replacing_release_id || result?.replacingReleaseId),
+    removed_branch: asString(result?.removed_branch || result?.removedBranch),
+    replacement_state: asString(result?.replacement_state || result?.replacementState),
+    flow: result?.flow || null,
+  }
+}
+
+export async function getReleaseFlow(projectId) {
+  const result = await request(`/projects/${segment(projectId)}/release-flow`)
+  if (!result?.flow) return null
+  const participantReleases = Array.isArray(result.participant_releases)
+    ? result.participant_releases.map(normalizeRelease).filter((item) => item.id)
+    : []
+  const currentRelease = result.current_release ? normalizeRelease(result.current_release) : null
+  return {
+    ...result.flow,
+    current_release: currentRelease?.id ? currentRelease : null,
+    participant_releases: participantReleases,
+  }
+}
+
+export async function removeRelease(projectId, releaseId) {
+  return releaseResponse(await request(`/projects/${segment(projectId)}/releases/${segment(releaseId)}`, { method: 'DELETE' }))
+}
+
+export async function updateReleaseTraffic(projectId, releaseId, targetId, payload = {}) {
+  const body = {
+    stable_percent: Number(payload.stable_percent ?? payload.stablePercent ?? 0),
+    candidate_percent: Number(payload.candidate_percent ?? payload.candidatePercent ?? 0),
+    blue_percent: Number(payload.blue_percent ?? payload.bluePercent ?? 0),
+    green_percent: Number(payload.green_percent ?? payload.greenPercent ?? 0),
+  }
+  return releaseResponse(await request(`/projects/${segment(projectId)}/releases/${segment(releaseId)}/targets/${segment(targetId)}/traffic`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  }))
+}
+
 export async function retryReleaseTarget(projectId, releaseId, targetId) {
   return releaseResponse(await request(`/projects/${segment(projectId)}/releases/${segment(releaseId)}/targets/${segment(targetId)}/retry`, { method: 'POST' }))
 }
@@ -435,10 +432,11 @@ export async function getPod(projectId, podName, targetId = '') {
   return normalizePodDetail(await request(`/projects/${segment(projectId)}/pods/${segment(podName)}${query}`))
 }
 
-export async function getPodLogs(projectId, podName, container, targetId = '') {
+export async function getPodLogs(projectId, podName, container, targetId = '', tailLines = 200) {
   const params = new URLSearchParams()
   if (container) params.set('container', asString(container))
   if (targetId) params.set('target_id', asString(targetId))
+  if (tailLines !== undefined && tailLines !== null) params.set('tail_lines', String(Math.max(0, Number(tailLines) || 0)))
   const query = params.toString() ? `?${params.toString()}` : ''
   const result = await request(`/projects/${segment(projectId)}/pods/${segment(podName)}/logs${query}`)
   if (typeof result === 'string') return result

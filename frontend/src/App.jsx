@@ -7,8 +7,8 @@ import {
   ConfigProvider,
   Dropdown,
   Empty,
+  Input,
   Layout,
-  List,
   Menu,
   Pagination,
   Row,
@@ -36,10 +36,12 @@ import {
   PlusOutlined,
   ReloadOutlined,
   RocketOutlined,
+  SearchOutlined,
+  ClearOutlined,
   SettingOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import LoginPage from './components/LoginPage'
 import SpacePicker from './components/SpacePicker'
 import ProjectForm from './components/ProjectForm'
@@ -52,7 +54,6 @@ import ReleaseFlow from './components/ReleaseFlow'
 import DeploymentConfigEditor from './components/DeploymentConfigEditor'
 import SpaceSettingsPage from './components/SpaceSettingsPage'
 import SpaceMembersPage from './components/SpaceMembersPage'
-import ProjectMembersPage from './components/ProjectMembersPage'
 import ClusterMonitorOverview from './components/ClusterMonitorOverview'
 import DeploymentTargets, { DeploymentTargetSelect } from './components/DeploymentTargets'
 import ABExperiment from './components/ABExperiment'
@@ -78,6 +79,8 @@ import {
   getABExperiments,
   getMetrics,
   getProjects,
+  getReleasePage,
+  getReleaseFlow,
   getReleases,
   getReleaseTargetLogs,
   getSpaces,
@@ -85,7 +88,10 @@ import {
   login,
   normalizeRelease,
   publishRelease,
+  republishRelease,
+  removeRelease,
   retryReleaseTarget,
+  updateReleaseTraffic as updateReleaseTrafficApi,
   createABExperiment,
   updateABExperimentTraffic,
   stopABExperiment,
@@ -98,6 +104,7 @@ import {
 import { hasPermission, PERMISSIONS } from './services/permissions'
 
 const { Header, Sider, Content } = Layout
+const RELEASE_PAGE_SIZE = 10
 
 function targetEnvironmentKey(target) {
   const value = `${target?.environment_stage || ''} ${target?.stage || ''} ${target?.environment || ''} ${target?.name || ''}`.toLowerCase()
@@ -280,7 +287,7 @@ function ConsoleLayout({ spaces, spaceId, onSpaceChange, onOpenSpaces, switching
         <div className="header-user"><Dropdown trigger={['click']} placement="bottomRight" menu={{ className: 'space-switcher-menu', items: spaceMenuItems, selectable: false, onClick: handleSpaceMenuClick }}><Button type="text" className="space-switcher" aria-label={`切换空间，当前空间 ${currentSpace?.name || '未选择'}`} loading={switchingSpace}><TeamOutlined /><span className="space-switcher-copy"><small>当前空间</small><strong>{currentSpace?.name || '未选择'}</strong></span><DownOutlined className="space-switcher-arrow" /></Button></Dropdown><Avatar size={32} className="user-avatar">{(user?.display_name || user?.username || '管')[0]}</Avatar><span className="user-name">{user?.display_name || user?.username || '管理员'}</span><Button type="text" aria-label="退出登录" icon={<LogoutOutlined />} onClick={onLogout} /></div>
       </Header>
       <Content className="console-content">
-        {selectedProject ? <ProjectDetail key={selectedProject.id} project={selectedProject} spaceName={currentSpace?.name} userName={user?.display_name || user?.username} permissions={{ canUpdateProject: can(PERMISSIONS.PROJECT_UPDATE), canCreateRelease: can(PERMISSIONS.RELEASE_CREATE), canUpdateRelease: can(PERMISSIONS.RELEASE_UPDATE), canPublishRelease: can(PERMISSIONS.RELEASE_PUBLISH), canRuntimeConfig: can(PERMISSIONS.RUNTIME_CONFIG), canRuntimeTerminal: can(PERMISSIONS.RUNTIME_TERMINAL) }} onBack={() => setSelectedProject(null)} onOpenCluster={() => { setSelectedProject(null); setSection('cluster-monitor') }} /> : section === 'infrastructure' ? <InfrastructureConnections canReadClusters={can(PERMISSIONS.CLUSTER_READ)} canManageClusters={can(PERMISSIONS.CLUSTER_MANAGE)} canReadRegistry={can(PERMISSIONS.REGISTRY_READ)} canManageRegistry={can(PERMISSIONS.REGISTRY_MANAGE)} /> : section === 'cluster-monitor' ? <ClusterMonitorOverview onOpenConnections={() => setSection('infrastructure')} /> : section === 'activity' ? <ActivityPage /> : section === 'settings' ? <SpaceSettingsPage role={role} user={user} onSpaceUpdated={onSpaceUpdated} /> : section === 'members' ? <SpaceMembersPage role={role} user={user} /> : <ProjectsPage canCreateProject={can(PERMISSIONS.PROJECT_CREATE)} onOpen={setSelectedProject} />}
+        {selectedProject ? <ProjectDetail key={selectedProject.id} project={selectedProject} spaceName={currentSpace?.name} userName={user?.display_name || user?.username} permissions={{ canUpdateProject: can(PERMISSIONS.PROJECT_UPDATE), canCreateRelease: can(PERMISSIONS.RELEASE_CREATE), canUpdateRelease: can(PERMISSIONS.RELEASE_UPDATE), canPublishRelease: can(PERMISSIONS.RELEASE_PUBLISH), canRuntimeRead: can(PERMISSIONS.RUNTIME_READ), canRuntimeTerminal: can(PERMISSIONS.RUNTIME_TERMINAL) }} onBack={() => setSelectedProject(null)} onOpenCluster={() => { setSelectedProject(null); setSection('cluster-monitor') }} /> : section === 'infrastructure' ? <InfrastructureConnections canReadClusters={can(PERMISSIONS.CLUSTER_READ)} canManageClusters={can(PERMISSIONS.CLUSTER_MANAGE)} canReadRegistry={can(PERMISSIONS.REGISTRY_READ)} canManageRegistry={can(PERMISSIONS.REGISTRY_MANAGE)} /> : section === 'cluster-monitor' ? <ClusterMonitorOverview canManageClusters={can(PERMISSIONS.CLUSTER_MANAGE)} onOpenConnections={() => setSection('infrastructure')} /> : section === 'activity' ? <ActivityPage /> : section === 'settings' ? <SpaceSettingsPage role={role} user={user} onSpaceUpdated={onSpaceUpdated} /> : section === 'members' ? <SpaceMembersPage role={role} user={user} /> : <ProjectsPage canCreateProject={can(PERMISSIONS.PROJECT_CREATE)} onOpen={setSelectedProject} />}
       </Content>
     </Layout>
   </Layout>
@@ -391,12 +398,11 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
   }
   const canUpdateProject = projectCan(PERMISSIONS.PROJECT_SETTINGS, permissions.canUpdateProject !== false)
   const canCreateRelease = projectCan(PERMISSIONS.PROJECT_RELEASE_CREATE, permissions.canCreateRelease !== false)
+  const canUpdateRelease = projectCan(PERMISSIONS.PROJECT_RELEASE_UPDATE, permissions.canUpdateRelease !== false)
   const canPublishRelease = projectCan(PERMISSIONS.PROJECT_RELEASE_PUBLISH, permissions.canPublishRelease !== false)
-  const canRuntimeConfig = projectCan(PERMISSIONS.PROJECT_RUNTIME_CONFIG, permissions.canRuntimeConfig !== false)
+  const canRuntimeRead = projectCan(PERMISSIONS.PROJECT_RUNTIME_READ, permissions.canRuntimeRead !== false)
   const canRuntimeTerminal = projectCan(PERMISSIONS.PROJECT_RUNTIME_TERMINAL, permissions.canRuntimeTerminal !== false)
   const canManageGit = projectCan(PERMISSIONS.PROJECT_GIT_MANAGE, false)
-  const canViewProjectMembers = projectCan(PERMISSIONS.PROJECT_MEMBERS_READ, false)
-  const canManageProjectMembers = projectCan(PERMISSIONS.PROJECT_MEMBERS_MANAGE, false)
   const initialBranch = project.default_branch || 'main'
   const [branch, setBranch] = useState(initialBranch)
   const [branches, setBranches] = useState([])
@@ -405,6 +411,11 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
   const [commits, setCommits] = useState([])
   const [selected, setSelected] = useState([])
   const [releases, setReleases] = useState([])
+  const [releaseFlow, setReleaseFlow] = useState(null)
+  const [releasePage, setReleasePage] = useState(1)
+  const [releaseTotal, setReleaseTotal] = useState(0)
+  const [releaseSearch, setReleaseSearch] = useState('')
+  const [experimentReleases, setExperimentReleases] = useState([])
   const [experiments, setExperiments] = useState([])
   const [experimentLoading, setExperimentLoading] = useState(false)
   const [pods, setPods] = useState([])
@@ -438,6 +449,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
   const [gitAccessLoading, setGitAccessLoading] = useState(true)
   const [gitAccessError, setGitAccessError] = useState('')
   const gitAccessRequestRef = useRef(0)
+  const runtimeRequestRef = useRef(0)
 
   const availableTargets = targets
   const selectedTarget = availableTargets.find((target) => target.id === selectedTargetId) || availableTargets[0]
@@ -477,9 +489,12 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
   }
 
   const loadRuntime = async (targetId = selectedTarget?.id) => {
+    const requestID = ++runtimeRequestRef.current
     if (!targetId) {
-      setPods([])
-      setMetrics(null)
+      if (requestID === runtimeRequestRef.current) {
+        setPods([])
+        setMetrics(null)
+      }
       return []
     }
     const runtimeResults = await Promise.allSettled([
@@ -487,8 +502,8 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       getMetrics(project.id, targetId),
     ])
     const [podResult, metricResult] = runtimeResults
-    if (podResult.status === 'fulfilled') setPods(podResult.value || [])
-    if (metricResult.status === 'fulfilled') {
+    if (requestID === runtimeRequestRef.current && podResult.status === 'fulfilled') setPods(podResult.value || [])
+    if (requestID === runtimeRequestRef.current && metricResult.status === 'fulfilled') {
       setMetrics((previous) => {
         const next = metricResult.value || null
         if (!next || !Array.isArray(next.series) || next.series.length === 0) return next
@@ -524,7 +539,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     }
   }
 
-  const load = async (branchName = branch) => {
+  const load = async (branchName = branch, pageNumber = releasePage, search = releaseSearch) => {
     setLoading(true)
     setTargetLoading(true)
     try {
@@ -532,18 +547,25 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       const results = await Promise.allSettled([
         getBranches(project.id),
         getCommits(project.id, branchName),
-        getReleases(project.id),
+        getReleasePage(project.id, pageNumber, RELEASE_PAGE_SIZE, search),
+        getReleaseFlow(project.id),
         getDeploymentTargets(project.id),
         getABExperiments(project.id),
       ])
       const failures = []
-      const [branchResult, commitResult, releaseResult, targetResult, experimentResult] = results
+      const [branchResult, commitResult, releaseResult, flowResult, targetResult, experimentResult] = results
       if (branchResult.status === 'fulfilled') setBranches(branchResult.value || [])
       else if (branchResult.reason?.code !== 'git_credential_invalid') failures.push(`分支：${branchResult.reason?.message || '加载失败'}`)
       if (commitResult.status === 'fulfilled') setCommits(commitResult.value || [])
       else if (commitResult.reason?.code !== 'git_credential_invalid') failures.push(`提交：${commitResult.reason?.message || '加载失败'}`)
-      if (releaseResult.status === 'fulfilled') setReleases(normalizeReleases(releaseResult.value || []))
+      if (releaseResult.status === 'fulfilled') {
+        setReleases(normalizeReleases(releaseResult.value.items || []))
+        setReleaseTotal(releaseResult.value.total || 0)
+        setReleasePage(releaseResult.value.page || pageNumber)
+      }
       else failures.push(`发布记录：${releaseResult.reason?.message || '加载失败'}`)
+      if (flowResult.status === 'fulfilled') setReleaseFlow(flowResult.value || null)
+      else failures.push(`当前发布流程：${flowResult.reason?.message || '加载失败'}`)
       if (experimentResult.status === 'fulfilled') setExperiments(experimentResult.value || [])
       else failures.push(`A/B 实验：${experimentResult.reason?.message || '加载失败'}`)
 
@@ -576,11 +598,43 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     }
   }
   useEffect(() => {
-    load(initialBranch)
+    load(initialBranch, 1)
     loadProjectAccess()
     loadGitAccess()
     loadClusters()
   }, [project.id])
+
+  useEffect(() => {
+    if (tab !== 'experiments') return
+    getReleases(project.id).then((items) => setExperimentReleases(normalizeReleases(items || []))).catch(() => {})
+  }, [project.id, tab])
+
+  const loadReleasePage = async (pageNumber, search = releaseSearch) => {
+    setLoading(true)
+    try {
+      const [releaseResult, flowResult] = await Promise.allSettled([getReleasePage(project.id, pageNumber, RELEASE_PAGE_SIZE, search), getReleaseFlow(project.id)])
+      if (releaseResult.status !== 'fulfilled') throw releaseResult.reason
+      const result = releaseResult.value
+      setReleases(normalizeReleases(result.items || []))
+      setReleaseTotal(result.total || 0)
+      setReleasePage(result.page || pageNumber)
+      if (flowResult.status === 'fulfilled') setReleaseFlow(flowResult.value || null)
+      else message.warning(`当前发布流程加载失败：${flowResult.reason?.message || '请稍后重试'}`)
+      return result
+    } catch (error) {
+      message.error(error.message || '发布单加载失败')
+      return null
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const searchReleaseOrders = async (value) => {
+    const search = `${value || ''}`.trim()
+    setReleaseSearch(search)
+    setReleasePage(1)
+    return loadReleasePage(1, search)
+  }
 
   const reloadTargets = async (preferredTargetId = selectedTargetId) => {
     setTargetLoading(true)
@@ -627,7 +681,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
 
   const changeReleaseDetailEnvironment = (environment) => {
     setReleaseDetailEnvironment(environment)
-    const target = availableTargets.find((item) => targetEnvironmentKey(item) === environment)
+    const target = availableTargets.find((item) => item.id === environment || targetEnvironmentKey(item) === environment)
     if (target) changeTarget(target.id)
     else {
       setPod(null)
@@ -641,6 +695,8 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     setPodTarget(target || selectedTarget)
     setPod(podValue)
   }
+
+  const openPodLogs = (podValue, target) => openDetailPod(podValue, target)
 
   const openPodMonitor = (podValue, target) => {
     setPod(null)
@@ -695,18 +751,27 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     let active = true
     const poll = async () => {
       try {
-        const next = await getReleases(project.id)
-        if (active) setReleases(normalizeReleases(next || []))
+        const next = await getReleasePage(project.id, releasePage, RELEASE_PAGE_SIZE, releaseSearch)
+        if (!active) return
+        setReleases(normalizeReleases(next.items || []))
+        setReleaseTotal(next.total || 0)
+        const flowResult = await Promise.allSettled([getReleaseFlow(project.id)])
+        if (active && flowResult[0].status === 'fulfilled') setReleaseFlow(flowResult[0].value || null)
+        // A rollout replaces Pods asynchronously. Refresh the selected
+        // environment while the release is active so the table does not keep
+        // pointing at a Pod that has already been removed by Kubernetes.
+        if (selectedTargetId) await loadRuntime(selectedTargetId)
       } catch {
         // The next scheduled poll can recover from a temporary request failure.
       }
     }
+    poll()
     const timer = window.setInterval(poll, 3000)
     return () => {
       active = false
       window.clearInterval(timer)
     }
-  }, [hasActiveReleases, project.id])
+  }, [hasActiveReleases, project.id, releasePage, releaseSearch, selectedTargetId])
 
   const changeBranch = async (nextBranch) => {
     if (!nextBranch || nextBranch === branch) return
@@ -724,7 +789,12 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
 
   const upsertRelease = (value) => {
     const next = normalizeRelease(value)
-    setReleases((old) => [next, ...old.filter((item) => item.id !== next.id)])
+    setReleases((old) => {
+      const exists = old.some((item) => item.id === next.id)
+      if (!exists && releasePage !== 1) return old
+      return [next, ...old.filter((item) => item.id !== next.id)].slice(0, RELEASE_PAGE_SIZE)
+    })
+    setExperimentReleases((old) => [next, ...old.filter((item) => item.id !== next.id)])
     return next
   }
   const upsertExperiment = (value) => {
@@ -756,6 +826,24 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       return updated
     } catch (error) {
       message.error(error.message || '调整实验流量失败')
+      return null
+    }
+  }
+  const updateReleaseTraffic = async (release, targetId, payload) => {
+    if (!canPublishRelease) {
+      message.warning('当前角色没有调整发布流量的权限')
+      return null
+    }
+    if (!release?.id || !targetId) {
+      message.warning('当前环境还没有可调整的发布目标')
+      return null
+    }
+    try {
+      const updated = upsertRelease(await updateReleaseTrafficApi(project.id, release.id, targetId, payload))
+      message.success('发布流量已调整')
+      return updated
+    } catch (error) {
+      message.error(error.message || '调整发布流量失败')
       return null
     }
   }
@@ -820,11 +908,47 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
         green_percent: 0,
         publish: false,
       })
-      const next = upsertRelease(created)
+      const next = normalizeRelease(created)
+      setReleaseSearch('')
+      setReleasePage(1)
+      setExperimentReleases((old) => [next, ...old.filter((item) => item.id !== next.id)])
+      await loadReleasePage(1, '')
       message.success(`发布单 ${next.id} 已创建`)
       return next
     } catch (error) {
       message.error(error.message || '创建发布单失败')
+      return null
+    }
+  }
+  const removeReleaseOrder = async (item) => {
+    if (!item?.id) return false
+    const isDraft = item.status === 'draft'
+    if (isDraft && !canUpdateRelease) {
+      message.warning('当前角色没有移除发布单的权限')
+      return false
+    }
+    if (!isDraft && (!canUpdateRelease || !canPublishRelease)) {
+      message.warning('当前角色没有移除发布单的权限')
+      return false
+    }
+    try {
+      if (isDraft) {
+        await removeRelease(project.id, item.id)
+        const remainingTotal = Math.max(0, releaseTotal - 1)
+        const lastPage = Math.max(1, Math.ceil(remainingTotal / RELEASE_PAGE_SIZE))
+        await loadReleasePage(Math.min(releasePage, lastPage))
+        setExperimentReleases((old) => old.filter((release) => release.id !== item.id))
+        return { archived: true }
+      }
+      const result = await republishRelease(project.id, item.id)
+      if (result.release) {
+        upsertRelease(result.release)
+        setReleasePage(1)
+        await loadReleasePage(1)
+      }
+      return { republished: true, release: result.release }
+    } catch (error) {
+      message.error(error.message || '移除发布单失败')
       return null
     }
   }
@@ -849,6 +973,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     try {
       const updated = await publishRelease(project.id, release.id)
       const next = upsertRelease(updated)
+      await loadRuntime(environment?.target?.id || environment?.id || selectedTarget?.id)
       message.success({ key: messageKey, content: `${environmentName}环境发布已提交`, duration: 3 })
       return next
     } catch (error) {
@@ -926,6 +1051,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
         if (publish) release = await publishRelease(project.id, created.id)
       }
       const next = upsertRelease(release)
+      if (publish) await loadRuntime(selectedTarget?.id)
       setReleaseOpen(false)
       setReleaseTarget(null)
       setSelected([])
@@ -994,6 +1120,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     setRetryingTarget(key)
     try {
       const updated = upsertRelease(await retryReleaseTarget(project.id, item.id, target.id))
+      await loadRuntime(target.id)
       message.success(`已开始重试${target.name || '这个环境'}，其他已成功环境不会重复发布`)
       return updated
     } catch (error) {
@@ -1052,7 +1179,7 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     <div className="detail-shell">
       <button type="button" className="back-link" onClick={onBack}>← 返回项目列表</button>
       <div className="detail-heading"><div className="detail-project-title"><div className="project-icon large"><CodeOutlined /></div><div><Typography.Title level={2}>{project.name}</Typography.Title><Typography.Paragraph type="secondary"><CodeOutlined /> {project.repository_url} <span className="heading-separator">·</span> 分支 <strong>{branch}</strong></Typography.Paragraph></div></div><Space wrap>{canUpdateProject && <Button icon={<SettingOutlined />} onClick={openSettings}>项目设置</Button>}</Space></div>
-      <div className="detail-tabs"><button className={tab === 'release' ? 'active' : ''} onClick={() => setTab('release')} type="button"><CloudUploadOutlined /> 发布</button><button className={tab === 'experiments' ? 'active' : ''} onClick={() => setTab('experiments')} type="button"><ExperimentOutlined /> A/B 实验</button><button className={tab === 'targets' ? 'active' : ''} onClick={() => setTab('targets')} type="button"><EnvironmentOutlined /> 发布环境</button><button className={tab === 'config' ? 'active' : ''} onClick={() => setTab('config')} type="button"><FileTextOutlined /> 部署配置</button><button className={tab === 'runtime' ? 'active' : ''} onClick={() => setTab('runtime')} type="button"><DeploymentUnitOutlined /> Pod 运行态</button><button className={tab === 'monitor' ? 'active' : ''} onClick={() => setTab('monitor')} type="button"><DashboardOutlined /> 监控</button>{canViewProjectMembers && <button className={tab === 'members' ? 'active' : ''} onClick={() => setTab('members')} type="button"><TeamOutlined /> 成员权限</button>}</div>
+      <div className="detail-tabs"><button className={tab === 'release' ? 'active' : ''} onClick={() => setTab('release')} type="button"><CloudUploadOutlined /> 发布</button><button className={tab === 'experiments' ? 'active' : ''} onClick={() => setTab('experiments')} type="button"><ExperimentOutlined /> A/B 实验</button><button className={tab === 'targets' ? 'active' : ''} onClick={() => setTab('targets')} type="button"><EnvironmentOutlined /> 发布环境</button><button className={tab === 'config' ? 'active' : ''} onClick={() => setTab('config')} type="button"><FileTextOutlined /> 部署配置</button><button className={tab === 'runtime' ? 'active' : ''} onClick={() => setTab('runtime')} type="button"><DeploymentUnitOutlined /> Pod 运行态</button><button className={tab === 'monitor' ? 'active' : ''} onClick={() => setTab('monitor')} type="button"><DashboardOutlined /> 监控</button></div>
     </div>
     {tab === 'release' && <ReleaseFlow
       embedded
@@ -1065,28 +1192,40 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
       branches={branches}
       branchLoading={branchLoading}
       releases={releases}
+      releaseFlow={releaseFlow}
+      releasePage={releasePage}
+      releasePageSize={RELEASE_PAGE_SIZE}
+      releaseTotal={releaseTotal}
+      releaseSearch={releaseSearch}
       loading={loading}
-      onRefresh={() => load(branch)}
+      onRefresh={() => load(branch, releasePage, releaseSearch)}
+      onReleasePageChange={loadReleasePage}
+      onReleaseSearch={searchReleaseOrders}
       onCreateRelease={createReleaseOrder}
       onPublishEnvironment={publishEnvironment}
+      onUpdateTraffic={updateReleaseTraffic}
       publishing={releaseSaving}
       onRetryTarget={retryTarget}
       onLoadReleaseTargetLogs={loadReleaseTargetLogs}
       onEnvironmentChange={changeReleaseDetailEnvironment}
       onOpenPod={openDetailPod}
+      onOpenPodLogs={openPodLogs}
       onOpenMonitor={openPodMonitor}
       onOpenTerminal={openPodTerminal}
       canOpenTerminal={canRuntimeTerminal}
+      canOpenPodLogs={canRuntimeRead}
       pods={pods}
       retryingTarget={retryingTarget}
       canCreateRelease={canCreateRelease}
+      canUpdateRelease={canUpdateRelease}
       canPublishRelease={canPublishRelease}
+      onRemoveRelease={removeReleaseOrder}
       targets={availableTargets}
     />}
     {tab === 'experiments' && <ABExperiment
       project={project}
       targets={availableTargets}
-      releases={releases}
+      releases={experimentReleases}
       experiments={experiments}
       loading={experimentLoading}
       canCreate={canCreateRelease}
@@ -1099,16 +1238,15 @@ function ProjectDetail({ project: initialProject, spaceName, userName, permissio
     />}
     {tab === 'targets' && <DeploymentTargets project={project} targets={targets} releases={releases} clusters={clusters} loading={targetLoading} canEdit={canUpdateProject} onReload={() => reloadTargets(selectedTargetId)} onCreate={createTarget} onUpdate={updateTarget} onDelete={deleteTarget} />}
     {tab === 'config' && <DeploymentConfigEditor project={project} readOnly={!canUpdateProject} />}
-    {tab === 'runtime' && <RuntimeTab project={project} targets={availableTargets} clusters={clusters} selectedTargetId={selectedTarget?.id} onTargetChange={changeTarget} pods={pods} loading={loading} onRefresh={() => loadRuntime(selectedTarget?.id)} onOpenPod={(podValue) => openDetailPod(podValue, selectedTarget)} onOpenMonitor={(podValue) => openPodMonitor(podValue, selectedTarget)} onOpenTerminal={(podValue) => openPodTerminal(podValue, selectedTarget)} canOpenTerminal={canRuntimeTerminal} />}
+    {tab === 'runtime' && <RuntimeTab project={project} targets={availableTargets} clusters={clusters} selectedTargetId={selectedTarget?.id} onTargetChange={changeTarget} pods={pods} loading={loading} onRefresh={() => loadRuntime(selectedTarget?.id)} onOpenPod={(podValue) => openDetailPod(podValue, selectedTarget)} onOpenMonitor={(podValue) => openPodMonitor(podValue, selectedTarget)} onOpenTerminal={(podValue) => openPodTerminal(podValue, selectedTarget)} onOpenLogs={(podValue) => openPodLogs(podValue, selectedTarget)} canOpenTerminal={canRuntimeTerminal} canOpenLogs={canRuntimeRead} />}
     {tab === 'monitor' && <MonitorTab metrics={metrics} pods={pods} project={project} targets={availableTargets} selectedTargetId={selectedTarget?.id} onTargetChange={changeTarget} onRefresh={() => loadRuntime(selectedTarget?.id)} onOpenCluster={onOpenCluster} focusPod={monitorPod} onClearPod={() => setMonitorPod(null)} />}
-    {tab === 'members' && canViewProjectMembers && <ProjectMembersPage project={project} canManage={canManageProjectMembers} />}
-    <ProjectSettings project={project} open={settingsOpen} loading={settingsLoading} onCancel={() => setSettingsOpen(false)} onSubmit={saveSettings} gitCredential={gitCredential} gitCredentialLoading={gitAccessLoading} onSaveGitCredential={saveGitCredential} onDeleteGitCredential={deleteGitCredential} registryConnections={registryConnections} canManageGit={canManageGit} />
-    <PodDrawer project={project} pod={pod} target={podTarget || selectedTarget} targetId={(podTarget || selectedTarget)?.id} open={Boolean(pod)} onClose={() => setPod(null)} canEdit={canRuntimeConfig} />
+    <ProjectSettings project={project} open={settingsOpen} loading={settingsLoading} onCancel={() => setSettingsOpen(false)} onSubmit={saveSettings} gitCredential={gitCredential} gitCredentialLoading={gitAccessLoading} onSaveGitCredential={saveGitCredential} onDeleteGitCredential={deleteGitCredential} registryConnections={registryConnections} deploymentTargets={availableTargets} canManageGit={canManageGit} />
+    <PodDrawer project={project} pod={pod} targetId={(podTarget || selectedTarget)?.id} open={Boolean(pod)} onClose={() => setPod(null)} onPodNotFound={() => { setPod(null); void loadRuntime((podTarget || selectedTarget)?.id); message.info('Pod 已完成滚动更新，运行态列表已刷新') }} />
     <PodTerminal project={project} pod={terminalPod} target={podTarget || selectedTarget} targetId={(podTarget || selectedTarget)?.id} open={Boolean(terminalPod)} onClose={() => setTerminalPod(null)} canExecute={canRuntimeTerminal} />
   </div>
 }
 
-function RuntimeTab({ project, targets = [], clusters = [], selectedTargetId, onTargetChange, pods = [], loading, onRefresh, onOpenPod, onOpenMonitor, onOpenTerminal, canOpenTerminal }) {
+function RuntimeTab({ project, targets = [], clusters = [], selectedTargetId, onTargetChange, pods = [], loading, onRefresh, onOpenPod, onOpenMonitor, onOpenTerminal, onOpenLogs, canOpenTerminal, canOpenLogs = true }) {
   const target = targets.find((item) => item.id === selectedTargetId) || targets[0]
   const cluster = clusters.find((item) => item.id === target?.cluster_id)
   const clusterStatus = String(cluster?.status || '').toLowerCase()
@@ -1127,7 +1265,7 @@ function RuntimeTab({ project, targets = [], clusters = [], selectedTargetId, on
     { title: 'Pod IP', dataIndex: 'pod_ip' },
     { title: '节点', dataIndex: 'node_name' },
     { title: '重启次数', dataIndex: 'restarts', render: (value, item) => value ?? item.restart_count ?? 0 },
-    { title: '操作', width: 235, render: (_, item) => <Space size={2}><Button type="link" icon={<DashboardOutlined />} onClick={() => onOpenMonitor?.(item)}>监控</Button><Button type="link" icon={<CodeOutlined />} disabled={!canOpenTerminal} title={canOpenTerminal ? '进入 Pod Terminal' : '当前账号没有进入 Pod 终端的权限'} onClick={() => onOpenTerminal?.(item)}>Terminal</Button><Button type="link" onClick={() => onOpenPod(item)}>详情</Button></Space> },
+    { title: '操作', width: 285, render: (_, item) => <Space size={2}><Button type="link" icon={<DashboardOutlined />} onClick={() => onOpenMonitor?.(item)}>监控</Button><Button type="link" icon={<CodeOutlined />} disabled={!canOpenTerminal} title={canOpenTerminal ? '进入 Pod Terminal' : '当前账号没有进入 Pod 终端的权限'} onClick={() => onOpenTerminal?.(item)}>Terminal</Button><Button type="link" icon={<FileTextOutlined />} disabled={!canOpenLogs} title={canOpenLogs ? '查看 Pod 标准输出和标准错误日志' : '当前账号没有查看 Pod 日志的权限'} onClick={() => onOpenLogs?.(item)}>日志</Button><Button type="link" onClick={() => onOpenPod(item)}>详情</Button></Space> },
   ]
   return <section className="runtime-panel">
     <div className="panel-heading runtime-panel-heading">
@@ -1153,6 +1291,9 @@ function ActivityPage() {
   const [items, setItems] = useState([])
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
+  const [keyword, setKeyword] = useState('')
+  const [actor, setActor] = useState('')
+  const [action, setAction] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -1160,7 +1301,7 @@ function ActivityPage() {
     setLoading(true)
     setError('')
     try {
-      setItems((await getAuditLogs()) || [])
+      setItems((await getAuditLogs(200)) || [])
     } catch (loadError) {
       setError(loadError.message || '操作记录加载失败')
     } finally {
@@ -1170,39 +1311,152 @@ function ActivityPage() {
 
   useEffect(() => { load() }, [])
 
-  useEffect(() => {
-    const maxPage = Math.max(1, Math.ceil(items.length / pageSize))
-    setPage((current) => Math.min(current, maxPage))
-  }, [items.length, pageSize])
+  const actorOptions = useMemo(() => {
+    const values = new Map()
+    items.forEach((item) => {
+      const value = item.user_id ? String(item.user_id) : 'system'
+      const label = item.user_name || (item.user_id ? `用户 ${item.user_id}` : '系统')
+      if (!values.has(value)) values.set(value, label)
+    })
+    return [...values.entries()]
+      .map(([value, label]) => ({ value, label }))
+      .sort((left, right) => left.label.localeCompare(right.label, 'zh-CN'))
+  }, [items])
 
-  const visibleItems = items.slice((page - 1) * pageSize, page * pageSize)
+  const actionOptions = useMemo(() => [...new Set(items.map((item) => item.action).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, 'zh-CN'))
+    .map((value) => ({ value, label: value })), [items])
+
+  const filteredItems = useMemo(() => {
+    const normalizedKeyword = keyword.trim().toLowerCase()
+    return items.filter((item) => {
+      const itemActor = item.user_id ? String(item.user_id) : 'system'
+      if (actor && itemActor !== actor) return false
+      if (action && item.action !== action) return false
+      if (!normalizedKeyword) return true
+      const searchable = [
+        item.id,
+        item.user_id,
+        item.user_name,
+        item.action,
+        item.target,
+        item.created_at,
+        formatDate(item.created_at),
+      ].filter(Boolean).join(' ').toLowerCase()
+      return searchable.includes(normalizedKeyword)
+    })
+  }, [action, actor, items, keyword])
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(filteredItems.length / pageSize))
+    setPage((current) => Math.min(current, maxPage))
+  }, [filteredItems.length, pageSize])
+
+  useEffect(() => {
+    setPage(1)
+  }, [action, actor, keyword])
+
+  const clearFilters = () => {
+    setKeyword('')
+    setActor('')
+    setAction('')
+  }
+
+  const columns = [
+    {
+      title: '时间',
+      dataIndex: 'created_at',
+      width: 174,
+      render: (value) => <Typography.Text type="secondary" className="activity-time">{formatDate(value, true)}</Typography.Text>,
+    },
+    {
+      title: '操作人',
+      dataIndex: 'user_name',
+      width: 150,
+      render: (value, item) => <div className="activity-operator"><span className="activity-operator-avatar">{(value || '系').slice(0, 1)}</span><span><strong>{value || (item.user_id ? `用户 ${item.user_id}` : '系统')}</strong>{item.user_id ? <small>ID {item.user_id}</small> : <small>系统操作</small>}</span></div>,
+    },
+    {
+      title: '操作事项',
+      dataIndex: 'action',
+      width: 180,
+      render: (value) => <Tag color="blue" className="activity-action-tag">{value || '系统操作'}</Tag>,
+    },
+    {
+      title: '目标 / 关键字段',
+      dataIndex: 'target',
+      render: (value) => <Typography.Text className="activity-target-cell" title={value || '系统'}>{value || '系统'}</Typography.Text>,
+    },
+    {
+      title: '记录编号',
+      dataIndex: 'id',
+      width: 112,
+      render: (value) => <Typography.Text code>#{value || '-'}</Typography.Text>,
+    },
+  ]
 
   return <div className="page-wrap">
     <div className="page-heading activity-heading">
       <div>
         <Typography.Title level={2}>操作记录</Typography.Title>
+        <Typography.Paragraph type="secondary">记录空间内的关键配置、发布和运行操作，可按操作人、事项或目标快速筛选。</Typography.Paragraph>
       </div>
       <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新记录</Button>
     </div>
     {error && <div className="activity-error">{error}</div>}
     <Card variant="borderless" className="activity-panel">
-      {loading ? <div className="loading-placeholder">加载记录中...</div> : items.length ? <><List
-        dataSource={visibleItems}
-        renderItem={(item) => <List.Item className="activity-item">
-          <div className="activity-marker" />
-          <div className="activity-content">
-            <div className="activity-item-head"><Typography.Text strong>{item.action}</Typography.Text><Typography.Text type="secondary">{formatDate(item.created_at)}</Typography.Text></div>
-            <div className="activity-target">{item.target || '系统'}</div>
-            <Typography.Text type="secondary" className="activity-actor">操作人：{item.user_name || (item.user_id ? `用户 ${item.user_id}` : '系统')}</Typography.Text>
-          </div>
-        </List.Item>}
-      /><Pagination className="activity-pagination" current={page} pageSize={pageSize} total={items.length} showSizeChanger pageSizeOptions={['10', '20', '50']} showTotal={(total, range) => `${range[0]}-${range[1]} / 共 ${total} 条记录`} onChange={(nextPage, nextPageSize) => { setPage(nextPage); setPageSize(nextPageSize) }} /></> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无操作记录" />}
+      <div className="activity-toolbar">
+        <Input
+          allowClear
+          value={keyword}
+          prefix={<SearchOutlined />}
+          placeholder="搜索操作人、操作事项、目标或关键字段"
+          onChange={(event) => setKeyword(event.target.value)}
+          className="activity-keyword"
+        />
+        <Select
+          allowClear
+          value={actor || undefined}
+          placeholder="操作人"
+          options={actorOptions}
+          onChange={(value) => setActor(value || '')}
+          className="activity-filter"
+        />
+        <Select
+          allowClear
+          value={action || undefined}
+          placeholder="操作事项"
+          options={actionOptions}
+          onChange={(value) => setAction(value || '')}
+          className="activity-filter"
+        />
+        {(keyword || actor || action) && <Button type="link" icon={<ClearOutlined />} onClick={clearFilters}>清空筛选</Button>}
+        <Typography.Text type="secondary" className="activity-result-count">共 {filteredItems.length} 条</Typography.Text>
+      </div>
+      <Table
+        rowKey={(item) => item.id || `${item.created_at}-${item.action}-${item.target}`}
+        columns={columns}
+        dataSource={filteredItems}
+        loading={loading}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={items.length ? '没有匹配的操作记录' : '暂无操作记录'} /> }}
+        pagination={{
+          current: page,
+          pageSize,
+          total: filteredItems.length,
+          showSizeChanger: true,
+          pageSizeOptions: ['10', '20', '50'],
+          showTotal: (total, range) => `${range[0]}-${range[1]} / 共 ${total} 条记录`,
+          onChange: (nextPage, nextPageSize) => {
+            setPage(nextPage)
+            setPageSize(nextPageSize)
+          },
+        }}
+      />
     </Card>
   </div>
 }
 
 function normalizeReleases(items) { return items.map(normalizeRelease) }
-function formatDate(value) { if (!value) return '-'; const date = new Date(value); if (Number.isNaN(date.getTime())) return value; return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
+function formatDate(value, withYear = false) { if (!value) return '-'; const date = new Date(value); if (Number.isNaN(date.getTime())) return value; return date.toLocaleString('zh-CN', withYear ? { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' } : { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function strategyLabel(value) { return ({ rolling: '滚动发布', canary: '灰度发布', blue_green: '蓝绿发布' })[value] || '滚动发布' }
 
 export default App

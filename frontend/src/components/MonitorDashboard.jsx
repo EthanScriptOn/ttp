@@ -55,7 +55,7 @@ function NodeValue({ value, unit = '%', precision = 1, available = true }) {
   return available && isNumber(value) ? formatMetric(value, unit, precision) : '暂无'
 }
 
-export default function MonitorDashboard({ scope = 'project', metrics, pods = [], project, cluster, targets = [], selectedTargetId, onTargetChange, onRefresh, onOpenCluster, focusPod, onClearPod }) {
+export default function MonitorDashboard({ scope = 'project', metrics, pods = [], project, cluster, targets = [], selectedTargetId, onTargetChange, onRefresh, onOpenCluster, onMonitoringAction, monitoringActionLabel = '查看安装状态', focusPod, onClearPod }) {
   const [range, setRange] = useState('1h')
   const [customRange, setCustomRange] = useState(null)
   const [autoRefresh, setAutoRefresh] = useState(false)
@@ -215,7 +215,7 @@ export default function MonitorDashboard({ scope = 'project', metrics, pods = []
         <div className="monitor-heading-line"><Typography.Title level={4}>{isCluster ? `集群监控 · ${cluster?.name || cluster?.id || '当前集群'}` : '项目监控'}</Typography.Title></div>
       </div>
       <Space wrap className="monitor-toolbar-actions">
-        {!isCluster && onOpenCluster && <Button type="link" onClick={onOpenCluster}>查看集群详情 →</Button>}
+        {!isCluster && onOpenCluster && <Button type="link" onClick={onOpenCluster}>查看集群详情</Button>}
         {!isCluster && targets.length > 0 && <DeploymentTargetSelect className="monitor-target-select" targets={targets} value={selectedTarget?.id} onChange={onTargetChange} disabled={typeof onTargetChange !== 'function'} />}
         <Select value={range} onChange={setRange} options={RANGE_OPTIONS.map(({ value, label }) => ({ value, label }))} aria-label="监控时间范围" />
         {range === 'custom' && <DatePicker.RangePicker
@@ -239,7 +239,14 @@ export default function MonitorDashboard({ scope = 'project', metrics, pods = []
 
     {focusPod && <div className="monitor-focus-note">曲线按当前环境统计；Pod 状态、版本、节点和重启次数为当前 Pod 信息。</div>}
 
-    {metrics?.metrics_available === false && <Alert className="monitor-source-alert" type="warning" showIcon message="当前能看到 Pod 和集群基础信息，资源曲线还没有数据" description={metrics.metrics_message || '请确认 Prometheus、node-exporter 和 kube-state-metrics 已安装并正常运行。'} />}
+    {metrics?.metrics_available === false && <Alert
+      className="monitor-source-alert"
+      type="warning"
+      showIcon
+      message="当前能看到 Pod 和集群基础信息，资源曲线还没有数据"
+      description={metrics.monitoring?.message || metrics.metrics_message || '请确认 Prometheus、node-exporter 和 kube-state-metrics 已安装并正常运行。'}
+      action={onMonitoringAction ? <Button size="small" type="primary" onClick={onMonitoringAction}>{monitoringActionLabel}</Button> : undefined}
+    />}
     {metrics?.metrics_available !== false && metrics?.monitoring?.history_available === false && <Alert className="monitor-source-alert" type="info" showIcon message="Prometheus 历史数据正在准备" description="Prometheus 采集链路就绪后，平台会保存并读取历史资源数据；强制刷新页面不会清空历史记录。" />}
 
     <section className={`monitor-status-overview status-state-${statusState}`}>

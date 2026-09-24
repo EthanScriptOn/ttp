@@ -323,6 +323,19 @@ func loadRegistryCredentials(path string) (map[string]RegistryCredential, error)
 }
 
 func (e *BuildKitExecutor) Build(parent context.Context, request imagebuild.Request) (imagebuild.Result, error) {
+	return e.build(parent, request, nil)
+}
+
+// BuildWithLogs runs the same BuildKit workflow while forwarding each
+// sanitized output line as soon as the underlying command emits it.
+func (e *BuildKitExecutor) BuildWithLogs(parent context.Context, request imagebuild.Request, onLog imagebuild.LogFunc) (imagebuild.Result, error) {
+	if onLog == nil {
+		return e.Build(parent, request)
+	}
+	return e.build(parent, request, onLog)
+}
+
+func (e *BuildKitExecutor) build(parent context.Context, request imagebuild.Request, onLog imagebuild.LogFunc) (imagebuild.Result, error) {
 	startedAt := time.Now().UTC()
 	result := imagebuild.Result{StartedAt: startedAt}
 	if e == nil {
@@ -352,7 +365,19 @@ func (e *BuildKitExecutor) Build(parent context.Context, request imagebuild.Requ
 		return result, err
 	}
 	defer cleanupAskpass()
-	if err := e.checkout(ctx, workDir, sourceDir, request, env, &result, credential.Password); err != nil {
+	var sink imagebuild.LogFunc
+	if onLog != nil {
+		var logMu sync.Mutex
+		sink = func(entry imagebuild.LogEntry) {
+			logMu.Lock()
+			defer logMu.Unlock()
+			if len(result.Logs) < 1200 {
+				result.Logs = append(result.Logs, entry)
+			}
+			onLog(entry)
+		}
+	}
+	if err := e.checkout(ctx, workDir, sourceDir, request, env, &result, credential.Password, sink); err != nil {
 		result.FinishedAt = time.Now().UTC()
 		return result, err
 	}
@@ -372,9 +397,13 @@ func (e *BuildKitExecutor) Build(parent context.Context, request imagebuild.Requ
 	metadataPath := filepath.Join(workDir, "metadata.json")
 	imageTag := imageRepository + ":sha-" + strings.ToLower(strings.TrimSpace(request.CommitSHA))
 	buildEnv := append(append([]string(nil), env...), "HOME="+workDir, "DOCKER_CONFIG="+filepath.Join(workDir, ".docker"))
-	output, buildErr := e.run(ctx, workDir, buildEnv, e.buildctlPath,
+	if sink != nil {
+		sink(imagebuild.LogEntry{Stream: "stdout", Level: "INFO", Line: "building and pushing image with BuildKit"})
+	}
+	output, buildErr := e.runLogged(ctx, workDir, buildEnv, e.buildctlPath, sink, []string{request.SourceCredential.Token, credential.Password},
 		"--addr", e.buildkitAddr,
 		"build",
+		"--progress", "plain",
 		"--frontend", "dockerfile.v0",
 		"--local", "context="+contextAbsolute,
 		"--local", "dockerfile="+filepath.Dir(dockerfileAbsolute),
@@ -383,7 +412,9 @@ func (e *BuildKitExecutor) Build(parent context.Context, request imagebuild.Requ
 		"--output", "type=image,name="+imageTag+",push=true",
 		"--metadata-file", metadataPath,
 	)
-	appendOutput(&result, output, buildErr != nil, request.SourceCredential.Token, credential.Password)
+	if sink == nil {
+		appendOutput(&result, output, buildErr != nil, request.SourceCredential.Token, credential.Password)
+	}
 	if buildErr != nil {
 		return e.failure(result, "BuildKit failed to build or push the image")
 	}
@@ -394,6 +425,9 @@ func (e *BuildKitExecutor) Build(parent context.Context, request imagebuild.Requ
 	result.Digest = digest
 	result.Image = imageRepository + "@" + digest
 	result.FinishedAt = time.Now().UTC()
+	if sink != nil {
+		sink(imagebuild.LogEntry{Stream: "stdout", Level: "INFO", Line: "image build and push completed"})
+	}
 	return result, nil
 }
 
@@ -402,36 +436,51 @@ func (e *BuildKitExecutor) Build(parent context.Context, request imagebuild.Requ
 // "Error in the HTTP2 framing layer" or a reset connection, so the network
 // steps force HTTP/1.1 and retry with backoff before the release is marked
 // failed. Local-only steps never retry.
-func (e *BuildKitExecutor) checkout(ctx context.Context, workDir, sourceDir string, request imagebuild.Request, env []string, result *imagebuild.Result, registryPassword string) error {
+func (e *BuildKitExecutor) checkout(ctx context.Context, workDir, sourceDir string, request imagebuild.Request, env []string, result *imagebuild.Result, registryPassword string, sink imagebuild.LogFunc) error {
 	localSteps := [][]string{
 		{"init", "--quiet", sourceDir},
 		{"-C", sourceDir, "remote", "add", "origin", request.RepositoryURL},
 	}
-	fetchStep := []string{"-C", sourceDir, "-c", "http.version=HTTP/1.1", "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "fetch", "--depth=1", "origin", request.CommitSHA}
+	fetchStep := []string{"-C", sourceDir, "-c", "http.version=HTTP/1.1", "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "fetch", "--progress", "--depth=1", "origin", request.CommitSHA}
 	checkoutStep := []string{"-C", sourceDir, "checkout", "--quiet", "--detach", "FETCH_HEAD"}
 
+	if sink != nil {
+		sink(imagebuild.LogEntry{Stream: "stdout", Level: "INFO", Line: "preparing source workspace"})
+	}
 	for _, args := range localSteps {
-		output, err := e.run(ctx, workDir, env, e.gitPath, args...)
-		appendOutput(result, output, err != nil, request.SourceCredential.Token, registryPassword)
+		output, err := e.runLogged(ctx, workDir, env, e.gitPath, sink, []string{request.SourceCredential.Token, registryPassword}, args...)
+		if sink == nil {
+			appendOutput(result, output, err != nil, request.SourceCredential.Token, registryPassword)
+		}
 		if err != nil {
 			_, failure := e.failure(*result, "source checkout failed")
 			return failure
 		}
 	}
-	if err := e.runGitWithRetry(ctx, workDir, env, fetchStep, request.SourceCredential.Token, registryPassword, result, "source fetch failed after retries"); err != nil {
+	if err := e.runGitWithRetry(ctx, workDir, env, fetchStep, request.SourceCredential.Token, registryPassword, result, sink, "source fetch failed after retries"); err != nil {
 		return err
 	}
-	output, err := e.run(ctx, workDir, env, e.gitPath, checkoutStep...)
-	appendOutput(result, output, err != nil, request.SourceCredential.Token, registryPassword)
+	if sink != nil {
+		sink(imagebuild.LogEntry{Stream: "stdout", Level: "INFO", Line: "checking out source revision"})
+	}
+	output, err := e.runLogged(ctx, workDir, env, e.gitPath, sink, []string{request.SourceCredential.Token, registryPassword}, checkoutStep...)
+	if sink == nil {
+		appendOutput(result, output, err != nil, request.SourceCredential.Token, registryPassword)
+	}
 	if err != nil {
 		_, failure := e.failure(*result, "source checkout failed")
 		return failure
 	}
-	revOutput, err := e.run(ctx, workDir, env, e.gitPath, "-C", sourceDir, "rev-parse", "HEAD")
-	appendOutput(result, revOutput, err != nil, request.SourceCredential.Token, registryPassword)
+	revOutput, err := e.runLogged(ctx, workDir, env, e.gitPath, sink, []string{request.SourceCredential.Token, registryPassword}, "-C", sourceDir, "rev-parse", "HEAD")
+	if sink == nil {
+		appendOutput(result, revOutput, err != nil, request.SourceCredential.Token, registryPassword)
+	}
 	if err != nil || !strings.EqualFold(strings.TrimSpace(revOutput), strings.TrimSpace(request.CommitSHA)) {
 		_, failure := e.failure(*result, "checked-out source does not match the requested commit")
 		return failure
+	}
+	if sink != nil {
+		sink(imagebuild.LogEntry{Stream: "stdout", Level: "INFO", Line: "source revision ready"})
 	}
 	return nil
 }
@@ -439,10 +488,15 @@ func (e *BuildKitExecutor) checkout(ctx context.Context, workDir, sourceDir stri
 // runGitWithRetry executes a network-bound git step up to fetchAttempts times
 // with exponential backoff. Every attempt's sanitized output is retained so
 // operators can see the flaky failure they retried through.
-func (e *BuildKitExecutor) runGitWithRetry(ctx context.Context, workDir string, env []string, args []string, token, registryPassword string, result *imagebuild.Result, failureMessage string) error {
+func (e *BuildKitExecutor) runGitWithRetry(ctx context.Context, workDir string, env []string, args []string, token, registryPassword string, result *imagebuild.Result, sink imagebuild.LogFunc, failureMessage string) error {
 	for attempt := 1; attempt <= fetchAttempts; attempt++ {
-		output, err := e.run(ctx, workDir, env, e.gitPath, args...)
-		appendOutput(result, output, err != nil, token, registryPassword)
+		if sink != nil {
+			sink(imagebuild.LogEntry{Stream: "stdout", Level: "INFO", Line: fmt.Sprintf("fetching source revision (attempt %d/%d)", attempt, fetchAttempts)})
+		}
+		output, err := e.runLogged(ctx, workDir, env, e.gitPath, sink, []string{token, registryPassword}, args...)
+		if sink == nil {
+			appendOutput(result, output, err != nil, token, registryPassword)
+		}
 		if err == nil {
 			return nil
 		}
@@ -451,7 +505,12 @@ func (e *BuildKitExecutor) runGitWithRetry(ctx context.Context, workDir string, 
 		}
 		if attempt < fetchAttempts {
 			wait := time.Duration(1<<(attempt-1)) * 3 * time.Second
-			appendOutput(result, fmt.Sprintf("git network attempt %d/%d failed, retrying in %s", attempt, fetchAttempts, wait), false, token, registryPassword)
+			retryMessage := fmt.Sprintf("git network attempt %d/%d failed, retrying in %s", attempt, fetchAttempts, wait)
+			if sink == nil {
+				appendOutput(result, retryMessage, false, token, registryPassword)
+			} else {
+				sink(imagebuild.LogEntry{Stream: "stdout", Level: "INFO", Line: retryMessage})
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -552,6 +611,148 @@ func (e *BuildKitExecutor) run(ctx context.Context, directory string, environmen
 		output.Write([]byte("\n[tool output truncated]\n"))
 	}
 	return output.String(), err
+}
+
+func (e *BuildKitExecutor) runLogged(ctx context.Context, directory string, environment []string, path string, sink imagebuild.LogFunc, secrets []string, args ...string) (string, error) {
+	if sink == nil {
+		return e.run(ctx, directory, environment, path, args...)
+	}
+	return e.runStream(ctx, directory, environment, path, sink, secrets, args...)
+}
+
+func (e *BuildKitExecutor) runStream(ctx context.Context, directory string, environment []string, path string, sink imagebuild.LogFunc, secrets []string, args ...string) (string, error) {
+	command := exec.CommandContext(ctx, path, args...)
+	command.Dir = directory
+	command.Env = environment
+	output := &cappedBuffer{limit: maxToolOutputBytes}
+	stdout := &streamLineWriter{output: output, stream: "stdout", level: "INFO", sink: sink, secrets: secrets}
+	stderr := &streamLineWriter{output: output, stream: "stderr", level: "ERROR", sink: sink, secrets: secrets}
+	if isBuildKitCommand(path, args) {
+		// buildctl --progress plain writes its normal progress stream to stderr.
+		// Only actual failure/warning lines should be elevated in the release log.
+		stderr.levelFunc = classifyBuildKitStderr
+	} else if isGitFetchCommand(path, args) {
+		// Git writes successful fetch progress ("From ..." and
+		// "* branch ... -> FETCH_HEAD") to stderr as well. Keep those lines
+		// informational so a successful release does not show an exception card.
+		stderr.levelFunc = classifyGitFetchStderr
+	}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	err := command.Run()
+	stdout.Flush()
+	stderr.Flush()
+	if output.truncated {
+		output.Write([]byte("\n[tool output truncated]\n"))
+		sink(imagebuild.LogEntry{Stream: "stderr", Level: "WARN", Line: "[tool output truncated]"})
+	}
+	return output.String(), err
+}
+
+type streamLineWriter struct {
+	output    *cappedBuffer
+	stream    string
+	level     string
+	levelFunc func(string) string
+	sink      imagebuild.LogFunc
+	secrets   []string
+	mu        sync.Mutex
+	pending   string
+}
+
+func (w *streamLineWriter) Write(value []byte) (int, error) {
+	if w.output != nil {
+		_, _ = w.output.Write(value)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pending += string(value)
+	for {
+		index := strings.IndexAny(w.pending, "\r\n")
+		if index < 0 {
+			break
+		}
+		delimiter := w.pending[index]
+		line := w.pending[:index]
+		w.pending = w.pending[index+1:]
+		if delimiter == '\r' && strings.HasPrefix(w.pending, "\n") {
+			w.pending = w.pending[1:]
+		}
+		w.emit(line)
+	}
+	return len(value), nil
+}
+
+func (w *streamLineWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if strings.TrimSpace(w.pending) != "" {
+		w.emit(w.pending)
+	}
+	w.pending = ""
+}
+
+func (w *streamLineWriter) emit(value string) {
+	value = redact(strings.TrimSpace(value), w.secrets...)
+	if value == "" || w.sink == nil {
+		return
+	}
+	level := w.level
+	if w.levelFunc != nil {
+		level = w.levelFunc(value)
+	}
+	w.sink(imagebuild.LogEntry{Stream: w.stream, Level: level, Line: value})
+}
+
+func isBuildKitCommand(path string, args []string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(path)))
+	if base != "buildctl" && base != "buildctl-daemonless.sh" {
+		return false
+	}
+	for _, arg := range args {
+		if strings.EqualFold(strings.TrimSpace(arg), "build") {
+			return true
+		}
+	}
+	return false
+}
+
+func isGitFetchCommand(path string, args []string) bool {
+	if strings.ToLower(filepath.Base(strings.TrimSpace(path))) != "git" {
+		return false
+	}
+	for _, arg := range args {
+		if strings.EqualFold(strings.TrimSpace(arg), "fetch") {
+			return true
+		}
+	}
+	return false
+}
+
+func classifyBuildKitStderr(line string) string {
+	value := strings.ToLower(strings.TrimSpace(line))
+	switch {
+	case strings.Contains(value, "warning"), strings.Contains(value, "deprecated"):
+		return "WARN"
+	case strings.Contains(value, "failed"), strings.Contains(value, "error"), strings.Contains(value, "fatal"),
+		strings.Contains(value, "denied"), strings.Contains(value, "unauthorized"), strings.Contains(value, "not found"):
+		return "ERROR"
+	default:
+		return "INFO"
+	}
+}
+
+func classifyGitFetchStderr(line string) string {
+	value := strings.ToLower(strings.TrimSpace(line))
+	switch {
+	case strings.Contains(value, "warning"):
+		return "WARN"
+	case strings.Contains(value, "fatal"), strings.Contains(value, "error"), strings.Contains(value, "failed"),
+		strings.Contains(value, "denied"), strings.Contains(value, "unauthorized"):
+		return "ERROR"
+	default:
+		return "INFO"
+	}
 }
 
 func gitEnvironment(workDir string, credential imagebuild.SourceCredential) ([]string, func(), error) {

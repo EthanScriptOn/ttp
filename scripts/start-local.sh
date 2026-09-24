@@ -61,6 +61,32 @@ wait_for_builder() {
   return 1
 }
 
+configure_ttp_proxy() {
+  local proxy_url="${TTP_PROXY_URL:-}"
+  if [[ -z "$proxy_url" ]]; then
+    return 0
+  fi
+  if [[ ! "$proxy_url" =~ ^(http|https|socks5|socks5h):// ]]; then
+    printf 'TTP_PROXY_URL must use an http, https, socks5, or socks5h URL.\n' >&2
+    return 2
+  fi
+  # Keep the proxy scoped to this script's process tree. Local TTP services
+  # must bypass it so the API can still reach the builder and local registry.
+  export HTTP_PROXY="$proxy_url"
+  export HTTPS_PROXY="$proxy_url"
+  export ALL_PROXY="$proxy_url"
+  export http_proxy="$proxy_url"
+  export https_proxy="$proxy_url"
+  export all_proxy="$proxy_url"
+  local local_hosts="localhost,127.0.0.1,::1"
+  if [[ -n "${NO_PROXY:-}" ]]; then
+    local_hosts="$local_hosts,${NO_PROXY}"
+  fi
+  export NO_PROXY="$local_hosts"
+  export no_proxy="$local_hosts"
+  printf 'TTP network proxy: %s (local services bypassed)\n' "$proxy_url"
+}
+
 required=(MYSQL_PASSWORD MYSQL_ROOT_PASSWORD CICD_JWT_SECRET CICD_KUBE_CLUSTER_ID)
 for name in "${required[@]}"; do
   if [[ -z "${!name:-}" ]]; then
@@ -141,6 +167,11 @@ if [[ -z "$backend_port" || "$backend_port" == "$CICD_ADDR" ]]; then
 fi
 
 docker compose "${compose_args[@]}" up -d --wait mysql
+
+# Apply the optional proxy only after local dependencies are ready. The
+# backend, builder, and their child processes inherit it; the host system does
+# not have its proxy settings changed.
+configure_ttp_proxy
 
 backend_pid=''
 frontend_pid=''

@@ -1,13 +1,27 @@
 .pod-terminal-title { display: flex; min-width: 0; align-items: center; gap: 9px; }
-.pod-terminal-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pod-terminal-title > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pod-terminal-title .anticon { color: #16856b; }
-.pod-terminal-context { display: flex; min-height: 34px; align-items: center; justify-content: space-between; margin-bottom: 12px; padding: 0 11px; border: 1px solid #dbe9e3; border-radius: 6px; color: #5f756d; background: #f8fbf9; font-size: 12px; }
-.pod-terminal-screen { min-height: 440px; max-height: calc(100vh - 260px); overflow: auto; margin: 0 0 12px; padding: 16px; border: 1px solid #cfe4d8; border-radius: 7px; color: #29483b; background: #f5fbf7; font: 12px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.pod-terminal-screen pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
-.pod-terminal-cursor { color: #07a957; animation: pod-terminal-blink 1s steps(2, start) infinite; }
-.pod-terminal-input-row { display: flex; align-items: center; gap: 8px; }
-.pod-terminal-input-row .ant-typography { color: #16856b; }
-.pod-terminal-input-row .ant-input { min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.pod-terminal-actions { margin-top: 10px; }
-@keyframes pod-terminal-blink { 50% { opacity: 0; } }
-@media (max-width: 660px) { .pod-terminal-screen { min-height: 360px; } .pod-terminal-input-row { align-items: stretch; } .pod-terminal-input-row .ant-btn { padding: 0 10px; } }
+.pod-terminal-shell { display: flex; height: calc(100vh - 110px); min-height: 520px; flex-direction: column; background: #f4f8f6; }
+.pod-terminal-toolbar { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 12px; padding: 0 18px; border-bottom: 1px solid #dbe7e1; background: #fff; }
+.pod-terminal-meta { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.pod-terminal-context { max-width: 520px; overflow: hidden; color: #5f756d; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.pod-terminal-dot { color: #a3b4ad; }
+.pod-terminal-toolbar .ant-tag { margin-inline-end: 0; }
+.pod-terminal-permission { margin: 12px 18px 0; padding: 9px 12px; border: 1px solid #ffd591; border-radius: 6px; color: #8b5e17; background: #fffbe6; font-size: 12px; }
+.pod-terminal-screen { position: relative; min-height: 0; flex: 1; overflow: hidden; margin: 14px 18px; padding: 13px 15px; border: 1px solid #1f352d; border-radius: 8px; background: #0b1110; box-shadow: 0 8px 24px rgb(24 62 45 / 8%); }
+.pod-terminal-screen .xterm { height: 100%; }
+.pod-terminal-screen .xterm-viewport { border-radius: 6px; background: #0b1110 !important; }
+.pod-terminal-screen .xterm-screen { padding: 1px; }
+.pod-terminal-footer { display: flex; min-height: 44px; align-items: center; gap: 8px; padding: 0 18px; border-top: 1px solid #dbe7e1; background: #fff; font-size: 12px; }
+.pod-terminal-status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #a3b4ad; }
+.pod-terminal-status-dot.connected { background: #2f9d6b; box-shadow: 0 0 0 3px rgb(47 157 107 / 14%); }
+.pod-terminal-status-dot.connecting { background: #e6a23c; animation: pod-terminal-pulse 1.2s ease-in-out infinite; }
+.pod-terminal-status-dot.error { background: #d9485f; }
+.pod-terminal-footer .ant-typography { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes pod-terminal-pulse { 50% { opacity: .35; } }
+@media (max-width: 660px) {
+  .pod-terminal-shell { min-height: 420px; }
+  .pod-terminal-toolbar { padding: 0 12px; }
+  .pod-terminal-screen { margin: 10px 12px; padding: 9px; }
+  .pod-terminal-footer { padding: 0 12px; }
+}

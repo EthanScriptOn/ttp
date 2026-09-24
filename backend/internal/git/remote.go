@@ -500,18 +500,33 @@ type responseMeta struct {
 }
 
 func (p *remoteProvider) getJSON(ctx context.Context, operation string, endpoint *url.URL, target any) (responseMeta, error) {
+	return p.sendJSON(ctx, operation, http.MethodGet, endpoint, nil, target)
+}
+
+func (p *remoteProvider) sendJSON(ctx context.Context, operation, method string, endpoint *url.URL, payload any, target any) (responseMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return responseMeta{}, err
 	}
 	if err := p.allowlist.validate(endpoint); err != nil {
 		return responseMeta{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	var requestBody io.Reader
+	if payload != nil {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return responseMeta{}, fmt.Errorf("%s: request could not be encoded: %w", operation, err)
+		}
+		requestBody = strings.NewReader(string(encoded))
+	}
+	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), requestBody)
 	if err != nil {
 		return responseMeta{}, fmt.Errorf("%s: request could not be created: %w", operation, err)
 	}
 	request.Header.Set("User-Agent", "cicd-platform-git-provider/1")
 	request.Header.Set("Accept", "application/json")
+	if payload != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	if p.kind == remoteGitHub {
 		request.Header.Set("Accept", "application/vnd.github+json")
 		request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -543,6 +558,9 @@ func (p *remoteProvider) getJSON(ctx context.Context, operation string, endpoint
 	}
 	if len(body) > maxResponseBytes {
 		return meta, fmt.Errorf("%s: %w", operation, ErrProviderResponse)
+	}
+	if target == nil || len(body) == 0 {
+		return meta, nil
 	}
 	if err := json.Unmarshal(body, target); err != nil {
 		return meta, fmt.Errorf("%s: %w", operation, ErrProviderResponse)

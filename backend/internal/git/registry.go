@@ -66,6 +66,7 @@ var _ ServiceAccountProvider = (*RegistryProvider)(nil)
 var _ AccessChecker = (*RegistryProvider)(nil)
 var _ RepositoryCredentialRegistry = (*RegistryProvider)(nil)
 var _ ImageRegistryRequirement = (*RegistryProvider)(nil)
+var _ BranchMerger = (*RegistryProvider)(nil)
 
 // RequiresImageRegistryConnection marks the production provider used by TTP.
 // Projects managed by this provider must select a space-scoped image registry
@@ -391,6 +392,18 @@ func (r *RegistryProvider) GetCommit(ctx context.Context, repositoryID, sha stri
 		return Commit{}, err
 	}
 	return entry.provider.GetCommit(ctx, entry.backendID, sha)
+}
+
+func (r *RegistryProvider) MergeBranch(ctx context.Context, repositoryID, sourceBranch, targetBranch string) (BranchMergeResult, error) {
+	entry, err := r.providerFor(repositoryID)
+	if err != nil {
+		return BranchMergeResult{}, err
+	}
+	merger, ok := entry.provider.(BranchMerger)
+	if !ok {
+		return BranchMergeResult{}, ErrWriteUnsupported
+	}
+	return merger.MergeBranch(ctx, entry.backendID, sourceBranch, targetBranch)
 }
 
 // ServiceAccount returns the installation-wide public identity. Credentials

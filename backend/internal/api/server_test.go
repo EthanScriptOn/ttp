@@ -109,6 +109,36 @@ spec:
 	}
 }
 
+func TestProjectSummaryUsesDeploymentTargetRuntimeLocation(t *testing.T) {
+	server := testServer()
+	legacyNamespace := "legacy-project-namespace"
+	if _, err := server.deps.Store.UpdateProject(context.Background(), "space-lab", "reverse-lab", store.UpdateProjectInput{Namespace: &legacyNamespace}); err != nil {
+		t.Fatalf("update legacy project namespace: %v", err)
+	}
+
+	token := loginForTest(t, server.Router())
+	projects := doRequest(t, server.Router(), http.MethodGet, "/api/projects", token, "")
+	if projects.Code != http.StatusOK {
+		t.Fatalf("list projects: expected 200, got %d: %s", projects.Code, projects.Body.String())
+	}
+	var response struct {
+		Items []struct {
+			Health          string `json:"health"`
+			PodCount        int    `json:"pod_count"`
+			HealthyPodCount int    `json:"healthy_pod_count"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(projects.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Items) != 1 {
+		t.Fatalf("unexpected project summary: %#v", response.Items)
+	}
+	if response.Items[0].Health != "healthy" || response.Items[0].PodCount != 2 || response.Items[0].HealthyPodCount != 2 {
+		t.Fatalf("project summary did not use deployment target namespace: %#v", response.Items[0])
+	}
+}
+
 func TestSpaceScopedReleaseAndRuntimeFlow(t *testing.T) {
 	server := testServer()
 	token := loginForTest(t, server.Router())

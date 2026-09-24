@@ -24,6 +24,8 @@ type DemoProvider struct {
 	mergeSessions map[string]demoMergeSession
 }
 
+var _ BranchMerger = (*DemoProvider)(nil)
+
 type demoMergeSession struct {
 	request   MergeRequest
 	conflicts []MergeConflict
@@ -314,4 +316,39 @@ func (p *DemoProvider) GetCommit(ctx context.Context, repositoryID, sha string) 
 		}
 	}
 	return Commit{}, ErrCommitNotFound
+}
+
+// MergeBranch keeps the local fixture useful for exercising the same
+// post-release policy as a remote provider. It creates a deterministic
+// synthetic merge commit on the demo base branch and never touches a real
+// repository.
+func (p *DemoProvider) MergeBranch(ctx context.Context, repositoryID, sourceBranch, targetBranch string) (BranchMergeResult, error) {
+	if err := ctx.Err(); err != nil {
+		return BranchMergeResult{}, err
+	}
+	sourceBranch, targetBranch = strings.TrimSpace(sourceBranch), strings.TrimSpace(targetBranch)
+	if sourceBranch == "" || targetBranch == "" {
+		return BranchMergeResult{}, ErrBranchNotFound
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	repository, ok := p.repositories[repositoryID]
+	if !ok {
+		return BranchMergeResult{}, ErrRepositoryNotFound
+	}
+	source, sourceOK := repository.branches[sourceBranch]
+	base, baseOK := repository.branches[targetBranch]
+	if !sourceOK || len(source) == 0 || !baseOK || len(base) == 0 {
+		return BranchMergeResult{}, ErrBranchNotFound
+	}
+	if sourceBranch == targetBranch || containsDemoCommit(base, source[0].SHA) {
+		return BranchMergeResult{CommitSHA: base[0].SHA, Message: "演示模式：目标分支已经包含发布分支，跳过重复 merge。"}, nil
+	}
+	hashInput := repositoryID + "\x00" + sourceBranch + "\x00" + targetBranch + "\x00" + source[0].SHA
+	sum := sha256.Sum256([]byte(hashInput))
+	sha := hex.EncodeToString(sum[:])
+	commit := Commit{SHA: sha, ShortSHA: shortSHA(sha), Message: "Merge " + sourceBranch + " into " + targetBranch, Author: "demo", AuthoredAt: time.Now().UTC()}
+	repository.branches[targetBranch] = append([]Commit{commit}, base...)
+	p.repositories[repositoryID] = repository
+	return BranchMergeResult{CommitSHA: sha, Message: "演示模式：自动 merge 已完成。"}, nil
 }

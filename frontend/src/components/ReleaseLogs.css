@@ -13,6 +13,9 @@
 .release-log-toolbar-tools input { width: 168px; }
 .release-log-toolbar-tools input::placeholder { color: #8aa097; }
 .release-log-toolbar-tools input:focus,.release-log-toolbar-tools select:focus { border-color: #07a957; }
+.release-log-level-select { position: relative; display: flex; height: 28px; align-items: center; }
+.release-log-level-select select { width: 114px; padding: 0 27px 0 10px; appearance: none; -webkit-appearance: none; line-height: normal; text-align: center; text-align-last: center; }
+.release-log-level-select::after { position: absolute; top: 50%; right: 11px; width: 7px; height: 7px; border-right: 1.5px solid #49665b; border-bottom: 1.5px solid #49665b; content: ''; pointer-events: none; transform: translateY(-70%) rotate(45deg); }
 .release-log-terminal-body { max-height: 390px; overflow: auto; padding: 7px 0; }
 .release-log-line { display: grid; grid-template-columns: 88px 72px 46px minmax(0, 1fr); gap: 9px; align-items: baseline; min-height: 27px; padding: 4px 12px; border-left: 2px solid transparent; font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .release-log-line:hover { background: #eef8f2; }
@@ -38,6 +41,45 @@
 .release-log-summary-line.active b { color: #a5671f; }
 .release-log-summary-line.failed b { color: #b34e4a; }
 .release-log-empty { padding: 34px 15px; color: #789187; text-align: center; font-size: 12px; }
+
+/* 原始输出采用 Linux 终端配色，便于连续阅读实时日志。 */
+.release-log-terminal.is-linux { border-color:#30363d; border-radius:7px; background:#0d1117; color:#d6deeb; }
+.release-log-terminal.is-linux .release-log-toolbar { border-bottom-color:#30363d; background:#161b22; }
+.release-log-terminal.is-linux .release-log-toolbar-title strong { color:#e6edf3; }
+.release-log-terminal.is-linux .release-log-toolbar-title > span:last-child { color:#8b949e; }
+.release-log-terminal.is-linux .release-log-live-dot { background:#3fb950; box-shadow:0 0 0 3px rgba(63,185,80,.16); }
+.release-log-terminal.is-linux .release-log-view-tabs button { color:#8b949e; }
+.release-log-terminal.is-linux .release-log-view-tabs button:hover { color:#7ee787; background:#1f3325; }
+.release-log-terminal.is-linux .release-log-view-tabs button.active { border-color:#238636; color:#7ee787; background:#1f3325; }
+.release-log-terminal.is-linux .release-log-toolbar-tools input,
+.release-log-terminal.is-linux .release-log-toolbar-tools select { border-color:#30363d; color:#e6edf3; background:#0d1117; }
+.release-log-terminal.is-linux .release-log-toolbar-tools input::placeholder { color:#8b949e; }
+.release-log-terminal.is-linux .release-log-toolbar-tools input:focus,
+.release-log-terminal.is-linux .release-log-toolbar-tools select:focus { border-color:#2ea043; }
+.release-log-terminal.is-linux .release-log-level-select::after { border-color:#8b949e; }
+.release-log-terminal.is-linux .release-log-terminal-body { background:#0d1117; }
+.release-log-terminal.is-linux .release-log-line { border-left-color:transparent; }
+.release-log-terminal.is-linux .release-log-line:hover { background:#161b22; }
+.release-log-terminal.is-linux .release-log-line.error { border-left-color:#f85149; background:#2d1517; }
+.release-log-terminal.is-linux .release-log-line.warn { border-left-color:#d29922; background:#2b2111; }
+.release-log-terminal.is-linux .release-log-line time { color:#8b949e; }
+.release-log-terminal.is-linux .release-log-source { color:#56d364; }
+.release-log-terminal.is-linux .release-log-level { color:#8b949e; }
+.release-log-terminal.is-linux .release-log-line.error .release-log-level { color:#ff7b72; }
+.release-log-terminal.is-linux .release-log-line code { color:#d6deeb; }
+.release-log-terminal.is-linux .release-log-summary-body { background:#0d1117; }
+.release-log-terminal.is-linux .release-log-summary-line { border-bottom-color:#30363d; }
+.release-log-terminal.is-linux .release-log-summary-marker { color:#7ee787; background:#1f3325; }
+.release-log-terminal.is-linux .release-log-summary-line.active .release-log-summary-marker { color:#d29922; background:#2b2111; }
+.release-log-terminal.is-linux .release-log-summary-line.failed .release-log-summary-marker { color:#ff7b72; background:#2d1517; }
+.release-log-terminal.is-linux .release-log-summary-line strong { color:#e6edf3; }
+.release-log-terminal.is-linux .release-log-summary-line > div > span { color:#8b949e; }
+.release-log-terminal.is-linux .release-log-summary-line time { color:#8b949e; }
+.release-log-terminal.is-linux .release-log-summary-line b { color:#7ee787; }
+.release-log-terminal.is-linux .release-log-summary-line.active b { color:#d29922; }
+.release-log-terminal.is-linux .release-log-summary-line.failed b { color:#ff7b72; }
+.release-log-terminal.is-linux .release-log-empty { color:#8b949e; }
+
 @media (max-width: 660px) {
   .release-log-toolbar { align-items: stretch; flex-direction: column; }
   .release-log-view-tabs { order: 3; margin-left: 0; }

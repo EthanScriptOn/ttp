@@ -1,7 +1,7 @@
 import { Alert, Button, Card, Select, Space, Statistic, Tabs, Tag, Typography } from 'antd'
 import { CheckCircleOutlined, ClusterOutlined, LinkOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useState } from 'react'
-import { getClusters, getImageRegistryConnections, testCluster, testImageRegistryConnection } from '../services/api'
+import { getClusters, getImageRegistryConnections, testCluster, testImageRegistryConnection, testRegistryPull } from '../services/api'
 import ClusterOverview from './ClusterOverview'
 import ImageRegistryConnections from './ImageRegistryConnections'
 
@@ -47,14 +47,13 @@ export default function InfrastructureConnections({
       <div>
         <Typography.Text className="page-kicker">工作空间 · 连接</Typography.Text>
         <Typography.Title level={2}>连接管理</Typography.Title>
-        <Typography.Paragraph type="secondary">这里只维护可被项目环境引用的 Kubernetes 集群和镜像仓库。项目 Git 凭证在项目设置中按项目权限隔离，集群监控在“集群监控”中查看。</Typography.Paragraph>
       </div>
       <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
     </div>
     <div className="infrastructure-summary-grid">
-      <Card variant="borderless"><Statistic title="空间级连接" value={clusters.length + registries.length} suffix="个" /><Typography.Text type="secondary">Kubernetes 集群与镜像仓库</Typography.Text></Card>
-      <Card variant="borderless"><Statistic title="当前可用" value={availableCount} suffix="个" /><Typography.Text type="secondary">最近一次连接测试通过</Typography.Text></Card>
-      <Card variant="borderless"><Statistic title="项目 Git" value="项目设置" /><Typography.Text type="secondary">按项目成员权限单独维护</Typography.Text></Card>
+      <Card variant="borderless"><Statistic title="空间级连接" value={clusters.length + registries.length} suffix="个" /></Card>
+      <Card variant="borderless"><Statistic title="当前可用" value={availableCount} suffix="个" /></Card>
+      <Card variant="borderless"><Statistic title="项目 Git" value="项目设置" /></Card>
     </div>
     {error && <Alert type="warning" showIcon message={error} />}
     <Tabs activeKey={tab} onChange={setTab} items={[
@@ -68,7 +67,7 @@ export default function InfrastructureConnections({
       },
       {
         key: 'path',
-        label: <span><SafetyCertificateOutlined /> 发布链路预检</span>,
+        label: <span><SafetyCertificateOutlined /> 发布链路检查</span>,
         children: <ConnectionPathCheck clusters={clusters} registries={registries} canManageClusters={canManageClusters} canManageRegistry={canManageRegistry} />,
       },
     ]} />
@@ -95,6 +94,7 @@ function ConnectionPathCheck({ clusters = [], registries = [], canManageClusters
     setSteps([
       { key: 'cluster', label: 'TTP → Kubernetes API', state: 'running', message: '正在检查集群连接…' },
       { key: 'registry', label: 'TTP → 镜像仓库', state: 'pending', message: '等待检查' },
+      { key: 'pull', label: 'K3s 节点 → 镜像仓库', state: 'pending', message: '等待检查' },
     ])
     let clusterOK = false
     try {
@@ -106,14 +106,27 @@ function ConnectionPathCheck({ clusters = [], registries = [], canManageClusters
     }
     if (clusterOK) {
       setSteps((current) => current.map((step) => step.key === 'registry' ? { ...step, state: 'running', message: '正在检查仓库凭证和 Registry API…' } : step))
+      let registryOK = false
       try {
         const result = await testImageRegistryConnection(registryID)
+        registryOK = true
         setSteps((current) => current.map((step) => step.key === 'registry' ? { ...step, state: 'success', message: result.message || '连接成功' } : step))
       } catch (error) {
         setSteps((current) => current.map((step) => step.key === 'registry' ? { ...step, state: 'error', message: error.message || '连接失败' } : step))
       }
+      if (registryOK) {
+        setSteps((current) => current.map((step) => step.key === 'pull' ? { ...step, state: 'running', message: '正在创建临时 Pod 测试镜像拉取…' } : step))
+        try {
+          const result = await testRegistryPull(clusterID, registryID)
+          setSteps((current) => current.map((step) => step.key === 'pull' ? { ...step, state: 'success', message: result.message || 'K3s 节点已成功拉取测试镜像' } : step))
+        } catch (error) {
+          setSteps((current) => current.map((step) => step.key === 'pull' ? { ...step, state: 'error', message: error.message || '镜像拉取失败' } : step))
+        }
+      } else {
+        setSteps((current) => current.map((step) => step.key === 'pull' ? { ...step, state: 'blocked', message: '镜像仓库检查失败，未继续检查' } : step))
+      }
     } else {
-      setSteps((current) => current.map((step) => step.key === 'registry' ? { ...step, state: 'blocked', message: '集群连接失败，未继续检查' } : step))
+      setSteps((current) => current.map((step) => ['registry', 'pull'].includes(step.key) ? { ...step, state: 'blocked', message: '集群连接失败，未继续检查' } : step))
     }
     setRunning(false)
   }
@@ -132,17 +145,16 @@ function ConnectionPathCheck({ clusters = [], registries = [], canManageClusters
       <div className="infrastructure-section-title">
         <span className="infrastructure-section-icon is-cluster"><ClusterOutlined /></span>
         <div>
-          <Typography.Title level={3}>发布链路预检</Typography.Title>
-          <Typography.Text type="secondary">确认 TTP 可以同时访问目标集群和镜像仓库，再开始发布。</Typography.Text>
+          <Typography.Title level={3}>发布链路检查</Typography.Title>
         </div>
       </div>
-      <Button type="primary" onClick={run} loading={running} disabled={!canRun}>开始预检</Button>
+      <Button type="primary" onClick={run} loading={running} disabled={!canRun}>开始检查</Button>
     </div>
     <Space wrap className="infrastructure-path-selects">
       <Select value={clusterID || undefined} onChange={setClusterID} placeholder="选择目标集群" options={clusters.map((item) => ({ value: item.id, label: item.name }))} style={{ minWidth: 220 }} disabled={running || !clusters.length} />
       <Select value={registryID || undefined} onChange={setRegistryID} placeholder="选择镜像仓库" options={registries.map((item) => ({ value: item.id, label: `${item.name} · ${item.registry}` }))} style={{ minWidth: 280 }} disabled={running || !registries.length} />
     </Space>
-    {!canManageClusters || !canManageRegistry ? <Alert type="info" showIcon message="需要集群管理和镜像仓库管理权限才能执行预检。" /> : (!clusters.length || !registries.length) ? <Alert type="warning" showIcon message="请先在空间连接中配置并测试集群、镜像仓库。" /> : <Typography.Paragraph type="secondary" className="infrastructure-path-note">此处检查的是平台侧连通性和凭证有效性；Kubernetes 节点在真实发布时还会通过 imagePullSecret 验证镜像拉取。</Typography.Paragraph>}
+    {!canManageClusters || !canManageRegistry ? <Alert type="info" showIcon message="需要集群管理和镜像仓库管理权限才能执行检查。" /> : (!clusters.length || !registries.length) ? <Alert type="warning" showIcon message="请先在空间连接中配置并测试集群、镜像仓库。" /> : null}
     {steps.length > 0 && <div className="infrastructure-path-steps">{steps.map((step) => <div className="infrastructure-path-step" key={step.key}><div><Typography.Text strong>{step.label}</Typography.Text><Typography.Text type="secondary">{step.message}</Typography.Text></div>{stateTag(step.state)}</div>)}</div>}
   </Card>
 }

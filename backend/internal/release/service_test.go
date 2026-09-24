@@ -62,6 +62,25 @@ func TestCreateExplicitSHAIdempotencyDoesNotRecheckProvider(t *testing.T) {
 	}
 }
 
+func TestForceNewUsesDistinctDurableFingerprint(t *testing.T) {
+	first := Release{
+		ID: "rel-000001", ProjectID: "reverse-lab", RepositoryID: "demo-repo",
+		Branch: "main", Commits: []git.Commit{{SHA: "a1b2c3d4e5f6"}},
+		Plan: RolloutPlan{Strategy: StrategyRolling, Traffic: TrafficSplit{StablePercent: 100}},
+	}
+	second := first
+	second.ID = "rel-000002"
+	if Fingerprint(first) != Fingerprint(second) {
+		t.Fatal("logical fingerprints should match for the same release snapshot")
+	}
+	if FingerprintWithID(first) == FingerprintWithID(second) {
+		t.Fatal("replacement fingerprints must be distinct for different release IDs")
+	}
+	if len(FingerprintWithID(first)) != 64 {
+		t.Fatalf("replacement fingerprint length = %d, want 64", len(FingerprintWithID(first)))
+	}
+}
+
 type countingProvider struct {
 	git.Provider
 	commitLookups int
@@ -92,6 +111,89 @@ func TestReleaseStatusFlow(t *testing.T) {
 	}
 	if _, err = service.Transition(release.ID, StatusQueued); err != nil {
 		t.Fatalf("completed release should support repeat publish: %v", err)
+	}
+}
+
+func TestRemoveArchivesReleaseWithoutAllowingRepublish(t *testing.T) {
+	repository := &releaseTestRepository{}
+	service, err := NewPersistentService(context.Background(), git.NewDemoProvider(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _, err := service.Create(context.Background(), CreateInput{
+		SpaceID: "space-lab", ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
+		Targets: []TargetInput{{ID: "target-dev", Name: "开发环境", EnvironmentStage: "dev", SortOrder: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Transition(item.ID, StatusQueued); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Transition(item.ID, StatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Transition(item.ID, StatusSucceeded); err != nil {
+		t.Fatal(err)
+	}
+	before, err := service.Get(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, err := service.Remove(item.ID, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed.Removed || removed.RemovedBy != 42 || removed.RemovedAt == nil {
+		t.Fatalf("unexpected removed release metadata: %#v", removed)
+	}
+	if listed := service.List("reverse-lab"); len(listed) != 0 {
+		t.Fatalf("removed release should not be listed: %#v", listed)
+	}
+	restored, err := service.Get(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restored.Removed || restored.Status != before.Status || len(restored.Targets) != len(before.Targets) {
+		t.Fatalf("removal should preserve release history: before=%#v after=%#v", before, restored)
+	}
+	if _, err = service.Transition(item.ID, StatusQueued); !errors.Is(err, ErrReleaseRemoved) {
+		t.Fatalf("removed release must not be publishable: %v", err)
+	}
+	if _, duplicate, err := service.Create(context.Background(), CreateInput{
+		SpaceID: "space-lab", ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main",
+		CommitSHAs: []string{item.Commits[0].SHA}, Targets: []TargetInput{{ID: "target-dev", Name: "开发环境", EnvironmentStage: "dev", SortOrder: 1}}, Strategy: item.Plan.Strategy, Traffic: item.Plan.Traffic,
+	}); err != nil || duplicate {
+		t.Fatalf("removed release should not block a new snapshot: duplicate=%v err=%v", duplicate, err)
+	}
+}
+
+func TestRemovingDraftRestoresPreviousCurrentFlow(t *testing.T) {
+	service := NewService(git.NewDemoProvider())
+	clock := time.Date(2026, 1, 12, 10, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return clock })
+	base, _, err := service.Create(context.Background(), CreateInput{ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(time.Minute)
+	branch, _, err := service.Create(context.Background(), CreateInput{ProjectID: "reverse-lab", RepositoryID: "demo-repo", Branch: "release/2026.01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, err := service.Flow("reverse-lab")
+	if err != nil || len(flow.Participants) != 2 || flow.CurrentReleaseID != branch.ID {
+		t.Fatalf("draft should capture the expanded flow: flow=%#v err=%v", flow, err)
+	}
+	if _, err = service.Remove(branch.ID, 42); err != nil {
+		t.Fatal(err)
+	}
+	flow, err = service.Flow("reverse-lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flow.CurrentReleaseID != base.ID || len(flow.Participants) != 1 || flow.Participants[0].Branch != "main" {
+		t.Fatalf("removing draft did not restore previous flow: %#v", flow)
 	}
 }
 
@@ -289,6 +391,70 @@ func TestRetryTargetPreservesSuccessfulTargets(t *testing.T) {
 	}
 	if finished.Status != StatusSucceeded || finished.Progress != 100 {
 		t.Fatalf("release did not finish after the failed target was retried: %#v", finished)
+	}
+}
+
+func TestTargetLogsOnlyExposeCurrentExecution(t *testing.T) {
+	service := NewService(git.NewDemoProvider())
+	clock := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
+	service.SetClock(func() time.Time { return clock })
+	release, _, err := service.Create(context.Background(), CreateInput{
+		ProjectID:    "reverse-lab",
+		RepositoryID: "demo-repo",
+		Branch:       "main",
+		Targets:      []TargetInput{{ID: "dev", Name: "开发环境"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Transition(release.ID, StatusQueued); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Transition(release.ID, StatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(time.Minute)
+	if _, err = service.UpdateTargetProgress(release.ID, "dev", 10, "preparing", "开始第一次执行"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.AppendTargetLog(release.ID, "dev", "build", "stdout", "INFO", "old run"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.FailTarget(release.ID, "dev", "第一次执行失败"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Fail(release.ID, "第一次执行失败"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = service.Transition(release.ID, StatusQueued); err != nil {
+		t.Fatal(err)
+	}
+	// The new run is visible as active before its first progress update. It
+	// must not briefly show the previous run's output.
+	logs, err := service.TargetLogs(release.ID, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("queued retry leaked historical logs: %#v", logs)
+	}
+	if _, err = service.Transition(release.ID, StatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(time.Minute)
+	if _, err = service.UpdateTargetProgress(release.ID, "dev", 10, "preparing", "开始第二次执行"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.AppendTargetLog(release.ID, "dev", "build", "stdout", "INFO", "new run"); err != nil {
+		t.Fatal(err)
+	}
+	logs, err = service.TargetLogs(release.ID, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].Line != "new run" {
+		t.Fatalf("expected only current execution logs, got %#v", logs)
 	}
 }
 

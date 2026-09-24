@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/yuebuy/cicd-platform/backend/internal/domain"
@@ -18,6 +19,8 @@ var (
 	ErrEnvironmentCleanupUnsupported  = errors.New("runtime provider does not support environment cleanup")
 	ErrEnvironmentCleanupFailed       = errors.New("runtime environment cleanup failed")
 	ErrReleaseAccessDenied            = errors.New("runtime release permissions are insufficient")
+	ErrReleaseTrafficUnsupported      = errors.New("runtime provider does not support release traffic adjustment")
+	ErrRegistryPullTestUnsupported    = errors.New("runtime provider does not support registry pull testing")
 	ErrNamespaceManagementUnsupported = errors.New("runtime provider does not support namespace management")
 	ErrNamespaceOwnershipConflict     = errors.New("runtime namespace is owned by another resource")
 )
@@ -88,6 +91,28 @@ type PodExecResult struct {
 	Output string `json:"output"`
 }
 
+// PodTerminalRequest identifies an interactive shell session. Unlike
+// PodExecRequest, the command is intentionally not supplied by the caller:
+// the runtime starts a login-compatible /bin/sh attached to a TTY and keeps it
+// alive until the browser closes the terminal.
+type PodTerminalRequest struct {
+	PodRef
+	Container string `json:"container"`
+}
+
+// TerminalSize is the browser terminal viewport in character cells.
+type TerminalSize struct {
+	Columns uint16 `json:"cols"`
+	Rows    uint16 `json:"rows"`
+}
+
+// PodTerminalStream is optional so observation-only providers remain
+// compatible. Implementations must enforce the PodRef project scope before
+// attaching a PTY.
+type PodTerminalStream interface {
+	StreamPodTerminal(ctx context.Context, request PodTerminalRequest, stdin io.Reader, stdout, stderr io.Writer, sizes <-chan TerminalSize) error
+}
+
 // ReleaseLogFunc receives one line of executor output. It is deliberately a
 // callback rather than part of the persisted deployment payload so providers
 // can stream their native API/command output without changing the runtime
@@ -138,6 +163,26 @@ type ImagePullCredential struct {
 // injected release provider to be tested.
 type ReleaseDeployer interface {
 	DeployRelease(ctx context.Context, deployment ReleaseDeployment) error
+}
+
+// ReleaseTrafficUpdate describes a live traffic split change for one release
+// target. Providers may use it to update the runtime router or workload
+// metadata without rebuilding the release artifact.
+type ReleaseTrafficUpdate struct {
+	ClusterID        string
+	Namespace        string
+	ProjectID        string
+	ReleaseID        string
+	TargetID         string
+	Strategy         string
+	StablePercent    int
+	CandidatePercent int
+	BluePercent      int
+	GreenPercent     int
+}
+
+type ReleaseTrafficUpdater interface {
+	UpdateReleaseTraffic(ctx context.Context, update ReleaseTrafficUpdate) error
 }
 
 // EnvironmentCleaner is required before a deployment target can be removed.
@@ -211,6 +256,7 @@ type ClusterConnection struct {
 }
 
 type MonitoringStatus struct {
+	State            string                 `json:"state,omitempty"`
 	Available        bool                   `json:"available"`
 	Component        string                 `json:"component,omitempty"`
 	DisplayName      string                 `json:"display_name,omitempty"`
@@ -226,11 +272,17 @@ type MonitoringStatus struct {
 type MonitoringDependency struct {
 	Component      string `json:"component"`
 	DisplayName    string `json:"display_name"`
+	State          string `json:"state,omitempty"`
 	Available      bool   `json:"available"`
 	Installed      bool   `json:"installed"`
 	Installable    bool   `json:"installable"`
 	InstallVersion string `json:"install_version,omitempty"`
 	Message        string `json:"message,omitempty"`
+	ImageSource    string `json:"image_source,omitempty"`
+	SourceIndex    int    `json:"source_index,omitempty"`
+	SourceCount    int    `json:"source_count,omitempty"`
+	RetryCount     int    `json:"retry_count,omitempty"`
+	RetryLimit     int    `json:"retry_limit,omitempty"`
 }
 
 type MonitoringInstaller interface {
@@ -259,6 +311,34 @@ type ClusterChecker interface {
 // belong to the node/service-account image pull path.
 type ReleaseAccessChecker interface {
 	CheckReleaseAccess(ctx context.Context, clusterID, namespace string) error
+}
+
+// RegistryPullTestRequest describes a short-lived image pull probe. The
+// credential is used only to create a temporary imagePullSecret and is never
+// returned to the caller.
+type RegistryPullTestRequest struct {
+	Image      string
+	Registry   string
+	AuthType   string
+	Username   string
+	Secret     string
+	SecretName string
+}
+
+// RegistryPullTestResult is the safe result of a node-side image pull probe.
+type RegistryPullTestResult struct {
+	Namespace string   `json:"namespace"`
+	PodName   string   `json:"pod_name"`
+	NodeName  string   `json:"node_name,omitempty"`
+	Image     string   `json:"image"`
+	Phase     PodPhase `json:"phase"`
+	Message   string   `json:"message,omitempty"`
+}
+
+// RegistryPullTester is implemented by runtimes that can create a temporary
+// Pod and verify that a target cluster node can pull from an OCI registry.
+type RegistryPullTester interface {
+	TestRegistryPull(ctx context.Context, clusterID string, request RegistryPullTestRequest) (RegistryPullTestResult, error)
 }
 
 // NamespaceManager is an optional runtime extension used when an environment

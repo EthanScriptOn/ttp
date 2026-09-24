@@ -31,7 +31,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons'
 import { useEffect, useMemo, useState } from 'react'
-import { DEFAULT_NAMESPACE_QUOTA, normalizeNamespaceQuota } from '../services/api-helpers'
+import { DEFAULT_NAMESPACE_QUOTA, normalizeNamespaceQuota } from '../services/deployment-api-helpers'
 
 const DEFAULT_VALUES = {
   name: '',
@@ -73,7 +73,6 @@ const TARGET_HELP = {
   namespace: '命名规则：TTP 空间 slug + 环境标识；同一集群中的不同 TTP 空间不会共用 namespace。',
   quota: '配额属于 TTP 空间 + 集群 + 环境。同一环境下的多个项目共享这份预算，避免一个项目耗尽整个集群的资源；如果该环境已经存在共享预算，新项目会沿用已有值，请编辑已有环境来调整。',
   containerDefaults: '每个容器的默认 request/limit 会由 TTP 写入 LimitRange；未填写时使用 100m/500m CPU、128Mi/512Mi 内存和 256Mi/1Gi 临时盘。',
-  workloadSpec: '副本数、容器端口、探针/保活、HPA/PDB 等工作负载规格由部署配置中的 Kubernetes 资源文件维护。',
 }
 
 function TargetHelp({ label, title }) {
@@ -281,7 +280,7 @@ export default function DeploymentTargets({
     </Row>}
     <Modal title={editing ? '编辑发布环境' : '添加发布环境'} open={modalOpen} onCancel={closeModal} onOk={() => form.submit()} confirmLoading={saving} okText="保存" cancelText="取消" destroyOnHidden width="min(680px, calc(100vw - 32px))">
       <Form form={form} layout="vertical" onFinish={submit} initialValues={DEFAULT_VALUES} className="deployment-target-form" requiredMark>
-        <Row gutter={[16, 0]}><Col xs={24} sm={12}><Form.Item label="显示名称" name="name" rules={[{ required: true, message: '请输入环境名称' }, { max: 120, message: '名称不能超过 120 个字符' }]}><Input placeholder="例如：验收环境" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="环境标识" name="environment" rules={[{ required: true, message: '请输入环境标识' }, { pattern: /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/, message: '只能使用小写字母、数字和短横线' }]}><Input placeholder="例如：release" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>阶段类型 <Tooltip title="阶段类型决定发布流程，不看环境名称。发布必须从 DEV 开始。"><InfoCircleOutlined /></Tooltip></span>} name="stage" rules={[{ required: true, message: '请选择阶段类型' }]}><Select options={STAGE_OPTIONS} /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>发布顺序 <Tooltip title="数字越小越先发布。顺序 1 必须是 DEV。"><InfoCircleOutlined /></Tooltip></span>} name="sort_order" rules={[{ required: true, message: '请输入发布顺序' }, { type: 'number', min: 1, max: 99, message: '发布顺序范围为 1 到 99' }]}><InputNumber min={1} max={99} precision={0} style={{ width: '100%' }} /></Form.Item></Col><Col xs={24}><Form.Item label="部署集群" name="cluster_id" rules={[{ required: true, message: '请选择部署集群' }]}><Select options={clusterOptions} placeholder="选择集群" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>Kubernetes namespace <TargetHelp label="查看 namespace 命名规则" title={TARGET_HELP.namespace} /></span>}><Typography.Text code>{editing?.namespace || '保存后自动生成'}</Typography.Text></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="发布策略" name="deploy_strategy"><Select options={STRATEGIES} /></Form.Item></Col><Col xs={24}><Form.Item label={<span>工作负载规格 <TargetHelp label="查看工作负载规格说明" title={TARGET_HELP.workloadSpec} /></span>}><Typography.Text type="secondary">由部署配置中的 Kubernetes 资源文件维护</Typography.Text></Form.Item></Col></Row>
+        <Row gutter={[16, 0]}><Col xs={24} sm={12}><Form.Item label="显示名称" name="name" rules={[{ required: true, message: '请输入环境名称' }, { max: 120, message: '名称不能超过 120 个字符' }]}><Input placeholder="例如：验收环境" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="环境标识" name="environment" rules={[{ required: true, message: '请输入环境标识' }, { pattern: /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/, message: '只能使用小写字母、数字和短横线' }]}><Input placeholder="例如：release" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>阶段类型 <Tooltip title="阶段类型决定发布流程，不看环境名称。发布必须从 DEV 开始。"><InfoCircleOutlined /></Tooltip></span>} name="stage" rules={[{ required: true, message: '请选择阶段类型' }]}><Select options={STAGE_OPTIONS} /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>发布顺序 <Tooltip title="数字越小越先发布。顺序 1 必须是 DEV。"><InfoCircleOutlined /></Tooltip></span>} name="sort_order" rules={[{ required: true, message: '请输入发布顺序' }, { type: 'number', min: 1, max: 99, message: '发布顺序范围为 1 到 99' }]}><InputNumber min={1} max={99} precision={0} style={{ width: '100%' }} /></Form.Item></Col><Col xs={24}><Form.Item label="部署集群" name="cluster_id" rules={[{ required: true, message: '请选择部署集群' }]}><Select options={clusterOptions} placeholder="选择集群" /></Form.Item></Col><Col xs={24} sm={12}><Form.Item label={<span>Kubernetes namespace <TargetHelp label="查看 namespace 命名规则" title={TARGET_HELP.namespace} /></span>}><Typography.Text code>{editing?.namespace || '保存后自动生成'}</Typography.Text></Form.Item></Col><Col xs={24} sm={12}><Form.Item label="发布策略" name="deploy_strategy"><Select options={STRATEGIES} /></Form.Item></Col></Row>
         <Collapse
           className="deployment-target-quota-collapse"
           defaultActiveKey={['quota']}

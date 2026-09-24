@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -13,14 +14,24 @@ import (
 )
 
 type releaseRecordRow struct {
-	ID                 string `gorm:"size:64;primaryKey"`
-	SpaceID            string `gorm:"size:64;index;not null"`
-	ProjectID          string `gorm:"size:64;index;not null"`
-	ReleaseName        string `gorm:"column:release_name;size:120;not null;default:''"`
-	SourceRepositoryID string `gorm:"column:source_repository_id;size:255;not null"`
-	SourceBranch       string `gorm:"column:source_branch;size:120;not null"`
-	ReleaseFingerprint string `gorm:"size:64;not null"`
-	Strategy           string `gorm:"size:32;not null;default:rolling"`
+	ID                  string     `gorm:"size:64;primaryKey"`
+	SpaceID             string     `gorm:"size:64;index;not null"`
+	ProjectID           string     `gorm:"size:64;index;not null"`
+	ReleaseName         string     `gorm:"column:release_name;size:120;not null;default:''"`
+	SourceRepositoryID  string     `gorm:"column:source_repository_id;size:255;not null"`
+	SourceBranch        string     `gorm:"column:source_branch;size:120;not null"`
+	FlowID              string     `gorm:"column:flow_id;size:64;not null;default:''"`
+	FlowVersion         int        `gorm:"column:flow_version;not null;default:0"`
+	BaseBranch          string     `gorm:"column:base_branch;size:120;not null;default:''"`
+	FlowParticipants    string     `gorm:"column:flow_participants;type:json"`
+	ParentReleaseID     string     `gorm:"column:parent_release_id;size:64;not null;default:''"`
+	ReplacesReleaseID   string     `gorm:"column:replaces_release_id;size:64;not null;default:''"`
+	ReplacedByReleaseID string     `gorm:"column:replaced_by_release_id;size:64;not null;default:''"`
+	ReplacedAt          *time.Time `gorm:"column:replaced_at"`
+	ReplacementState    string     `gorm:"column:replacement_state;size:16;not null;default:''"`
+	RemovedBranch       string     `gorm:"column:removed_branch;size:120;not null;default:''"`
+	ReleaseFingerprint  string     `gorm:"size:64;not null"`
+	Strategy            string     `gorm:"size:32;not null;default:rolling"`
 	// These values are normalized by the release service for every strategy.
 	// Do not add GORM defaults here: zero is meaningful for blue/green plans.
 	StablePercent    int        `gorm:"not null"`
@@ -40,6 +51,10 @@ type releaseRecordRow struct {
 	StartedAt        *time.Time
 	FinishedAt       *time.Time
 	PublishedAt      *time.Time
+	IsRemoved        bool       `gorm:"column:is_removed;not null;default:false;index"`
+	RemovedAt        *time.Time `gorm:"column:removed_at"`
+	RemovedBy        *uint64    `gorm:"column:removed_by"`
+	RemoveReason     string     `gorm:"column:remove_reason;size:255;not null;default:''"`
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -124,7 +139,9 @@ func (s *MySQL) LoadReleases(ctx context.Context) ([]release.Release, error) {
 func (s *MySQL) loadRelease(ctx context.Context, row releaseRecordRow) (release.Release, error) {
 	item := release.Release{
 		ID: row.ID, SpaceID: row.SpaceID, ProjectID: row.ProjectID, RepositoryID: row.SourceRepositoryID,
-		Branch: row.SourceBranch, Name: row.ReleaseName,
+		Branch: row.SourceBranch, Name: row.ReleaseName, FlowID: row.FlowID, FlowVersion: row.FlowVersion, BaseBranch: row.BaseBranch,
+		ParentReleaseID: row.ParentReleaseID, ReplacesReleaseID: row.ReplacesReleaseID, ReplacedByReleaseID: row.ReplacedByReleaseID,
+		ReplacedAt: cloneTimePtr(row.ReplacedAt), ReplacementState: row.ReplacementState, RemovedBranch: row.RemovedBranch,
 		Plan: release.RolloutPlan{Strategy: release.Strategy(row.Strategy), Traffic: release.TrafficSplit{
 			StablePercent: row.StablePercent, CandidatePercent: row.CandidatePercent,
 			BluePercent: row.BluePercent, GreenPercent: row.GreenPercent,
@@ -132,6 +149,18 @@ func (s *MySQL) loadRelease(ctx context.Context, row releaseRecordRow) (release.
 		Status: release.Status(row.Status), Progress: row.Progress, Stage: row.Stage,
 		Message: row.Message, Error: row.Error, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		StartedAt: cloneTimePtr(row.StartedAt), FinishedAt: cloneTimePtr(row.FinishedAt),
+		Removed: row.IsRemoved, RemovedAt: cloneTimePtr(row.RemovedAt), RemoveReason: row.RemoveReason,
+	}
+	if strings.TrimSpace(row.FlowParticipants) != "" {
+		if err := json.Unmarshal([]byte(row.FlowParticipants), &item.FlowParticipants); err != nil {
+			return release.Release{}, fmt.Errorf("decode release flow participants: %w", err)
+		}
+		for _, participant := range item.FlowParticipants {
+			if !participant.Active || strings.TrimSpace(participant.Branch) == "" || strings.TrimSpace(participant.Head.SHA) == "" {
+				continue
+			}
+			item.Participants = append(item.Participants, release.FlowParticipantSnapshot{Branch: participant.Branch, Head: participant.Head})
+		}
 	}
 	if row.CreatedBy != nil {
 		item.CreatedBy = *row.CreatedBy
@@ -142,6 +171,9 @@ func (s *MySQL) loadRelease(ctx context.Context, row releaseRecordRow) (release.
 				item.CreatedByName = strings.TrimSpace(creator.Username)
 			}
 		}
+	}
+	if row.RemovedBy != nil {
+		item.RemovedBy = *row.RemovedBy
 	}
 	if strings.TrimSpace(row.ImageRef) != "" && strings.TrimSpace(row.ImageDigest) != "" && strings.TrimSpace(row.ImageCommitSHA) != "" {
 		builtAt := row.UpdatedAt.UTC()
@@ -202,6 +234,9 @@ func (s *MySQL) SaveRelease(ctx context.Context, item release.Release) error {
 		return fmt.Errorf("release persistence requires at least one commit")
 	}
 	fingerprint := release.Fingerprint(item)
+	if item.ForceNew {
+		fingerprint = release.FingerprintWithID(item)
+	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		row := releaseRecordRow{}
 		err := tx.Where("id = ?", item.ID).First(&row).Error
@@ -216,6 +251,13 @@ func (s *MySQL) SaveRelease(ctx context.Context, item release.Release) error {
 		} else if row.SpaceID != item.SpaceID || row.ProjectID != item.ProjectID {
 			return fmt.Errorf("release %s belongs to another project or space", item.ID)
 		}
+		// Existing rows keep the fingerprint assigned at creation. This is
+		// important after a restart, when the internal ForceNew hint is not
+		// serialized, and it also preserves fingerprints created by older
+		// versions of the schema.
+		if err != gorm.ErrRecordNotFound && !item.ForceNew && strings.TrimSpace(row.ReleaseFingerprint) != "" {
+			fingerprint = row.ReleaseFingerprint
+		}
 		if item.CreatedBy != 0 {
 			createdBy := item.CreatedBy
 			row.CreatedBy = &createdBy
@@ -223,6 +265,26 @@ func (s *MySQL) SaveRelease(ctx context.Context, item release.Release) error {
 		row.ReleaseName = item.Name
 		row.SourceRepositoryID = item.RepositoryID
 		row.SourceBranch = item.Branch
+		row.FlowID = item.FlowID
+		row.FlowVersion = item.FlowVersion
+		row.BaseBranch = item.BaseBranch
+		row.ParentReleaseID = item.ParentReleaseID
+		row.ReplacesReleaseID = item.ReplacesReleaseID
+		row.ReplacedByReleaseID = item.ReplacedByReleaseID
+		row.ReplacedAt = cloneTimePtr(item.ReplacedAt)
+		row.ReplacementState = item.ReplacementState
+		row.RemovedBranch = item.RemovedBranch
+		// JSON columns cannot accept an empty string. Legacy releases may not
+		// have a flow snapshot yet, so persist an empty JSON array instead of
+		// writing invalid JSON into the nullable column.
+		row.FlowParticipants = "[]"
+		if len(item.FlowParticipants) > 0 {
+			encoded, marshalErr := json.Marshal(item.FlowParticipants)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			row.FlowParticipants = string(encoded)
+		}
 		row.ReleaseFingerprint = fingerprint
 		row.Strategy = string(item.Plan.Strategy)
 		row.StablePercent = item.Plan.Traffic.StablePercent
@@ -248,6 +310,14 @@ func (s *MySQL) SaveRelease(ctx context.Context, item release.Release) error {
 		row.StartedAt = cloneTimePtr(item.StartedAt)
 		row.FinishedAt = cloneTimePtr(item.FinishedAt)
 		row.PublishedAt = nil
+		row.IsRemoved = item.Removed
+		row.RemovedAt = cloneTimePtr(item.RemovedAt)
+		row.RemovedBy = nil
+		if item.RemovedBy != 0 {
+			removedBy := item.RemovedBy
+			row.RemovedBy = &removedBy
+		}
+		row.RemoveReason = item.RemoveReason
 		if item.Status == release.StatusSucceeded && item.FinishedAt != nil {
 			row.PublishedAt = cloneTimePtr(item.FinishedAt)
 		}
@@ -265,9 +335,9 @@ func (s *MySQL) SaveRelease(ctx context.Context, item release.Release) error {
 			}
 		} else {
 			updates := map[string]any{
-				"release_name": row.ReleaseName, "source_repository_id": row.SourceRepositoryID, "source_branch": row.SourceBranch, "release_fingerprint": row.ReleaseFingerprint,
+				"release_name": row.ReleaseName, "source_repository_id": row.SourceRepositoryID, "source_branch": row.SourceBranch, "flow_id": row.FlowID, "flow_version": row.FlowVersion, "base_branch": row.BaseBranch, "flow_participants": row.FlowParticipants, "parent_release_id": row.ParentReleaseID, "replaces_release_id": row.ReplacesReleaseID, "replaced_by_release_id": row.ReplacedByReleaseID, "replaced_at": row.ReplacedAt, "replacement_state": row.ReplacementState, "removed_branch": row.RemovedBranch, "release_fingerprint": row.ReleaseFingerprint,
 				"strategy": row.Strategy, "stable_percent": row.StablePercent, "candidate_percent": row.CandidatePercent, "blue_percent": row.BluePercent, "green_percent": row.GreenPercent,
-				"status": row.Status, "progress": row.Progress, "stage": row.Stage, "message": row.Message, "error": row.Error, "image_ref": row.ImageRef, "image_digest": row.ImageDigest, "image_commit_sha": row.ImageCommitSHA, "image_built_at": row.ImageBuiltAt, "started_at": row.StartedAt, "finished_at": row.FinishedAt, "published_at": row.PublishedAt, "updated_at": row.UpdatedAt,
+				"status": row.Status, "progress": row.Progress, "stage": row.Stage, "message": row.Message, "error": row.Error, "image_ref": row.ImageRef, "image_digest": row.ImageDigest, "image_commit_sha": row.ImageCommitSHA, "image_built_at": row.ImageBuiltAt, "started_at": row.StartedAt, "finished_at": row.FinishedAt, "published_at": row.PublishedAt, "is_removed": row.IsRemoved, "removed_at": row.RemovedAt, "removed_by": row.RemovedBy, "remove_reason": row.RemoveReason, "updated_at": row.UpdatedAt,
 			}
 			if item.CreatedBy != 0 {
 				updates["created_by"] = row.CreatedBy

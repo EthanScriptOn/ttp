@@ -63,6 +63,8 @@ type Project struct {
 	RepositoryID          string    `json:"repository_id"`
 	RepositoryURL         string    `json:"repository_url"`
 	DefaultBranch         string    `json:"default_branch"`
+	AutoMergeEnabled      bool      `json:"auto_merge_enabled"`
+	AutoMergeTargetID     string    `json:"auto_merge_target_id,omitempty"`
 	ClusterID             string    `json:"cluster_id"`
 	Namespace             string    `json:"namespace"`
 	DeployStrategy        string    `json:"deploy_strategy"`
@@ -209,20 +211,54 @@ type DeploymentConfig struct {
 // file. Content contains exactly one Kubernetes object; different resources
 // are never encoded into one delimiter-separated manifest.
 type DeploymentResourceFile struct {
-	ID               string    `json:"id"`
-	ProjectID        string    `json:"project_id"`
-	Name             string    `json:"name"`
-	Path             string    `json:"path"`
-	Format           string    `json:"format"`
-	Content          string    `json:"content"`
-	APIVersion       string    `json:"api_version"`
-	Kind             string    `json:"kind"`
-	ResourceName     string    `json:"resource_name"`
-	Namespace        string    `json:"namespace,omitempty"`
-	SortOrder        int       `json:"sort_order"`
-	Version          int       `json:"version"`
-	ReleaseSupported bool      `json:"release_supported"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	ProjectID         string    `json:"project_id"`
+	Name              string    `json:"name"`
+	Path              string    `json:"path"`
+	Format            string    `json:"format"`
+	Content           string    `json:"content"`
+	APIVersion        string    `json:"api_version"`
+	Kind              string    `json:"kind"`
+	ResourceName      string    `json:"resource_name"`
+	Namespace         string    `json:"namespace,omitempty"`
+	SortOrder         int       `json:"sort_order"`
+	Version           int       `json:"version"`
+	ReleaseSupported  bool      `json:"release_supported"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	Scope             string    `json:"scope,omitempty"`
+	TargetID          string    `json:"target_id,omitempty"`
+	GlobalResourceID  string    `json:"global_resource_id,omitempty"`
+	OverrideID        string    `json:"override_id,omitempty"`
+	BaseGlobalVersion int       `json:"base_global_version,omitempty"`
+	GlobalVersion     int       `json:"global_version,omitempty"`
+	BaseContent       string    `json:"base_content,omitempty"`
+	GlobalContent     string    `json:"global_content,omitempty"`
+	GlobalChanged     bool      `json:"global_changed,omitempty"`
+}
+
+// DeploymentResourceOverride stores one environment's complete replacement
+// for a global file, or an environment-only resource when GlobalResourceID is
+// empty. BaseGlobalContent is the merge base captured when the override was
+// created or last reconciled with the global file.
+type DeploymentResourceOverride struct {
+	ID                string
+	ProjectID         string
+	TargetID          string
+	GlobalResourceID  string
+	Name              string
+	Path              string
+	Format            string
+	Content           string
+	APIVersion        string
+	Kind              string
+	ResourceName      string
+	Namespace         string
+	SortOrder         int
+	Version           int
+	ReleaseSupported  bool
+	BaseGlobalVersion int
+	BaseGlobalContent string
+	UpdatedAt         time.Time
 }
 
 type AuditLog struct {

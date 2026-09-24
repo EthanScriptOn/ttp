@@ -359,7 +359,7 @@ spec:
           image: old.invalid/checkout:old
 `
 	credential := &ImagePullCredential{ConnectionID: "acr-main", Registry: "registry.example.com", AuthType: "basic", Username: "robot", Secret: "password", SecretName: "ttp-registry-acr-main"}
-	if err := provider.DeployRelease(context.Background(), ReleaseDeployment{ClusterID: "cluster-a", Namespace: "lab", ProjectID: "checkout", ReleaseID: "release-1", CommitSHA: "abcdef123456", Image: "registry.example.com/team/checkout@sha256:" + strings.Repeat("a", 64), Replicas: 1, Strategy: "rolling", Manifest: manifest, ManifestFormat: "yaml", ImagePullCredential: credential}); err != nil {
+	if err := provider.DeployRelease(context.Background(), ReleaseDeployment{ClusterID: "cluster-a", Namespace: "lab", ProjectID: "checkout", TargetID: "target-dev", ReleaseID: "release-1", CommitSHA: "abcdef123456", Image: "registry.example.com/team/checkout@sha256:" + strings.Repeat("a", 64), Replicas: 1, Strategy: "rolling", Manifest: manifest, ManifestFormat: "yaml", ImagePullCredential: credential}); err != nil {
 		t.Fatal(err)
 	}
 	secret, err := client.CoreV1().Secrets("lab").Get(context.Background(), credential.SecretName, metav1.GetOptions{})
@@ -372,6 +372,9 @@ spec:
 	}
 	if config["auths"][credential.Registry]["auth"] != base64.StdEncoding.EncodeToString([]byte("robot:password")) {
 		t.Fatalf("unexpected docker auth config: %#v", config)
+	}
+	if secret.Labels[targetLabelKey] != "target-dev" {
+		t.Fatalf("image pull Secret target label = %q, want target-dev", secret.Labels[targetLabelKey])
 	}
 	deployed, err := client.AppsV1().Deployments("lab").Get(context.Background(), "checkout", metav1.GetOptions{})
 	if err != nil {

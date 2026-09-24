@@ -103,8 +103,11 @@ const codeMessages = {
   git_access_check_failed: '暂时无法检查项目仓库机器人，请稍后重试',
   image_build_unsupported: '未配置可用的镜像构建器，发布已被阻止',
   image_builder_unauthorized: 'TTP 无法认证 Builder，请检查 Builder 地址和访问令牌',
-  image_registry_preflight_failed: '镜像仓库预检失败，请检查仓库地址、凭证和推送权限',
+  image_registry_preflight_failed: '镜像仓库检查失败，请检查仓库地址、凭证和推送权限',
   registry_connection_test_failed: '镜像仓库连接测试失败，请检查地址和凭证',
+  registry_pull_test_failed: 'K3s 节点镜像拉取测试失败，请检查 Registry 协议、凭证和节点配置',
+  registry_pull_test_unsupported: '当前运行时不支持集群节点镜像拉取测试',
+  deployment_resource_global_changed: '全局资源文件已再次更新，请重新加载后保存当前环境配置',
   kubernetes_release_access_denied: 'TTP 使用的 Kubernetes 身份没有目标环境的发布权限，请检查 RoleBinding',
   provider_timeout: 'Git 服务响应超时，请稍后重试',
   provider_error: 'Git 服务暂时不可用，请稍后重试',
@@ -113,6 +116,9 @@ const codeMessages = {
   space_required: '请先选择空间',
   invalid_credentials: '用户名或密码错误',
   git_credential_required: '请先配置并验证仓库机器人',
+  auto_merge_target_required: '启用自动合并时必须选择触发环境',
+  auto_merge_target_invalid: '自动合并触发环境不存在或不属于当前项目',
+  git_merge_unsupported: '当前 Git 连接不支持自动 merge',
   image_registry_connection_required: '请选择镜像仓库连接',
   not_found: '找不到请求的资源',
   conflict: '当前状态不允许执行这个操作',
@@ -417,6 +423,8 @@ export function normalizeProject(value) {
     repository_id: asString(firstValue(source, 'repository_id', 'repositoryId') || repository.id),
     repository_url: asString(firstValue(source, 'repository_url', 'repositoryUrl', 'repo_url') || repository.url),
     default_branch: asString(firstValue(source, 'default_branch', 'defaultBranch') || repository.default_branch, 'main'),
+    auto_merge_enabled: asBoolean(firstValue(source, 'auto_merge_enabled', 'autoMergeEnabled')),
+    auto_merge_target_id: asString(firstValue(source, 'auto_merge_target_id', 'autoMergeTargetId')),
     cluster_id: asString(firstValue(source, 'cluster_id', 'clusterId', 'cluster') || firstValue(source.target, 'cluster_id', 'clusterId')),
     namespace: asString(firstValue(source, 'namespace', 'kubernetes_namespace', 'kubernetesNamespace') || firstValue(source.target, 'namespace', 'kubernetes_namespace', 'kubernetesNamespace')),
     deploy_strategy: asString(firstValue(source, 'deploy_strategy', 'deployStrategy', 'strategy'), 'rolling'),
@@ -460,112 +468,6 @@ export function normalizeImageRegistryConnection(value) {
     created_at: firstValue(source, 'created_at', 'createdAt'),
     updated_at: firstValue(source, 'updated_at', 'updatedAt'),
   }
-}
-
-export function normalizeDeploymentTarget(value) {
-  const source = isRecord(value?.target)
-    ? value.target
-    : isRecord(value?.data?.target)
-      ? value.data.target
-      : isRecord(value)
-        ? value
-        : {}
-  return {
-    ...source,
-    id: asString(firstValue(source, 'id', 'target_id', 'targetId')),
-    project_id: asString(firstValue(source, 'project_id', 'projectId')),
-    space_id: asString(firstValue(source, 'space_id', 'spaceId')),
-    name: asString(firstValue(source, 'name', 'target_name', 'targetName'), '未命名环境'),
-    environment: asString(firstValue(source, 'environment', 'env'), 'dev'),
-    stage: asString(firstValue(source, 'stage', 'deployment_stage', 'deploymentStage'), 'custom'),
-    sort_order: asNumber(firstValue(source, 'sort_order', 'sortOrder', 'release_order'), 1),
-    cluster_id: asString(firstValue(source, 'cluster_id', 'clusterId')),
-    namespace: asString(firstValue(source, 'namespace', 'kubernetes_namespace', 'kubernetesNamespace'), 'default'),
-    replicas: asNumber(firstValue(source, 'replicas', 'replica_count', 'replicaCount'), 1),
-    container_port: asNumber(firstValue(source, 'container_port', 'containerPort', 'port'), 8080),
-    deploy_strategy: asString(firstValue(source, 'deploy_strategy', 'deployStrategy', 'strategy'), 'rolling'),
-    enabled: asBoolean(firstValue(source, 'enabled', 'is_enabled', 'isEnabled'), true),
-    resource_quota: normalizeNamespaceQuota(firstValue(source, 'resource_quota', 'resourceQuota')),
-    status: asString(firstValue(source, 'status', 'state'), 'active'),
-    health: asString(firstValue(source, 'health', 'health_status', 'healthStatus'), 'unknown'),
-    pod_count: asNumber(firstValue(source, 'pod_count', 'podCount'), 0),
-    healthy_pod_count: asNumber(firstValue(source, 'healthy_pod_count', 'healthyPodCount'), 0),
-    last_release: asString(firstValue(source, 'last_release', 'lastRelease')),
-    last_commit: asString(firstValue(source, 'last_commit', 'lastCommit')),
-    created_at: firstValue(source, 'created_at', 'createdAt'),
-    updated_at: firstValue(source, 'updated_at', 'updatedAt'),
-  }
-}
-
-export const DEFAULT_NAMESPACE_QUOTA = Object.freeze({
-  cpu_request: '2',
-  cpu_limit: '4',
-  memory_request: '2Gi',
-  memory_limit: '4Gi',
-  ephemeral_storage_request: '10Gi',
-  ephemeral_storage_limit: '20Gi',
-  storage: '50Gi',
-  pods: 20,
-  persistent_volume_claims: 10,
-  default_cpu_request: '100m',
-  default_cpu_limit: '500m',
-  default_memory_request: '128Mi',
-  default_memory_limit: '512Mi',
-  default_ephemeral_storage_request: '256Mi',
-  default_ephemeral_storage_limit: '1Gi',
-})
-
-export function normalizeNamespaceQuota(value) {
-  const source = isRecord(value) ? value : {}
-  return {
-    cpu_request: asString(firstValue(source, 'cpu_request', 'cpuRequest'), DEFAULT_NAMESPACE_QUOTA.cpu_request),
-    cpu_limit: asString(firstValue(source, 'cpu_limit', 'cpuLimit'), DEFAULT_NAMESPACE_QUOTA.cpu_limit),
-    memory_request: asString(firstValue(source, 'memory_request', 'memoryRequest'), DEFAULT_NAMESPACE_QUOTA.memory_request),
-    memory_limit: asString(firstValue(source, 'memory_limit', 'memoryLimit'), DEFAULT_NAMESPACE_QUOTA.memory_limit),
-    ephemeral_storage_request: asString(firstValue(source, 'ephemeral_storage_request', 'ephemeralStorageRequest'), DEFAULT_NAMESPACE_QUOTA.ephemeral_storage_request),
-    ephemeral_storage_limit: asString(firstValue(source, 'ephemeral_storage_limit', 'ephemeralStorageLimit'), DEFAULT_NAMESPACE_QUOTA.ephemeral_storage_limit),
-    storage: asString(firstValue(source, 'storage', 'persistent_storage', 'persistentStorage'), DEFAULT_NAMESPACE_QUOTA.storage),
-    pods: asNumber(firstValue(source, 'pods', 'pod_limit', 'podLimit'), DEFAULT_NAMESPACE_QUOTA.pods),
-    persistent_volume_claims: asNumber(firstValue(source, 'persistent_volume_claims', 'persistentVolumeClaims', 'pvc_limit', 'pvcLimit'), DEFAULT_NAMESPACE_QUOTA.persistent_volume_claims),
-    default_cpu_request: asString(firstValue(source, 'default_cpu_request', 'defaultCpuRequest'), DEFAULT_NAMESPACE_QUOTA.default_cpu_request),
-    default_cpu_limit: asString(firstValue(source, 'default_cpu_limit', 'defaultCpuLimit'), DEFAULT_NAMESPACE_QUOTA.default_cpu_limit),
-    default_memory_request: asString(firstValue(source, 'default_memory_request', 'defaultMemoryRequest'), DEFAULT_NAMESPACE_QUOTA.default_memory_request),
-    default_memory_limit: asString(firstValue(source, 'default_memory_limit', 'defaultMemoryLimit'), DEFAULT_NAMESPACE_QUOTA.default_memory_limit),
-    default_ephemeral_storage_request: asString(firstValue(source, 'default_ephemeral_storage_request', 'defaultEphemeralStorageRequest'), DEFAULT_NAMESPACE_QUOTA.default_ephemeral_storage_request),
-    default_ephemeral_storage_limit: asString(firstValue(source, 'default_ephemeral_storage_limit', 'defaultEphemeralStorageLimit'), DEFAULT_NAMESPACE_QUOTA.default_ephemeral_storage_limit),
-  }
-}
-
-export function normalizeDeploymentResource(value) {
-  const source = isRecord(value?.resource)
-    ? value.resource
-    : isRecord(value?.data?.resource)
-      ? value.data.resource
-      : isRecord(value)
-        ? value
-        : {}
-  return {
-    ...source,
-    id: asString(firstValue(source, 'id', 'resource_id')),
-    project_id: asString(firstValue(source, 'project_id', 'projectId')),
-    name: asString(firstValue(source, 'name')),
-    path: asString(firstValue(source, 'path', 'file_path', 'filePath')),
-    format: asString(firstValue(source, 'format'), 'yaml').toLowerCase() === 'json' ? 'json' : 'yaml',
-    content: asString(firstValue(source, 'content', 'manifest')),
-    api_version: asString(firstValue(source, 'api_version', 'apiVersion')),
-    kind: asString(firstValue(source, 'kind')),
-    resource_name: asString(firstValue(source, 'resource_name', 'resourceName', 'name')),
-    namespace: asString(firstValue(source, 'namespace')),
-    sort_order: asNumber(firstValue(source, 'sort_order', 'sortOrder'), 0),
-    version: asNumber(firstValue(source, 'version'), 0),
-    release_supported: asBoolean(firstValue(source, 'release_supported', 'releaseSupported')),
-    updated_at: firstValue(source, 'updated_at', 'updatedAt'),
-  }
-}
-
-export function normalizeDeploymentResources(payload) {
-  const raw = firstValue(payload, 'resources', 'files', 'items')
-  return Array.isArray(raw) ? raw.map(normalizeDeploymentResource).filter((item) => item.id || item.path) : []
 }
 
 export function normalizeCommit(value) {
@@ -777,6 +679,7 @@ export function normalizeMonitoring(value) {
   const source = isRecord(value) ? value : {}
   return {
     ...source,
+    state: asString(firstValue(source, 'state')),
     available: asBoolean(firstValue(source, 'available')),
     component: asString(firstValue(source, 'component')),
     display_name: asString(firstValue(source, 'display_name', 'displayName')),
@@ -788,6 +691,7 @@ export function normalizeMonitoring(value) {
     retention_days: asNumber(firstValue(source, 'retention_days', 'retentionDays'), 0),
     dependencies: Array.isArray(firstValue(source, 'dependencies')) ? firstValue(source, 'dependencies').map((item) => ({
       ...item,
+      state: asString(firstValue(item, 'state')),
       component: asString(item?.component),
       display_name: asString(firstValue(item, 'display_name', 'displayName')),
       available: asBoolean(item?.available),
@@ -795,6 +699,11 @@ export function normalizeMonitoring(value) {
       installable: asBoolean(item?.installable),
       install_version: asString(firstValue(item, 'install_version', 'installVersion')),
       message: asString(item?.message),
+      image_source: asString(firstValue(item, 'image_source', 'imageSource')),
+      source_index: asNumber(firstValue(item, 'source_index', 'sourceIndex'), 0),
+      source_count: asNumber(firstValue(item, 'source_count', 'sourceCount'), 0),
+      retry_count: asNumber(firstValue(item, 'retry_count', 'retryCount'), 0),
+      retry_limit: asNumber(firstValue(item, 'retry_limit', 'retryLimit'), 0),
     })) : [],
   }
 }
@@ -943,6 +852,10 @@ export function normalizeRelease(value) {
     error: asString(firstValue(source, 'error', 'error_message', 'errorMessage')),
     started_at: firstValue(source, 'started_at', 'startedAt'),
     finished_at: firstValue(source, 'finished_at', 'finishedAt'),
+    removed: asBoolean(firstValue(source, 'removed', 'is_removed', 'isRemoved')),
+    removed_at: firstValue(source, 'removed_at', 'removedAt'),
+    removed_by: asNumber(firstValue(source, 'removed_by', 'removedBy'), 0),
+    remove_reason: asString(firstValue(source, 'remove_reason', 'removeReason')),
     created_at: firstValue(source, 'created_at', 'createdAt'),
     updated_at: firstValue(source, 'updated_at', 'updatedAt'),
     short: asString(firstValue(source, 'short')) || commits[0]?.short_sha || '',

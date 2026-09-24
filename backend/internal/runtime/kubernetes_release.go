@@ -175,7 +175,7 @@ func (p *KubernetesProvider) DeployRelease(ctx context.Context, deployment Relea
 		}
 	}
 	if !p.rolloutWait {
-		return nil
+		return p.reconcileReleaseResources(ctx, client, deployment, resources, imagePullSecret, log)
 	}
 	for _, applied := range appliedDeployments {
 		releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("deployment/%s rollout status", applied.Name))
@@ -205,7 +205,7 @@ func (p *KubernetesProvider) DeployRelease(ctx context.Context, deployment Relea
 		}
 		releaseLog(log, "k8s", "stdout", "INFO", fmt.Sprintf("job/%s successfully completed", applied.Name))
 	}
-	return nil
+	return p.reconcileReleaseResources(ctx, client, deployment, resources, imagePullSecret, log)
 }
 
 func releaseLog(log ReleaseLogFunc, source, stream, level, line string) {
@@ -304,13 +304,13 @@ func (p *KubernetesProvider) imagePullSecretForDeployment(deployment ReleaseDepl
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode image pull credential", ErrInvalidKubernetesInput)
 	}
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: strings.TrimSpace(credential.SecretName), Namespace: deployment.Namespace, Labels: map[string]string{
-			managedByLabelKey: managedByLabelValue, p.projectLabelKey: deployment.ProjectID, releaseLabelKey: deployment.ReleaseID,
-		}},
-		Type: corev1.SecretTypeDockerConfigJson,
-		Data: map[string][]byte{corev1.DockerConfigJsonKey: config},
-	}, nil
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: strings.TrimSpace(credential.SecretName), Namespace: deployment.Namespace},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: config},
+	}
+	p.prepareReleaseObjectMeta(&secret.ObjectMeta, deployment)
+	return secret, nil
 }
 
 func validateManifestFormat(deployment ReleaseDeployment) error {

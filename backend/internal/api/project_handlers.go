@@ -202,6 +202,46 @@ func (s *Server) updateProject(c *gin.Context) {
 			return
 		}
 	}
+	// The trigger environment is the single source of truth for auto merge.
+	// New clients may omit the legacy boolean: selecting a target enables the
+	// policy, while clearing the select disables it for every environment.
+	if input.AutoMergeTargetID != nil && input.AutoMergeEnabled == nil {
+		enabled := strings.TrimSpace(*input.AutoMergeTargetID) != ""
+		input.AutoMergeEnabled = &enabled
+	}
+	// Auto merge is deliberately validated against this project's deployment
+	// targets. A target ID from another project or space must never become a
+	// trigger simply because it was supplied by the browser.
+	autoMergeEnabled := currentProject.AutoMergeEnabled
+	if input.AutoMergeEnabled != nil {
+		autoMergeEnabled = *input.AutoMergeEnabled
+	}
+	autoMergeTargetID := currentProject.AutoMergeTargetID
+	if input.AutoMergeTargetID != nil {
+		autoMergeTargetID = strings.TrimSpace(*input.AutoMergeTargetID)
+	}
+	if !autoMergeEnabled {
+		cleared := ""
+		input.AutoMergeTargetID = &cleared
+	} else {
+		if autoMergeTargetID == "" {
+			writeError(c, http.StatusBadRequest, "auto_merge_target_required", "启用自动合并时必须选择触发环境")
+			return
+		}
+		trigger, targetErr := s.deps.Store.GetDeploymentTarget(c.Request.Context(), claims.SpaceID, currentProject.ID, autoMergeTargetID)
+		if targetErr != nil {
+			if errors.Is(targetErr, store.ErrNotFound) {
+				writeError(c, http.StatusBadRequest, "auto_merge_target_invalid", "自动合并触发环境不存在或不属于当前项目")
+				return
+			}
+			writeStoreError(c, targetErr)
+			return
+		}
+		if !trigger.Enabled {
+			writeError(c, http.StatusBadRequest, "auto_merge_target_invalid", "自动合并触发环境已停用，请选择启用中的环境")
+			return
+		}
+	}
 	var previousProject domain.Project
 	var previousProjectLoaded bool
 	if input.RepositoryURL != nil {
@@ -248,18 +288,25 @@ func (s *Server) updateProject(c *gin.Context) {
 func (s *Server) enrichProject(ctx context.Context, project domain.Project) domain.Project {
 	project.DeploymentTargetCount = 0
 	project.DefaultTargetID = ""
+	runtimeClusterID := project.ClusterID
+	runtimeNamespace := project.Namespace
 	if s.deps.Store != nil {
 		if targets, err := s.deps.Store.ListDeploymentTargets(ctx, project.SpaceID, project.ID); err == nil && len(targets) > 0 {
 			project.DeploymentTargetCount = len(targets)
 			project.DefaultTargetID = targets[0].ID
+			// Deployment targets are the source of truth for the runtime location.
+			// The project-level fields are retained for older projects, but can be
+			// stale after an environment is created or moved.
+			runtimeClusterID = targets[0].ClusterID
+			runtimeNamespace = targets[0].Namespace
 		}
 	}
 	project.Health = "unknown"
 	project.PodCount = 0
 	project.HealthyPodCount = 0
 	if s.deps.Runtime != nil {
-		if err := s.ensureRuntimeCluster(ctx, project.SpaceID, project.ClusterID); err == nil {
-			if pods, err := s.deps.Runtime.ListPodsInNamespace(ctx, project.ClusterID, project.Namespace, project.ID); err == nil {
+		if err := s.ensureRuntimeCluster(ctx, project.SpaceID, runtimeClusterID); err == nil {
+			if pods, err := s.deps.Runtime.ListPodsInNamespace(ctx, runtimeClusterID, runtimeNamespace, project.ID); err == nil {
 				project.PodCount = len(pods)
 				for _, pod := range pods {
 					if pod.Ready {

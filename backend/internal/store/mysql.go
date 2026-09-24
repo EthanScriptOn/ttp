@@ -80,6 +80,8 @@ type projectRow struct {
 	RepositoryID         string `gorm:"size:255;not null"`
 	RepositoryURL        string `gorm:"size:500;not null"`
 	DefaultBranch        string `gorm:"size:120;not null"`
+	AutoMergeEnabled     bool   `gorm:"column:auto_merge_enabled;not null;default:false"`
+	AutoMergeTargetID    string `gorm:"column:auto_merge_target_id;size:64;not null;default:''"`
 	ClusterID            string `gorm:"size:64;not null"`
 	Namespace            string `gorm:"size:120;not null"`
 	DeployStrategy       string `gorm:"size:32;not null"`
@@ -236,6 +238,33 @@ type deploymentResourceFileRow struct {
 
 func (deploymentResourceFileRow) TableName() string { return "project_deployment_resource_files" }
 
+type deploymentResourceOverrideRow struct {
+	ID                string  `gorm:"size:64;primaryKey"`
+	SpaceID           string  `gorm:"size:64;index;not null;uniqueIndex:uk_resource_override_path,priority:1;uniqueIndex:uk_resource_override_global,priority:1"`
+	ProjectID         string  `gorm:"size:64;index;not null;uniqueIndex:uk_resource_override_path,priority:2;uniqueIndex:uk_resource_override_global,priority:2"`
+	TargetID          string  `gorm:"size:64;index;not null;uniqueIndex:uk_resource_override_path,priority:3;uniqueIndex:uk_resource_override_global,priority:3"`
+	GlobalResourceID  *string `gorm:"size:64;uniqueIndex:uk_resource_override_global,priority:4"`
+	Name              string  `gorm:"size:255;not null"`
+	Path              string  `gorm:"size:500;not null;uniqueIndex:uk_resource_override_path,priority:4"`
+	Format            string  `gorm:"size:16;not null;default:yaml"`
+	Content           string  `gorm:"type:longtext;not null"`
+	APIVersion        string  `gorm:"size:120;not null"`
+	Kind              string  `gorm:"size:120;not null"`
+	ResourceName      string  `gorm:"size:253;not null"`
+	Namespace         string  `gorm:"size:120;not null;default:''"`
+	SortOrder         int     `gorm:"not null;default:1"`
+	Version           int     `gorm:"not null;default:1"`
+	ReleaseSupported  bool    `gorm:"not null;default:false"`
+	BaseGlobalVersion int     `gorm:"not null;default:0"`
+	BaseGlobalContent string  `gorm:"type:longtext;not null"`
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+func (deploymentResourceOverrideRow) TableName() string {
+	return "project_deployment_resource_overrides"
+}
+
 type auditLogRow struct {
 	ID         uint64    `gorm:"primaryKey;autoIncrement"`
 	SpaceID    *string   `gorm:"size:64;index"`
@@ -265,7 +294,7 @@ func NewMySQL(ctx context.Context, dsn string) (*MySQL, error) {
 		return nil, err
 	}
 	store := &MySQL{db: db}
-	if err := db.AutoMigrate(&userRow{}, &spaceRow{}, &memberRow{}, &clusterRow{}, &imageRegistryConnectionRow{}, &projectRow{}, &projectGitCredentialRow{}, &projectRoleRow{}, &projectRolePermissionRow{}, &projectMemberRow{}, &deploymentTargetRow{}, &namespaceQuotaRow{}, &deploymentConfigRow{}, &deploymentResourceFileRow{}, &auditLogRow{}, &abExperimentRow{}, &releaseRecordRow{}, &releaseCommitRecordRow{}, &releaseTargetRecordRow{}, &releaseExecutionLogRecordRow{}); err != nil {
+	if err := db.AutoMigrate(&userRow{}, &spaceRow{}, &memberRow{}, &clusterRow{}, &imageRegistryConnectionRow{}, &projectRow{}, &projectGitCredentialRow{}, &projectRoleRow{}, &projectRolePermissionRow{}, &projectMemberRow{}, &deploymentTargetRow{}, &namespaceQuotaRow{}, &deploymentConfigRow{}, &deploymentResourceFileRow{}, &deploymentResourceOverrideRow{}, &auditLogRow{}, &abExperimentRow{}, &releaseRecordRow{}, &releaseCommitRecordRow{}, &releaseTargetRecordRow{}, &releaseExecutionLogRecordRow{}); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
@@ -603,6 +632,12 @@ func (s *MySQL) UpdateProject(ctx context.Context, spaceID, projectID string, in
 	}
 	if input.DefaultBranch != nil {
 		updates["default_branch"] = strings.TrimSpace(*input.DefaultBranch)
+	}
+	if input.AutoMergeEnabled != nil {
+		updates["auto_merge_enabled"] = *input.AutoMergeEnabled
+	}
+	if input.AutoMergeTargetID != nil {
+		updates["auto_merge_target_id"] = strings.TrimSpace(*input.AutoMergeTargetID)
 	}
 	if input.ClusterID != nil {
 		clusterID := normalizeClusterID(spaceID, *input.ClusterID)
@@ -967,6 +1002,9 @@ func (s *MySQL) DeleteDeploymentTarget(ctx context.Context, spaceID, projectID, 
 		}
 	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("space_id = ? AND project_id = ? AND target_id = ?", spaceID, projectID, targetID).Delete(&deploymentResourceOverrideRow{}).Error; err != nil {
+			return err
+		}
 		return tx.Where("id = ? AND space_id = ? AND project_id = ?", targetID, spaceID, projectID).Delete(&deploymentTargetRow{}).Error
 	})
 }
@@ -1162,7 +1200,158 @@ func (s *MySQL) UpdateDeploymentResourceFile(ctx context.Context, spaceID, proje
 }
 
 func (s *MySQL) DeleteDeploymentResourceFile(ctx context.Context, spaceID, projectID, resourceID string) error {
-	result := s.db.WithContext(ctx).Where("id = ? AND space_id = ? AND project_id = ?", resourceID, spaceID, projectID).Delete(&deploymentResourceFileRow{})
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("space_id = ? AND project_id = ? AND global_resource_id = ?", spaceID, projectID, resourceID).Delete(&deploymentResourceOverrideRow{}).Error; err != nil {
+			return err
+		}
+		result := tx.Where("id = ? AND space_id = ? AND project_id = ?", resourceID, spaceID, projectID).Delete(&deploymentResourceFileRow{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+func (s *MySQL) ListDeploymentResourceOverrides(ctx context.Context, spaceID, projectID, targetID string) ([]domain.DeploymentResourceOverride, error) {
+	if _, err := s.GetDeploymentTarget(ctx, spaceID, projectID, targetID); err != nil {
+		return nil, err
+	}
+	var rows []deploymentResourceOverrideRow
+	if err := s.db.WithContext(ctx).Where("space_id = ? AND project_id = ? AND target_id = ?", spaceID, projectID, targetID).Order("sort_order ASC, path ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	result := make([]domain.DeploymentResourceOverride, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, toDeploymentResourceOverride(row))
+	}
+	return result, nil
+}
+
+func (s *MySQL) CreateDeploymentResourceOverride(ctx context.Context, spaceID, projectID, targetID string, input SaveDeploymentResourceOverrideInput) (domain.DeploymentResourceOverride, error) {
+	if err := validateResourceOverrideInput(input); err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	if _, err := s.GetDeploymentTarget(ctx, spaceID, projectID, targetID); err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	globalResourceID := strings.TrimSpace(input.GlobalResourceID)
+	if globalResourceID != "" {
+		var count int64
+		if err := s.db.WithContext(ctx).Model(&deploymentResourceFileRow{}).Where("id = ? AND space_id = ? AND project_id = ?", globalResourceID, spaceID, projectID).Count(&count).Error; err != nil {
+			return domain.DeploymentResourceOverride{}, err
+		}
+		if count == 0 {
+			return domain.DeploymentResourceOverride{}, ErrNotFound
+		}
+	} else {
+		var globalDuplicate int64
+		if err := s.db.WithContext(ctx).Model(&deploymentResourceFileRow{}).Where("space_id = ? AND project_id = ? AND (path = ? OR name = ?)", spaceID, projectID, strings.TrimSpace(input.Path), strings.TrimSpace(input.Name)).Count(&globalDuplicate).Error; err != nil {
+			return domain.DeploymentResourceOverride{}, err
+		}
+		if globalDuplicate > 0 {
+			return domain.DeploymentResourceOverride{}, ErrConflict
+		}
+	}
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&deploymentResourceOverrideRow{}).Where("space_id = ? AND project_id = ? AND target_id = ?", spaceID, projectID, targetID).Count(&count).Error; err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	if count >= 100 {
+		return domain.DeploymentResourceOverride{}, fmt.Errorf("%w: no more than 100 environment resource files are allowed", ErrInvalidInput)
+	}
+	var duplicate int64
+	query := s.db.WithContext(ctx).Model(&deploymentResourceOverrideRow{}).Where("space_id = ? AND project_id = ? AND target_id = ? AND path = ?", spaceID, projectID, targetID, strings.TrimSpace(input.Path))
+	if globalResourceID != "" {
+		query = query.Or("space_id = ? AND project_id = ? AND target_id = ? AND global_resource_id = ?", spaceID, projectID, targetID, globalResourceID)
+	}
+	if err := query.Count(&duplicate).Error; err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	if duplicate > 0 {
+		return domain.DeploymentResourceOverride{}, ErrConflict
+	}
+	id := strings.TrimSpace(input.ID)
+	if id == "" {
+		id = "override-" + uuid.NewString()[:8]
+	}
+	row := deploymentResourceOverrideRow{
+		ID: id, SpaceID: spaceID, ProjectID: projectID, TargetID: targetID, Name: strings.TrimSpace(input.Name), Path: strings.TrimSpace(input.Path),
+		Format: strings.ToLower(strings.TrimSpace(input.Format)), Content: input.Content, APIVersion: strings.TrimSpace(input.APIVersion), Kind: strings.TrimSpace(input.Kind),
+		ResourceName: strings.TrimSpace(input.ResourceName), Namespace: strings.TrimSpace(input.Namespace), SortOrder: input.SortOrder, Version: 1,
+		ReleaseSupported: input.ReleaseSupported, BaseGlobalVersion: input.BaseGlobalVersion, BaseGlobalContent: input.BaseGlobalContent,
+	}
+	if globalResourceID != "" {
+		row.GlobalResourceID = stringPtr(globalResourceID)
+	}
+	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+			return domain.DeploymentResourceOverride{}, ErrConflict
+		}
+		return domain.DeploymentResourceOverride{}, err
+	}
+	return toDeploymentResourceOverride(row), nil
+}
+
+func (s *MySQL) UpdateDeploymentResourceOverride(ctx context.Context, spaceID, projectID, targetID, overrideID string, input SaveDeploymentResourceOverrideInput) (domain.DeploymentResourceOverride, error) {
+	if err := validateResourceOverrideInput(input); err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	var row deploymentResourceOverrideRow
+	if err := s.db.WithContext(ctx).Where("id = ? AND space_id = ? AND project_id = ? AND target_id = ?", overrideID, spaceID, projectID, targetID).First(&row).Error; err != nil {
+		return domain.DeploymentResourceOverride{}, mapDBError(err)
+	}
+	currentGlobalResourceID := ""
+	if row.GlobalResourceID != nil {
+		currentGlobalResourceID = *row.GlobalResourceID
+	}
+	if strings.TrimSpace(input.GlobalResourceID) != currentGlobalResourceID {
+		return domain.DeploymentResourceOverride{}, ErrConflict
+	}
+	if row.GlobalResourceID == nil {
+		var globalDuplicate int64
+		if err := s.db.WithContext(ctx).Model(&deploymentResourceFileRow{}).Where("space_id = ? AND project_id = ? AND (path = ? OR name = ?)", spaceID, projectID, strings.TrimSpace(input.Path), strings.TrimSpace(input.Name)).Count(&globalDuplicate).Error; err != nil {
+			return domain.DeploymentResourceOverride{}, err
+		}
+		if globalDuplicate > 0 {
+			return domain.DeploymentResourceOverride{}, ErrConflict
+		}
+	}
+	var duplicate int64
+	if err := s.db.WithContext(ctx).Model(&deploymentResourceOverrideRow{}).Where("space_id = ? AND project_id = ? AND target_id = ? AND id <> ? AND path = ?", spaceID, projectID, targetID, overrideID, strings.TrimSpace(input.Path)).Count(&duplicate).Error; err != nil {
+		return domain.DeploymentResourceOverride{}, err
+	}
+	if duplicate > 0 {
+		return domain.DeploymentResourceOverride{}, ErrConflict
+	}
+	row.Name = strings.TrimSpace(input.Name)
+	row.Path = strings.TrimSpace(input.Path)
+	row.Format = strings.ToLower(strings.TrimSpace(input.Format))
+	row.Content = input.Content
+	row.APIVersion = strings.TrimSpace(input.APIVersion)
+	row.Kind = strings.TrimSpace(input.Kind)
+	row.ResourceName = strings.TrimSpace(input.ResourceName)
+	row.Namespace = strings.TrimSpace(input.Namespace)
+	row.SortOrder = input.SortOrder
+	row.ReleaseSupported = input.ReleaseSupported
+	if input.BaseGlobalVersion > 0 && row.GlobalResourceID != nil {
+		row.BaseGlobalVersion = input.BaseGlobalVersion
+		row.BaseGlobalContent = input.BaseGlobalContent
+	}
+	row.Version++
+	if err := s.db.WithContext(ctx).Save(&row).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+			return domain.DeploymentResourceOverride{}, ErrConflict
+		}
+		return domain.DeploymentResourceOverride{}, err
+	}
+	return toDeploymentResourceOverride(row), nil
+}
+
+func (s *MySQL) DeleteDeploymentResourceOverride(ctx context.Context, spaceID, projectID, targetID, overrideID string) error {
+	result := s.db.WithContext(ctx).Where("id = ? AND space_id = ? AND project_id = ? AND target_id = ?", overrideID, spaceID, projectID, targetID).Delete(&deploymentResourceOverrideRow{})
 	if result.Error != nil {
 		return result.Error
 	}
@@ -1366,7 +1555,7 @@ func toCluster(row clusterRow) Cluster {
 	}
 }
 func toProject(row projectRow) domain.Project {
-	return domain.Project{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Description: row.Description, RepositoryID: row.RepositoryID, RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch, ClusterID: row.ClusterID, Namespace: row.Namespace, DeployStrategy: row.DeployStrategy, Replicas: row.Replicas, ContainerPort: row.ContainerPort, ImageRepository: row.ImageRepository, RegistryConnectionID: row.RegistryConnectionID, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+	return domain.Project{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Description: row.Description, RepositoryID: row.RepositoryID, RepositoryURL: row.RepositoryURL, DefaultBranch: row.DefaultBranch, AutoMergeEnabled: row.AutoMergeEnabled, AutoMergeTargetID: row.AutoMergeTargetID, ClusterID: row.ClusterID, Namespace: row.Namespace, DeployStrategy: row.DeployStrategy, Replicas: row.Replicas, ContainerPort: row.ContainerPort, ImageRepository: row.ImageRepository, RegistryConnectionID: row.RegistryConnectionID, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 }
 
 func toProjectGitCredential(row projectGitCredentialRow) ProjectGitCredential {
@@ -1464,5 +1653,23 @@ func toDeploymentResourceFile(row deploymentResourceFileRow) domain.DeploymentRe
 		Content: row.Content, APIVersion: row.APIVersion, Kind: row.Kind, ResourceName: row.ResourceName,
 		Namespace: row.Namespace, SortOrder: row.SortOrder, Version: row.Version,
 		ReleaseSupported: row.ReleaseSupported, UpdatedAt: row.UpdatedAt,
+	}
+}
+
+func toDeploymentResourceOverride(row deploymentResourceOverrideRow) domain.DeploymentResourceOverride {
+	format := strings.ToLower(strings.TrimSpace(row.Format))
+	if format == "yml" {
+		format = "yaml"
+	}
+	globalResourceID := ""
+	if row.GlobalResourceID != nil {
+		globalResourceID = *row.GlobalResourceID
+	}
+	return domain.DeploymentResourceOverride{
+		ID: row.ID, ProjectID: row.ProjectID, TargetID: row.TargetID, GlobalResourceID: globalResourceID,
+		Name: row.Name, Path: row.Path, Format: format, Content: row.Content, APIVersion: row.APIVersion,
+		Kind: row.Kind, ResourceName: row.ResourceName, Namespace: row.Namespace, SortOrder: row.SortOrder,
+		Version: row.Version, ReleaseSupported: row.ReleaseSupported, BaseGlobalVersion: row.BaseGlobalVersion,
+		BaseGlobalContent: row.BaseGlobalContent, UpdatedAt: row.UpdatedAt,
 	}
 }

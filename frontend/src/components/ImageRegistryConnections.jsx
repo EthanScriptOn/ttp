@@ -98,7 +98,6 @@ export default function ImageRegistryConnections({ canRead = true, canManage = f
   ]
 
   return <Card className="space-settings-section" title={<span><SafetyCertificateOutlined /> 镜像仓库连接</span>} extra={<Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>{canManage && <Button type="primary" icon={<PlusOutlined />} onClick={startCreate}>添加连接</Button>}</Space>}>
-    <Typography.Paragraph type="secondary">项目只需选择连接；镜像仓库路径由平台按项目自动生成。用户名、密码或 Token 会加密保存在服务端，发布时临时用于推送和 Kubernetes 拉取。</Typography.Paragraph>
     {error && <Alert type="warning" showIcon message={error} />}
     <Table rowKey="id" loading={loading} columns={columns} dataSource={items} pagination={false} locale={{ emptyText: '当前空间还没有镜像仓库连接' }} />
     <Modal title={editing ? '编辑镜像仓库连接' : '添加镜像仓库连接'} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={saving} okText="保存" cancelText="取消" destroyOnHidden>

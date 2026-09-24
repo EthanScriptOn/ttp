@@ -283,6 +283,8 @@ type UpdateProjectInput struct {
 	RepositoryID         *string `json:"-"`
 	Description          *string `json:"description"`
 	DefaultBranch        *string `json:"default_branch"`
+	AutoMergeEnabled     *bool   `json:"auto_merge_enabled"`
+	AutoMergeTargetID    *string `json:"auto_merge_target_id"`
 	ClusterID            *string `json:"cluster_id"`
 	Namespace            *string `json:"namespace"`
 	Replicas             *int    `json:"replicas"`
@@ -336,6 +338,23 @@ type SaveDeploymentResourceFileInput struct {
 	ResourceName     string `json:"-"`
 	Namespace        string `json:"-"`
 	ReleaseSupported bool   `json:"-"`
+}
+
+type SaveDeploymentResourceOverrideInput struct {
+	ID                string `json:"-"`
+	GlobalResourceID  string `json:"global_resource_id"`
+	Name              string `json:"name"`
+	Path              string `json:"path"`
+	Format            string `json:"format"`
+	Content           string `json:"content"`
+	SortOrder         int    `json:"sort_order"`
+	APIVersion        string `json:"-"`
+	Kind              string `json:"-"`
+	ResourceName      string `json:"-"`
+	Namespace         string `json:"-"`
+	ReleaseSupported  bool   `json:"-"`
+	BaseGlobalVersion int    `json:"base_global_version"`
+	BaseGlobalContent string `json:"-"`
 }
 
 type CreateABExperimentInput struct {
@@ -417,6 +436,10 @@ type Store interface {
 	CreateDeploymentResourceFile(ctx context.Context, spaceID, projectID string, input SaveDeploymentResourceFileInput) (domain.DeploymentResourceFile, error)
 	UpdateDeploymentResourceFile(ctx context.Context, spaceID, projectID, resourceID string, input SaveDeploymentResourceFileInput) (domain.DeploymentResourceFile, error)
 	DeleteDeploymentResourceFile(ctx context.Context, spaceID, projectID, resourceID string) error
+	ListDeploymentResourceOverrides(ctx context.Context, spaceID, projectID, targetID string) ([]domain.DeploymentResourceOverride, error)
+	CreateDeploymentResourceOverride(ctx context.Context, spaceID, projectID, targetID string, input SaveDeploymentResourceOverrideInput) (domain.DeploymentResourceOverride, error)
+	UpdateDeploymentResourceOverride(ctx context.Context, spaceID, projectID, targetID, overrideID string, input SaveDeploymentResourceOverrideInput) (domain.DeploymentResourceOverride, error)
+	DeleteDeploymentResourceOverride(ctx context.Context, spaceID, projectID, targetID, overrideID string) error
 	AppendAuditLog(ctx context.Context, entry domain.AuditLog) error
 	ListAuditLogs(ctx context.Context, spaceID string, limit int) ([]domain.AuditLog, error)
 	ListABExperiments(ctx context.Context, spaceID, projectID string) ([]domain.ABExperiment, error)

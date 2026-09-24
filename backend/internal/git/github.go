@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -15,6 +16,7 @@ type GitHubProvider struct {
 }
 
 var _ Provider = (*GitHubProvider)(nil)
+var _ BranchMerger = (*GitHubProvider)(nil)
 
 // GitHubHTTPProvider is an explicit alias for the net/http implementation.
 type GitHubHTTPProvider = GitHubProvider
@@ -241,6 +243,38 @@ func (p *GitHubProvider) GetCommit(ctx context.Context, repositoryID, sha string
 		return Commit{}, fmt.Errorf("get GitHub commit: %w", ErrProviderResponse)
 	}
 	return commit, nil
+}
+
+// MergeBranch uses GitHub's repository merge endpoint. GitHub returns 204
+// when the head is already fully contained in the base; that is a successful
+// idempotent outcome for an automatic post-release merge.
+func (p *GitHubProvider) MergeBranch(ctx context.Context, repositoryID, sourceBranch, targetBranch string) (BranchMergeResult, error) {
+	if err := p.ensure(); err != nil {
+		return BranchMergeResult{}, err
+	}
+	if err := p.remote.checkRepository(repositoryID); err != nil {
+		return BranchMergeResult{}, err
+	}
+	sourceBranch, targetBranch = strings.TrimSpace(sourceBranch), strings.TrimSpace(targetBranch)
+	if sourceBranch == "" || targetBranch == "" {
+		return BranchMergeResult{}, ErrBranchNotFound
+	}
+	var payload struct {
+		SHA     string `json:"sha"`
+		Message string `json:"message"`
+	}
+	endpoint := p.remote.apiURL(append(gitHubRepositorySegments(p.remote.repository), "merges")...)
+	_, err := p.remote.sendJSON(ctx, "merge GitHub branches", http.MethodPost, endpoint, map[string]string{
+		"head": sourceBranch, "base": targetBranch, "commit_message": fmt.Sprintf("Merge %s into %s", sourceBranch, targetBranch),
+	}, &payload)
+	if err != nil {
+		return BranchMergeResult{}, err
+	}
+	message := strings.TrimSpace(payload.Message)
+	if message == "" {
+		message = fmt.Sprintf("已将 %s 合并到 %s", sourceBranch, targetBranch)
+	}
+	return BranchMergeResult{CommitSHA: strings.TrimSpace(payload.SHA), Message: message}, nil
 }
 
 func (p *GitHubProvider) ensure() error {

@@ -70,7 +70,9 @@ func main() {
 		imageBuilder = remoteBuilder
 	}
 	deps := api.Dependencies{Config: cfg, Store: dataStore, Auth: auth.NewManager(cfg.JWTSecret, cfg.JWTMinutes), Git: gitProvider, Release: releaseService, Runtime: runtime.NewService(runtimeProvider), ImageBuilder: imageBuilder, CredentialKey: cfg.GitCredentialKey}
-	server := &http.Server{Addr: cfg.Addr, Handler: api.New(deps).Router(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	// WebSocket terminals are long-lived streams. A finite WriteTimeout would
+	// terminate an otherwise healthy shell after the timeout elapses.
+	server := &http.Server{Addr: cfg.Addr, Handler: api.New(deps).Router(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 0, IdleTimeout: 60 * time.Second}
 
 	go func() {
 		slog.Info("cicd platform listening", "address", cfg.Addr, "runtime_provider", cfg.RuntimeProvider, "image_builder_configured", imageBuilder != nil)

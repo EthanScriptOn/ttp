@@ -27,6 +27,18 @@ type Builder interface {
 	Build(context.Context, Request) (Result, error)
 }
 
+// LogFunc receives one sanitized line while a build is still running. It is
+// intentionally optional so older or third-party builders can continue to
+// implement Builder without changing their public contract.
+type LogFunc func(LogEntry)
+
+// StreamingBuilder is an optional extension implemented by builders that can
+// forward execution output before the build finishes. The control plane uses
+// it to persist and display build logs incrementally.
+type StreamingBuilder interface {
+	BuildWithLogs(context.Context, Request, LogFunc) (Result, error)
+}
+
 // PreflightChecker verifies builder-side credentials before a release enters
 // the running state. Build remains the final authority because registries may
 // apply repository-specific policy only when an upload starts.

@@ -688,6 +688,107 @@ func (p *KubernetesProvider) ExecPodCommand(ctx context.Context, request PodExec
 	return PodExecResult{Output: output}, err
 }
 
+// StreamPodTerminal attaches a real interactive shell to a running Pod. The
+// browser owns the lifetime of ctx; no Kubernetes request timeout is applied
+// here because a terminal is intentionally long-lived.
+func (p *KubernetesProvider) StreamPodTerminal(ctx context.Context, request PodTerminalRequest, stdin io.Reader, stdout, stderr io.Writer, sizes <-chan TerminalSize) error {
+	client, err := p.clientFor(request.ClusterID)
+	if err != nil {
+		return err
+	}
+	if err := validatePodRef(request.PodRef); err != nil {
+		return err
+	}
+	if stdin == nil || stdout == nil {
+		return fmt.Errorf("%w: terminal streams are required", ErrInvalidKubernetesInput)
+	}
+
+	p.mu.RLock()
+	config := p.configs[request.ClusterID]
+	p.mu.RUnlock()
+	if config == nil {
+		return ErrPodExecUnsupported
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pod, err := client.CoreV1().Pods(request.Namespace).Get(ctx, request.Name, metav1.GetOptions{})
+	if err != nil {
+		return mapKubernetesNotFound(err, ErrPodNotFound)
+	}
+	if !p.podBelongsToProject(pod, request.ProjectID) {
+		return ErrPodNotFound
+	}
+	if pod.Status.Phase != corev1.PodRunning {
+		return fmt.Errorf("%w: Pod is not running", ErrInvalidKubernetesInput)
+	}
+	container := strings.TrimSpace(request.Container)
+	if container == "" {
+		if len(pod.Spec.Containers) != 1 {
+			return ErrContainerNotFound
+		}
+		container = pod.Spec.Containers[0].Name
+	}
+	if err := validateContainerName(container); err != nil {
+		return err
+	}
+
+	execURL := client.CoreV1().RESTClient().Post().Resource("pods").Name(request.Name).Namespace(request.Namespace).SubResource("exec").VersionedParams(&corev1.PodExecOptions{
+		Container: container,
+		Command:   []string{"/bin/sh"},
+		Stdin:     true,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       true,
+	}, scheme.ParameterCodec).URL()
+	options := remotecommand.StreamOptions{
+		Stdin:             stdin,
+		Stdout:            stdout,
+		Stderr:            stderr,
+		Tty:               true,
+		TerminalSizeQueue: terminalSizeQueue{ctx: ctx, sizes: sizes},
+	}
+	executor, err := remotecommand.NewWebSocketExecutor(config, http.MethodPost, execURL.String())
+	streamErr := err
+	if err == nil {
+		streamErr = executor.StreamWithContext(ctx, options)
+		if streamErr == nil || ctx.Err() != nil {
+			return streamErr
+		}
+	}
+	// Older API servers and some K3s releases expose exec over SPDY only. Keep
+	// the browser-facing protocol unchanged while falling back to that native
+	// transport when the WebSocket handshake is rejected.
+	spdyExecutor, spdyErr := remotecommand.NewSPDYExecutor(config, http.MethodPost, execURL)
+	if spdyErr != nil {
+		return streamErr
+	}
+	return spdyExecutor.StreamWithContext(ctx, options)
+}
+
+type terminalSizeQueue struct {
+	ctx   context.Context
+	sizes <-chan TerminalSize
+}
+
+func (q terminalSizeQueue) Next() *remotecommand.TerminalSize {
+	if q.sizes == nil {
+		return nil
+	}
+	select {
+	case <-q.ctx.Done():
+		return nil
+	case size, ok := <-q.sizes:
+		if !ok {
+			return nil
+		}
+		if size.Columns == 0 || size.Rows == 0 {
+			return q.Next()
+		}
+		return &remotecommand.TerminalSize{Width: size.Columns, Height: size.Rows}
+	}
+}
+
 // UpdatePodConfig intentionally does not update the Pod object. Pods are
 // disposable workload instances; the owning Deployment template is the
 // persistent source of truth and its template annotation triggers a rollout.
@@ -803,6 +904,9 @@ func (p *KubernetesProvider) GetClusterMetrics(ctx context.Context, clusterID st
 	monitoring, monitoringErr := p.CheckMonitoring(requestContext, clusterID)
 	result.Monitoring = &monitoring
 	if monitoringErr != nil || !monitoring.Available {
+		if monitoringErr == nil && strings.TrimSpace(monitoring.Message) != "" {
+			result.MetricsMessage = monitoring.Message
+		}
 		return result, nil
 	}
 	nodeMetrics, metricsErr := p.nodeMetrics(requestContext, client)
@@ -887,6 +991,9 @@ func (p *KubernetesProvider) GetProjectMetricsInNamespace(ctx context.Context, c
 	monitoring, monitoringErr := p.CheckMonitoring(requestContext, clusterID)
 	result.Monitoring = &monitoring
 	if monitoringErr != nil || !monitoring.Available {
+		if monitoringErr == nil && strings.TrimSpace(monitoring.Message) != "" {
+			result.MetricsMessage = monitoring.Message
+		}
 		return result, nil
 	}
 	result.MetricsAvailable = true

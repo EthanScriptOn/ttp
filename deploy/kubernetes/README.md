@@ -1,6 +1,6 @@
 # Kubernetes 适配要求
 
-TTP 的运行时使用 Kubernetes API 读取项目 Pod、Pod 日志和 Deployment 状态，并在发布时更新已适配的原生资源。TTP 不会自动安装集群插件，也不会把插件缺失伪装成发布成功。
+TTP 的运行时使用 Kubernetes API 读取项目 Pod、Pod 日志和 Deployment 状态，并在发布时更新已适配的原生资源。除下述监控组件外，TTP 不会自动安装集群插件，也不会把插件缺失伪装成发布成功。
 
 ## 发布权限链路
 
@@ -36,6 +36,8 @@ Kubernetes RBAC 只解决 TTP 是否能调用 API；镜像实际由节点或 Pod
 - `kube-state-metrics`：提供 Deployment、ReplicaSet、Pod、Job、PVC 等 Kubernetes 对象状态指标。
 - Kubelet/cAdvisor：由 Prometheus 通过 Kubernetes API 代理抓取容器 CPU、内存和工作负载指标。
 - `APISIX`、Envoy 或其他 Gateway：执行灰度、蓝绿和 A/B 流量切换。
+
+TTP 自己维护的三个监控镜像只使用国内镜像服务，每个组件内置 DaoCloud、国内高校镜像站或国内云厂商的三个候选源。Kubernetes 会先在当前源重试；TTP 连续三次确认 `ErrImagePull` 或 `ImagePullBackOff` 后切换到下一个源，并把当前镜像源、重试次数和最终错误显示在安装进度弹框中。该策略只作用于 TTP 安装的监控组件，不会改写项目或用户 YAML 中的业务镜像地址。
 
 普通 HTTP JSON 请求的 A/B 分流可以使用 `deploy/apisix/ttp-ab-router.lua`。它从请求体读取例如 `$.wx_id`，不要求 JWT，也不信任客户端自带的实验结果 header。这个 Lua 插件需要由集群管理员按 APISIX 的 custom plugin 方式加载；TTP 当前不会自动创建 APISIX route/upstream。
 
