@@ -87,14 +87,33 @@ configure_ttp_proxy() {
   printf 'TTP network proxy: %s (local services bypassed)\n' "$proxy_url"
 }
 
-required=(MYSQL_PASSWORD MYSQL_ROOT_PASSWORD CICD_JWT_SECRET CICD_KUBE_CLUSTER_ID)
+export MYSQL_DATABASE="${MYSQL_DATABASE:-cicd_platform}"
+export MYSQL_USER="${MYSQL_USER:-cicd_app}"
+export MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"
+export MYSQL_PORT="${MYSQL_PORT:-3306}"
+export CICD_ADDR="${CICD_ADDR:-:8790}"
+export CICD_RUNTIME_PROVIDER="${CICD_RUNTIME_PROVIDER:-kubernetes}"
+export CICD_MYSQL_DSN="${CICD_MYSQL_DSN:-${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(${MYSQL_HOST}:${MYSQL_PORT})/${MYSQL_DATABASE}?parseTime=true&charset=utf8mb4&loc=UTC}"
+
+use_docker_mysql=true
+if is_enabled "${TTP_SKIP_DOCKER:-false}"; then
+  use_docker_mysql=false
+fi
+case "$MYSQL_HOST" in
+  127.0.0.1|localhost|::1) ;;
+  *) use_docker_mysql=false ;;
+esac
+
+required=(MYSQL_PASSWORD CICD_JWT_SECRET CICD_KUBE_CLUSTER_ID)
+if [[ "$use_docker_mysql" == true ]]; then
+  required+=(MYSQL_ROOT_PASSWORD)
+fi
 for name in "${required[@]}"; do
   if [[ -z "${!name:-}" ]]; then
     printf '%s must be set before starting TTP\n' "$name" >&2
     exit 2
   fi
 done
-command -v docker >/dev/null 2>&1 || { printf 'docker is required\n' >&2; exit 127; }
 if [[ -n "${GO_BIN:-}" ]]; then
   go_bin="$GO_BIN"
 elif command -v go >/dev/null 2>&1; then
@@ -106,23 +125,20 @@ else
   exit 127
 fi
 command -v pnpm >/dev/null 2>&1 || { printf 'pnpm is required\n' >&2; exit 127; }
-if ! docker_info_ready; then
-  raw_file="$HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
-  if [[ -f "$raw_file" && ! -w "$raw_file" ]]; then
-    printf 'Docker daemon is unavailable because Docker.raw is not writable by %s.\n' "$(id -un)" >&2
-    printf 'Fix it with: sudo chown %s:staff %s\n' "$(id -un)" "$raw_file" >&2
-  else
-    printf 'Docker daemon is unavailable; start Docker Desktop before starting TTP.\n' >&2
+if [[ "$use_docker_mysql" == true ]]; then
+  command -v docker >/dev/null 2>&1 || { printf 'docker is required for local MySQL\n' >&2; exit 127; }
+  if ! docker_info_ready; then
+    raw_file="$HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
+    if [[ -f "$raw_file" && ! -w "$raw_file" ]]; then
+      printf 'Docker daemon is unavailable because Docker.raw is not writable by %s.\n' "$(id -un)" >&2
+      printf 'Fix it with: sudo chown %s:staff %s\n' "$(id -un)" "$raw_file" >&2
+    else
+      printf 'Docker daemon is unavailable; start Docker Desktop before starting TTP.\n' >&2
+    fi
+    exit 1
   fi
-  exit 1
 fi
 
-export MYSQL_DATABASE="${MYSQL_DATABASE:-cicd_platform}"
-export MYSQL_USER="${MYSQL_USER:-cicd_app}"
-export MYSQL_PORT="${MYSQL_PORT:-3306}"
-export CICD_ADDR="${CICD_ADDR:-:8790}"
-export CICD_RUNTIME_PROVIDER="${CICD_RUNTIME_PROVIDER:-kubernetes}"
-export CICD_MYSQL_DSN="${CICD_MYSQL_DSN:-${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(127.0.0.1:${MYSQL_PORT})/${MYSQL_DATABASE}?parseTime=true&charset=utf8mb4&loc=UTC}"
 credential_key_file="${CICD_GIT_CREDENTIAL_KEY_FILE:-$root_dir/.runtime/credential.key}"
 if [[ "$credential_key_file" != /* ]]; then
   credential_key_file="$root_dir/$credential_key_file"
@@ -166,7 +182,11 @@ if [[ -z "$backend_port" || "$backend_port" == "$CICD_ADDR" ]]; then
   backend_port=8790
 fi
 
-docker compose "${compose_args[@]}" up -d --wait mysql
+if [[ "$use_docker_mysql" == true ]]; then
+  docker compose "${compose_args[@]}" up -d --wait mysql
+else
+  printf 'Using MySQL at %s:%s (docker skipped)\n' "$MYSQL_HOST" "$MYSQL_PORT"
+fi
 
 # Apply the optional proxy only after local dependencies are ready. The
 # backend, builder, and their child processes inherit it; the host system does

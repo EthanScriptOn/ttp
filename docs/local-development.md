@@ -89,10 +89,10 @@ RUN_MUTATING_API_CHECK=YES scripts/api-regression.sh
 
 ## 连接信息
 
-应用从宿主机连接 MySQL 时使用 `127.0.0.1`，连接参数为当前终端中的 `MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE` 和 `MYSQL_PORT`。Go MySQL 驱动的 DSN 形态如下，密码只从环境变量读取：
+应用连接 MySQL 的主机与端口由 `MYSQL_HOST`、`MYSQL_PORT` 决定（默认 `127.0.0.1:3306`），其余为 `MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE`。也可直接设置完整的 `CICD_MYSQL_DSN`。Go MySQL 驱动的 DSN 形态如下，密码只从环境变量读取：
 
 ```text
-cicd_app:${MYSQL_PASSWORD}@tcp(127.0.0.1:3306)/cicd_platform?parseTime=true&charset=utf8mb4&loc=UTC
+cicd_app:${MYSQL_PASSWORD}@tcp(${MYSQL_HOST}:${MYSQL_PORT})/${MYSQL_DATABASE}?parseTime=true&charset=utf8mb4&loc=UTC
 ```
 
 Compose 不预置空间、集群、项目、环境或 token。后端第一次连接空库时只初始化固定的默认管理员；已有用户数据不会被启动过程覆盖。
